@@ -1,0 +1,7 @@
+{"case":"cli-server-current","valid":true,"producer":"paperboat-server","consumer":"paperboat-cli","interface":"server_http","offered":["phase0-current"],"selected":"phase0-current"}
+{"case":"cli-helper-v1","valid":true,"producer":"paperboat-helper","consumer":"paperboat-cli","interface":"helper_application","offered":["1.0"],"selected":"1.0"}
+{"case":"helper-tunnel-frp-pinned","valid":true,"producer":"paperboat-helper","consumer":"paperboat-tunnel","interface":"frp_wire","offered":["v0.70.0@7b6e01f04f286632f0d23715aa17a3bc41234b5c"],"selected":"v0.70.0@7b6e01f04f286632f0d23715aa17a3bc41234b5c"}
+{"case":"helper-major-v2-rejected","valid":false,"producer":"paperboat-helper","consumer":"paperboat-cli","interface":"helper_application","offered":["2.0"],"error":"protocol_incompatible","mutated":false}
+{"case":"edge-control-minor-unknown-rejected","valid":false,"producer":"paperboat-server","consumer":"paperboat-tunnel","interface":"edge_control","offered":["1.1"],"error":"protocol_incompatible","mutated":false}
+{"case":"frp-unpinned-rejected","valid":false,"producer":"paperboat-helper","consumer":"paperboat-tunnel","interface":"frp_wire","offered":["v0.70.1@unknown"],"error":"protocol_incompatible","mutated":false}
+{"case":"required-capability-missing","valid":false,"producer":"paperboat-helper","consumer":"paperboat-cli","interface":"helper_application","offered":["1.0"],"missing_capability":"terminal.v1","error":"capability_required","mutated":false}

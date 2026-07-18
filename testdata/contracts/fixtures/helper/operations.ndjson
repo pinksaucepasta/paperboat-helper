@@ -1,0 +1,9 @@
+{"case":"upload-valid","valid":true,"operation":"upload","input":{"name":"diagram.png","mime":"image/png","bytes":1024,"sha256":"dffd6021bb2bd72cdd1e4a89121684b583227032de5366b94b10e33a7e6f85a0"}}
+{"case":"upload-traversal","valid":false,"operation":"upload","error":"invalid_path","input":{"name":"../secret.png","mime":"image/png","bytes":10}}
+{"case":"upload-mime-mismatch","valid":false,"operation":"upload","error":"mime_mismatch","input":{"name":"image.png","mime":"image/png","detected":"application/zip","bytes":10}}
+{"case":"preview-register","valid":true,"operation":"preview.register","input":{"logical_name":"web","target_host":"127.0.0.1","target_port":3000,"public_acknowledgement":true}}
+{"case":"preview-private-request","valid":false,"operation":"preview.register","error":"unsupported_preview_policy","input":{"logical_name":"web","target_port":3000,"access":"private"}}
+{"case":"activity-valid","valid":true,"operation":"activity.report","input":{"environment_id":"env_test_01","source_id":"att_00000001","source":"terminal_input","sequence":4,"occurred_at":"2026-01-01T00:00:00Z","observed_at":"2026-01-01T00:00:01Z"}}
+{"case":"activity-open-pty","valid":false,"operation":"activity.report","error":"invalid_activity_source","input":{"environment_id":"env_test_01","source_id":"ses_00000001","source":"pty_open","sequence":1,"occurred_at":"2026-01-01T00:00:00Z","observed_at":"2026-01-01T00:00:01Z"}}
+{"case":"config-stale-revision","valid":false,"operation":"config.apply","error":"config_revision_conflict","input":{"assignment_id":"asg_test_01","expected_revision":"rev_1","observed_revision":"rev_2"}}
+{"case":"readiness-degraded","valid":true,"operation":"readiness","result":{"live":true,"version":"1.0.0","checked_at":"2026-01-01T00:00:00Z","capabilities":{"terminal.v1":{"state":"ready"},"preview.public.v1":{"state":"degraded","reason":"target_unhealthy","retry_after_ms":1000}}}}

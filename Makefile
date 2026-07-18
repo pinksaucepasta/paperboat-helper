@@ -8,7 +8,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$(VERSION) -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: build check clean fmt fmt-check generate race test tidy verify-toolchain vet
+.PHONY: build check clean contracts fmt fmt-check generate race test tidy verify-toolchain vet
+
+contracts:
+	@./testdata/contracts/validate.sh
 
 verify-toolchain:
 	@test "$$(GOTOOLCHAIN=local go env GOVERSION)" = "go$(GO_VERSION)" || { echo "required Go $(GO_VERSION), found $$(GOTOOLCHAIN=local go env GOVERSION)" >&2; exit 1; }
@@ -32,7 +35,7 @@ race:
 vet:
 	$(GO) vet ./...
 
-check: verify-toolchain fmt-check vet test build
+check: verify-toolchain contracts fmt-check vet test build
 
 generate:
 	$(GO) generate ./...

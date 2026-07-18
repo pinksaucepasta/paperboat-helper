@@ -1,0 +1,7 @@
+{"case":"hello-valid","valid":true,"frame":{"type":"hello","request_id":"req_0001","version":"1.0","payload":{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}}}
+{"case":"request-valid","valid":true,"frame":{"type":"request","request_id":"req_0002","version":"1.0","operation_id":"op_00000001","capability":"terminal.v1","deadline_ms":30000,"payload":{"action":"list"}}}
+{"case":"cancel-valid","valid":true,"frame":{"type":"cancel","request_id":"req_0003","version":"1.0","operation_id":"op_00000001"}}
+{"case":"missing-operation-id","valid":false,"error":"invalid_frame","frame":{"type":"request","request_id":"req_0004","version":"1.0","capability":"terminal.v1","deadline_ms":30000,"payload":{}}}
+{"case":"oversized-deadline","valid":false,"error":"invalid_deadline","frame":{"type":"request","request_id":"req_0005","version":"1.0","operation_id":"op_00000005","capability":"terminal.v1","deadline_ms":300001,"payload":{}}}
+{"case":"unknown-frame-type","valid":false,"error":"unsupported_message_type","frame":{"type":"future","request_id":"req_0006","version":"1.0"}}
+{"case":"missing-capability","valid":false,"error":"capability_required","frame":{"type":"request","request_id":"req_0007","version":"1.0","operation_id":"op_00000007","deadline_ms":30000,"payload":{}}}

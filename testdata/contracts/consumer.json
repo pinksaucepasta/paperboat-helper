@@ -1,0 +1,1 @@
+{"repository":"paperboat-helper","contract_version":"1.0.0","canonical_source":"contracts/manifest.json","copied_manifest_sha256":"4937758804f989878a26dae4ee0788df4e19556e130ef27c83cdcd79d7ca7c4f","supported":{"fixture_manifest":"1","helper_protocol":"1.0-1.0","connector_protocol":"1.0-1.0"},"last_review":"phase-1-draft"}
