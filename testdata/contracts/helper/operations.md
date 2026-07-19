@@ -43,6 +43,10 @@ and health checks are not activity. Events are deduplicated by source identity a
 older sequences are rejected. Batches contain at most 100 events or 64 KiB. Events older
 than five minutes are recorded for diagnostics but cannot extend idle policy.
 
+`agent_signal` uses the canonical Ed25519 activity-signal envelope and binds the exact event,
+helper identity, and key ID. A plain event with that source, a tampered envelope, wrong helper,
+unknown key, or replay is rejected before it can extend idle state.
+
 ## Config application
 
 `config.apply.v1` is advertised for hosted profiles and for BYOD only when the server has

@@ -8,7 +8,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$(VERSION) -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: build check clean contracts fmt fmt-check generate race test tidy verify-toolchain vet
+.PHONY: build check clean complete contracts fmt fmt-check generate integration platform race security soak test tidy verify-toolchain vet
 
 contracts:
 	@./testdata/contracts/validate.sh
@@ -32,10 +32,26 @@ test:
 race:
 	$(GO) test -race ./...
 
+integration: verify-toolchain contracts
+	$(GO) test -race ./internal/connector/testharness ./internal/process ./internal/preview ./internal/runtime ./internal/server ./internal/upload
+
+platform: verify-toolchain
+	$(GO) test -race ./internal/process ./internal/pty ./internal/service ./internal/session ./internal/store ./internal/update
+
+security: verify-toolchain contracts
+	$(GO) test -race ./internal/auth ./internal/connector ./internal/identity ./internal/protocol ./internal/server ./internal/update ./internal/upload
+
+soak: verify-toolchain
+	$(GO) test -race ./internal/connector/testharness -run TestRepeatedConnectorLifecycleRetainsNoClients -count=5
+	$(GO) test -race ./internal/runtime -run 'TestRuntimeCanBeConstructedStartedAndStoppedRepeatedly|TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState' -count=5
+	$(GO) test -race ./internal/session -run TestConfiguredSessionCapacityRemainsBoundedAndShutsDownCleanly -count=5
+
 vet:
 	$(GO) vet ./...
 
 check: verify-toolchain contracts fmt-check vet test build
+
+complete: check race integration platform security soak
 
 generate:
 	$(GO) generate ./...

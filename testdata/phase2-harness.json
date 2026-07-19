@@ -1,0 +1,18 @@
+{
+  "profile": "byod",
+  "state_root": "/tmp/paperboat-helper-phase2/state",
+  "workspace_root": "/tmp/paperboat-helper-phase2/workspace",
+  "listen_address": "127.0.0.1:18081",
+  "shell_path": "/bin/sh",
+  "shell_args": ["-l"],
+  "shell_environment": ["PATH=/usr/bin:/bin", "TERM=xterm-256color"],
+  "origin_patterns": ["control.paperboat.test"],
+  "issuer": "https://api.paperboat.test",
+  "environment_id": "env_test_01",
+  "helper_id": "hlp_test_01",
+  "public_keys": {
+    "test-key-1": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+  },
+  "revoked_jtis": [],
+  "config_apply_proof": false
+}

@@ -12,6 +12,13 @@ the recorded decision. Reuse with different data, a stale generation, wrong node
 revoked environment fails before a connector is accepted. Replacing a connector advances
 generation, drains the old connection, detaches its routes, and rejects late traffic from it.
 
+Admission responses include the assigned `edge_node_id`, an authenticated frps
+`edge_endpoint`, and at least one operation-bound local route/proxy descriptor. The helper
+configures only those descriptors and never derives endpoint or public-host values. After
+login, readiness is reported only after every handed-off proxy is `running`. The edge owns
+the frp `run_id`; same-run reconnects resume the generation only while its admission remains
+unexpired and unrevoked. A new generation requires a fresh single-use admission.
+
 Route attachment requires an admitted live connector with matching environment, generation,
 edge node, route revision, and protocol. Preview host ownership is exclusive. Duplicate
 attachment is idempotent; another environment receives `route_conflict` without disclosing
