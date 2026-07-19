@@ -141,7 +141,7 @@ func (s *HTTPSAdmissionSource) Admission(ctx context.Context) (Admission, error)
 	if claims.JTI == "" || claims.EdgePool != s.config.EdgePool || !expires.After(s.config.Clock.Now()) {
 		return Admission{}, ErrAdmissionSourceInvalid
 	}
-	return Admission{JTI: claims.JTI, Credential: document.Credential, EnvironmentID: document.EnvironmentID, HelperID: document.HelperID, Generation: document.Generation, EdgePool: claims.EdgePool, EdgeNodeID: claims.EdgeNodeID, Endpoint: document.EdgeEndpoint, Routes: append([]RouteHandoff(nil), document.Routes...), ProtocolVersion: document.ProtocolVersion, ExpiresAt: expires}, nil
+	return Admission{OperationID: document.OperationID, JTI: claims.JTI, Credential: document.Credential, EnvironmentID: document.EnvironmentID, HelperID: document.HelperID, Generation: document.Generation, EdgePool: claims.EdgePool, EdgeNodeID: claims.EdgeNodeID, Endpoint: document.EdgeEndpoint, Routes: append([]RouteHandoff(nil), document.Routes...), ProtocolVersion: document.ProtocolVersion, ExpiresAt: expires}, nil
 }
 
 func strictJSON(data []byte, target any) error {

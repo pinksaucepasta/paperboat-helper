@@ -74,7 +74,7 @@ func (d *fakeDialer) Dial(ctx context.Context, transport Transport, admission Ad
 	return connection, nil
 }
 func admission(generation uint64, jti string, now time.Time) Admission {
-	return Admission{JTI: jti, Credential: "test-only-connector-admission-credential", EnvironmentID: "env", HelperID: "helper", Generation: generation, EdgePool: "default", EdgeNodeID: "edge_1", Endpoint: EdgeEndpoint{Host: "edge.test", Port: 7000}, Routes: []RouteHandoff{{RouteID: "route_1", Revision: 1, Kind: "helper_https_wss", PublicHost: "helper.test", ProxyName: "helper_1", LocalTarget: RouteTarget{Host: "127.0.0.1", Port: 8080}}}, ProtocolVersion: "1.0", ExpiresAt: now.Add(time.Minute)}
+	return Admission{OperationID: "op_admit_0001", JTI: jti, Credential: "test-only-connector-admission-credential", EnvironmentID: "env", HelperID: "helper", Generation: generation, EdgePool: "default", EdgeNodeID: "edge_1", Endpoint: EdgeEndpoint{Host: "edge.test", Port: 7000}, Routes: []RouteHandoff{{RouteID: "route_1", Revision: 1, Kind: "helper_https_wss", PublicHost: "helper.test", ProxyName: "helper_1", LocalTarget: RouteTarget{Host: "127.0.0.1", Port: 8080}}}, ProtocolVersion: "1.0", ExpiresAt: now.Add(time.Minute)}
 }
 func manager(t *testing.T, dialer Dialer, now time.Time) *Manager {
 	t.Helper()

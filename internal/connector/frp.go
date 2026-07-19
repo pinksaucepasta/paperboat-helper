@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -146,6 +147,14 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 	}
 	port := int(admission.Endpoint.Port)
 	common := &v1.ClientCommonConfig{ServerAddr: admission.Endpoint.Host, ServerPort: port, LoginFailExit: boolPtr(true), Auth: v1.AuthClientConfig{Method: v1.AuthMethodToken, Token: admission.Credential}}
+	// frp hashes Auth.Token before Login reaches the server plugin. The private
+	// loopback Paperboat hook needs the signed credential itself for admission;
+	// it removes this metadata before frps stores the authenticated session.
+	handoff, err := admissionMetadata(admission)
+	if err != nil {
+		return nil, err
+	}
+	common.Metadatas = map[string]string{"paperboat.admission": handoff}
 	if transport == QUIC {
 		common.Transport.Protocol = "quic"
 	} else {
@@ -156,6 +165,23 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 		return nil, err
 	}
 	return &nativeFRPClient{service: service}, nil
+}
+
+func admissionMetadata(admission Admission) (string, error) {
+	handoff, err := json.Marshal(struct {
+		OperationID   string         `json:"operation_id"`
+		Credential    string         `json:"credential"`
+		EnvironmentID string         `json:"environment_id"`
+		HelperID      string         `json:"helper_id"`
+		Generation    uint64         `json:"connector_generation"`
+		EdgePool      string         `json:"edge_pool"`
+		EdgeNodeID    string         `json:"edge_node_id"`
+		Routes        []RouteHandoff `json:"routes"`
+	}{admission.OperationID, admission.Credential, admission.EnvironmentID, admission.HelperID, admission.Generation, admission.EdgePool, admission.EdgeNodeID, admission.Routes})
+	if err != nil || len(handoff) > 64<<10 {
+		return "", ErrFRPInvalid
+	}
+	return string(handoff), nil
 }
 
 func boolPtr(value bool) *bool { return &value }

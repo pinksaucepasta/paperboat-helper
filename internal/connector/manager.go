@@ -24,6 +24,7 @@ var (
 )
 
 type Admission struct {
+	OperationID     string
 	JTI             string
 	Credential      string
 	EnvironmentID   string
@@ -141,7 +142,7 @@ func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, erro
 			delete(m.used, jti)
 		}
 	}
-	if admission.JTI == "" || len(admission.Credential) < 32 || len(admission.Credential) > 8192 || admission.EnvironmentID != m.config.EnvironmentID || admission.HelperID != m.config.HelperID || admission.EdgePool != m.config.EdgePool || !identifierPattern.MatchString(admission.EdgeNodeID) || admission.ProtocolVersion != "1.0" || admission.Generation == 0 || !admission.ExpiresAt.After(now) || !validEndpoint(admission.Endpoint) || !validRoutes(admission.Routes) {
+	if len(admission.OperationID) < 8 || len(admission.OperationID) > 128 || admission.JTI == "" || len(admission.Credential) < 32 || len(admission.Credential) > 8192 || admission.EnvironmentID != m.config.EnvironmentID || admission.HelperID != m.config.HelperID || admission.EdgePool != m.config.EdgePool || !identifierPattern.MatchString(admission.EdgeNodeID) || admission.ProtocolVersion != "1.0" || admission.Generation == 0 || !admission.ExpiresAt.After(now) || !validEndpoint(admission.Endpoint) || !validRoutes(admission.Routes) {
 		return Result{}, ErrAdmissionInvalid
 	}
 	if _, used := m.used[admission.JTI]; used {

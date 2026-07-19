@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -95,6 +96,32 @@ func TestNativeFRPClientBuildsFromAuthenticatedHandoff(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("nil native client")
+	}
+}
+
+func TestAdmissionMetadataCarriesExactHandoffOnce(t *testing.T) {
+	admission := admission(1, "jti_metadata", time.Now())
+	metadata, err := admissionMetadata(admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		OperationID   string         `json:"operation_id"`
+		Credential    string         `json:"credential"`
+		EnvironmentID string         `json:"environment_id"`
+		HelperID      string         `json:"helper_id"`
+		Generation    uint64         `json:"connector_generation"`
+		EdgeNodeID    string         `json:"edge_node_id"`
+		Routes        []RouteHandoff `json:"routes"`
+	}
+	if err := json.Unmarshal([]byte(metadata), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.OperationID != admission.OperationID || decoded.Credential != admission.Credential || decoded.EnvironmentID != admission.EnvironmentID || decoded.HelperID != admission.HelperID || decoded.Generation != admission.Generation || decoded.EdgeNodeID != admission.EdgeNodeID || len(decoded.Routes) != len(admission.Routes) {
+		t.Fatalf("metadata = %+v", decoded)
+	}
+	if len(metadata) > 64<<10 {
+		t.Fatal("metadata is unbounded")
 	}
 }
 
