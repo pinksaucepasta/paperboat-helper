@@ -8,7 +8,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$(VERSION) -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: build check clean complete contracts fmt fmt-check generate integration platform race security soak test tidy verify-toolchain vet
+.PHONY: build check clean complete contracts crash fmt fmt-check generate integration platform race security soak test tidy verify-toolchain vet
 
 contracts:
 	@./testdata/contracts/validate.sh
@@ -38,6 +38,11 @@ integration: verify-toolchain contracts
 platform: verify-toolchain
 	$(GO) test -race ./internal/process ./internal/pty ./internal/service ./internal/session ./internal/store ./internal/update
 
+crash: verify-toolchain
+	$(GO) test -race ./internal/store -run 'TestProcessCrashBefore(MigrationCommitReopensCleanly|AppendCommitPreservesAcknowledgedSequence)' -count=20
+	$(GO) test -race ./internal/update -run 'TestRecovery(MatrixPreservesOrRestoresVerifiedArtifact|RejectsInvalidJournalWithoutDeletingUnexplainedState)' -count=10
+	$(GO) test -race ./internal/upload -run 'TestCleanup(ResumesInterruptedTombstoneStates|PreservesAmbiguousHardLinkedDeviceAndDuplicateMetadata)' -count=10
+
 security: verify-toolchain contracts
 	$(GO) test -race ./internal/auth ./internal/connector ./internal/identity ./internal/protocol ./internal/server ./internal/update ./internal/upload
 
@@ -51,7 +56,7 @@ vet:
 
 check: verify-toolchain contracts fmt-check vet test build
 
-complete: check race integration platform security soak
+complete: check race integration platform crash security soak
 
 generate:
 	$(GO) generate ./...

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -173,4 +174,90 @@ func TestInterruptedInitialMigrationRollsBackAndReopensCleanly(t *testing.T) {
 	if err != nil || len(sessions) != 1 {
 		t.Fatalf("sessions=%#v err=%v", sessions, err)
 	}
+}
+
+func TestProcessCrashBeforeMigrationCommitReopensCleanly(t *testing.T) {
+	if os.Getenv("PAPERBOAT_STORE_CRASH_MODE") == "migration" {
+		crashStoreAt(t, "migration_before_commit")
+	}
+	root := filepath.Join(t.TempDir(), "state")
+	runCrashChild(t, "TestProcessCrashBeforeMigrationCommitReopensCleanly", "migration", root)
+
+	state, err := Open(context.Background(), Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	var version int
+	if err := state.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != CurrentVersion {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessCrashBeforeAppendCommitPreservesAcknowledgedSequence(t *testing.T) {
+	if os.Getenv("PAPERBOAT_STORE_CRASH_MODE") == "append" {
+		crashStoreAt(t, "append_before_commit")
+	}
+	state, root := openStore(t, nil)
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 0, []byte("old"), 64); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runCrashChild(t, "TestProcessCrashBeforeAppendCommitPreservesAcknowledgedSequence", "append", root)
+
+	state, err := Open(context.Background(), Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	sessions, err := state.Sessions(context.Background())
+	if err != nil || len(sessions) != 1 || sessions[0].LatestSequence != 3 {
+		t.Fatalf("sessions=%#v err=%v", sessions, err)
+	}
+	events, earliest, latest, err := state.Replay(context.Background(), "ses_1", 0, 0)
+	if err != nil || earliest != 0 || latest != 3 || len(events) != 1 || string(events[0].Data) != "old" {
+		t.Fatalf("events=%#v bounds=(%d,%d) err=%v", events, earliest, latest, err)
+	}
+}
+
+func runCrashChild(t *testing.T, testName, mode, root string) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	command.Env = append(os.Environ(), "PAPERBOAT_STORE_CRASH_MODE="+mode, "PAPERBOAT_STORE_CRASH_ROOT="+root)
+	err := command.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 91 {
+		t.Fatalf("crash child mode=%s err=%v", mode, err)
+	}
+}
+
+func crashStoreAt(t *testing.T, crashPoint string) {
+	t.Helper()
+	root := os.Getenv("PAPERBOAT_STORE_CRASH_ROOT")
+	hook := func(point string) error {
+		if point == crashPoint {
+			os.Exit(91)
+		}
+		return nil
+	}
+	state, err := Open(context.Background(), Config{Root: root, FailureHook: hook})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if crashPoint == "append_before_commit" {
+		if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 3, []byte("new"), 64); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatalf("crash point %q was not reached", crashPoint)
 }
