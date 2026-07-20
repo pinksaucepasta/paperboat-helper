@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/buildinfo"
+	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
 )
 
 const usage = `paperboat-helper is the Paperboat remote environment runtime.
@@ -13,10 +16,11 @@ const usage = `paperboat-helper is the Paperboat remote environment runtime.
 Usage:
   paperboat-helper version
   paperboat-helper help
+  paperboat-helper enroll <absolute-config-path>
   paperboat-helper phase2-harness <absolute-config-path>
 
-The phase2-harness command is for deterministic fake-peer runtime evidence only.
-Production runtime bootstrap remains control-plane owned.`
+The enroll command exchanges a server-issued grant and persists helper identity.
+The phase2-harness command is for deterministic fake-peer runtime evidence only.`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -41,6 +45,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 			writeError(stderr, err)
 			return 1
 		}
+		return 0
+	}
+	if args[0] == "enroll" {
+		if len(args) != 2 {
+			writeError(stderr, fmt.Errorf("enroll requires one absolute config path"))
+			return 2
+		}
+		config, err := enrollment.LoadConfig(args[1])
+		if err != nil {
+			writeError(stderr, err)
+			return 1
+		}
+		client, _ := enrollment.NewClient(nil, 15*time.Second)
+		result, err := client.Enroll(context.Background(), config)
+		if err != nil {
+			writeError(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "enrolled helper %s in environment %s\n", result.HelperID, result.EnvironmentID)
 		return 0
 	}
 

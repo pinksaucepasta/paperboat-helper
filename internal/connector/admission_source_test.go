@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,12 @@ import (
 type identityTokenFunc func(context.Context) (string, error)
 
 func (f identityTokenFunc) Token(ctx context.Context) (string, error) { return f(ctx) }
+
+type helperProofFunc func(context.Context, string, string, string, []byte) ([]byte, error)
+
+func (f helperProofFunc) Proof(ctx context.Context, operationID, method, path string, body []byte) ([]byte, error) {
+	return f(ctx, operationID, method, path, body)
+}
 
 type credentialVerifierFunc func(context.Context, string, auth.Policy) (auth.Claims, error)
 
@@ -35,12 +42,21 @@ func admissionSourceFor(t *testing.T, responseBody func(admissionRequest) string
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var operation atomic.Uint64
 	source, err := NewHTTPSAdmissionSource(AdmissionSourceConfig{
-		Endpoint: "https://api.test/v1/connector-admission", AllowedHosts: []string{"api.test"}, Tokens: identityTokenFunc(func(context.Context) (string, error) { return "helper-identity", nil }), Verifier: verifier,
+		Endpoint: "https://api.test/v1/connectors/admission", AllowedHosts: []string{"api.test"}, Tokens: identityTokenFunc(func(context.Context) (string, error) { return "helper-identity", nil }), Proofs: helperProofFunc(func(_ context.Context, operationID, method, path string, body []byte) ([]byte, error) {
+			if operationID == "" || method != http.MethodPost || path != "/v1/connectors/admission" || len(body) == 0 {
+				return nil, errors.New("incorrect proof input")
+			}
+			return []byte("signed-helper-proof"), nil
+		}), Verifier: verifier,
 		Clock: fixedClock{now}, Issuer: "https://api.test", EnvironmentID: "env", HelperID: "helper", EdgePool: "default",
 		OperationID: func() (string, error) { return "op_admit_000" + string(rune('0'+operation.Add(1))), nil },
 		Transport: httpRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
 			if request.Header.Get("Authorization") != "Bearer helper-identity" {
 				return nil, errors.New("missing helper identity")
+			}
+			proof, err := base64.RawURLEncoding.DecodeString(request.Header.Get("X-Paperboat-Helper-Proof"))
+			if err != nil || string(proof) != "signed-helper-proof" {
+				return nil, errors.New("missing helper proof")
 			}
 			var input admissionRequest
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
@@ -112,7 +128,7 @@ func TestHTTPSAdmissionSourceRejectsMalformedCrossBindingAndReplay(t *testing.T)
 }
 
 func TestHTTPSAdmissionSourceRejectsUnsafeEndpointAndOversizedResponse(t *testing.T) {
-	base := AdmissionSourceConfig{AllowedHosts: []string{"api.test"}, Tokens: identityTokenFunc(func(context.Context) (string, error) { return "token", nil }), Verifier: credentialVerifierFunc(func(context.Context, string, auth.Policy) (auth.Claims, error) { return auth.Claims{}, nil }), Clock: fixedClock{time.Now()}, Issuer: "https://api.test", EnvironmentID: "env", HelperID: "helper", EdgePool: "default", OperationID: func() (string, error) { return "op_admit_0001", nil }}
+	base := AdmissionSourceConfig{AllowedHosts: []string{"api.test"}, Tokens: identityTokenFunc(func(context.Context) (string, error) { return "token", nil }), Proofs: helperProofFunc(func(context.Context, string, string, string, []byte) ([]byte, error) { return []byte("proof"), nil }), Verifier: credentialVerifierFunc(func(context.Context, string, auth.Policy) (auth.Claims, error) { return auth.Claims{}, nil }), Clock: fixedClock{time.Now()}, Issuer: "https://api.test", EnvironmentID: "env", HelperID: "helper", EdgePool: "default", OperationID: func() (string, error) { return "op_admit_0001", nil }}
 	for _, endpoint := range []string{"http://api.test/admit", "https://other.test/admit", "https://user@api.test/admit"} {
 		config := base
 		config.Endpoint = endpoint

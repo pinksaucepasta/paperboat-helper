@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,6 +22,9 @@ var ErrAdmissionSourceInvalid = errors.New("invalid connector admission source")
 type IdentityTokenSource interface {
 	Token(context.Context) (string, error)
 }
+type HelperProofSource interface {
+	Proof(context.Context, string, string, string, []byte) ([]byte, error)
+}
 type CredentialVerifier interface {
 	Verify(context.Context, string, auth.Policy) (auth.Claims, error)
 }
@@ -29,6 +33,7 @@ type AdmissionSourceConfig struct {
 	Endpoint         string
 	AllowedHosts     []string
 	Tokens           IdentityTokenSource
+	Proofs           HelperProofSource
 	Verifier         CredentialVerifier
 	Clock            Clock
 	Issuer           string
@@ -73,7 +78,7 @@ func NewHTTPSAdmissionSource(config AdmissionSourceConfig) (*HTTPSAdmissionSourc
 		config.MaxResponseBytes = 64 << 10
 	}
 	endpoint, err := url.Parse(config.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.User != nil || endpoint.Hostname() == "" || endpoint.Fragment != "" || config.Tokens == nil || config.Verifier == nil || config.Clock == nil || config.Issuer == "" || config.EnvironmentID == "" || config.HelperID == "" || config.EdgePool == "" || config.OperationID == nil || config.MaxResponseBytes < 1 || config.MaxResponseBytes > 64<<10 {
+	if err != nil || endpoint.Scheme != "https" || endpoint.User != nil || endpoint.Hostname() == "" || endpoint.Fragment != "" || config.Tokens == nil || config.Proofs == nil || config.Verifier == nil || config.Clock == nil || config.Issuer == "" || config.EnvironmentID == "" || config.HelperID == "" || config.EdgePool == "" || config.OperationID == nil || config.MaxResponseBytes < 1 || config.MaxResponseBytes > 64<<10 {
 		return nil, ErrAdmissionSourceInvalid
 	}
 	allowed := false
@@ -105,11 +110,16 @@ func (s *HTTPSAdmissionSource) Admission(ctx context.Context) (Admission, error)
 	}
 	payload := admissionRequest{operationID, s.config.EnvironmentID, s.config.HelperID, s.config.EdgePool, "1.0"}
 	encoded, _ := json.Marshal(payload)
+	proof, err := s.config.Proofs.Proof(ctx, operationID, http.MethodPost, s.endpoint.Path, encoded)
+	if err != nil || len(proof) == 0 || len(proof) > 16<<10 {
+		return Admission{}, errors.Join(ErrAdmissionSourceInvalid, err)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint.String(), bytes.NewReader(encoded))
 	if err != nil {
 		return Admission{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Paperboat-Helper-Proof", base64.RawURLEncoding.EncodeToString(proof))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	response, err := s.client.Do(request)

@@ -31,6 +31,22 @@ directory and file modes are `0700` and `0600`. Symlinks, hard links, non-regula
 duplicate JSON keys, and mismatched JWK thumbprints are refused. Rotation uses an expected
 key ID and atomic file replacement; private seed bytes never enter diagnostics or logs.
 
+## Control-Plane Enrollment
+
+`paperboat-helper enroll <absolute-config-path>` exchanges a short-lived, single-use
+server grant for a helper identity bound to the persisted Ed25519 public key. The private
+configuration file must be a regular, non-symlink file with no group or world permissions
+and contains `control_url`, absolute `state_root`, and `enrollment_credential`. An optional
+absolute `control_ca_file` adds a bounded PEM trust anchor for private deployments without
+disabling certificate or hostname verification. The control URL must use HTTPS. Redirects,
+oversized responses, unknown or duplicate JSON
+fields, and trailing data fail closed.
+
+Successful enrollment atomically writes `runtime-identity.json` with mode `0600`. Runtime
+credential reads require an unexpired identity whose `key_id` still matches
+`helper-identity.json`; key rotation therefore requires a new enrollment. Neither the
+grant nor the resulting bearer credential is printed by the command.
+
 BYOD never advertises hosted lifecycle. Config application additionally requires an active
 assignment and proof of the current warning consent. Optional capability failure degrades
 only that readiness entry; liveness reports only whether the process can answer.
@@ -78,5 +94,5 @@ fake-peer inputs. No private key or reusable bearer credential belongs in this f
 
 The harness verifies operation credentials against exact frozen policies and starts the
 real durable store, PTY/session manager, protocol server, upload handler, preview registry
-and monitor, activity collector, health endpoint, and bounded shutdown path. Production
-bootstrap remains Phase 4-owned.
+and monitor, activity collector, health endpoint, and bounded shutdown path. It remains
+separate from the production `enroll` command and does not consume its runtime identity.
