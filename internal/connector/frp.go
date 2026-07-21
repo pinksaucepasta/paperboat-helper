@@ -52,7 +52,10 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 	if err != nil {
 		return nil, err
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	// The caller's context bounds dial/readiness only. A successful FRP control
+	// session must outlive Accept, whose context is canceled immediately after
+	// admission completes; Connection.Close owns the established lifetime.
+	runCtx, cancel := context.WithCancel(context.Background())
 	c := &frpConnection{client: client, cancel: cancel, done: make(chan error, 1)}
 	go func() { c.done <- client.Run(runCtx) }()
 	deadline := time.NewTimer(d.config.ReadyTimeout)
@@ -145,7 +148,7 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 	if err := configSource.ReplaceAll(proxies, nil); err != nil {
 		return nil, err
 	}
-	port := int(admission.Endpoint.Port)
+	port := connectorPort(admission.Endpoint, transport)
 	common := &v1.ClientCommonConfig{ServerAddr: admission.Endpoint.Host, ServerPort: port, LoginFailExit: boolPtr(true), Auth: v1.AuthClientConfig{Method: v1.AuthMethodToken, Token: admission.Credential}}
 	// frp hashes Auth.Token before Login reaches the server plugin. The private
 	// loopback Paperboat hook needs the signed credential itself for admission;
@@ -165,6 +168,17 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 		return nil, err
 	}
 	return &nativeFRPClient{service: service}, nil
+}
+
+func connectorPort(endpoint EdgeEndpoint, transport Transport) int {
+	port := endpoint.TCPPort
+	if transport == QUIC {
+		port = endpoint.QUICPort
+	}
+	if port == 0 {
+		port = endpoint.Port
+	}
+	return int(port)
 }
 
 func admissionMetadata(admission Admission) (string, error) {

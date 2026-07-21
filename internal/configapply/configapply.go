@@ -45,3 +45,32 @@ func (ConformanceHandler) Handle(_ context.Context, request Request) (Result, er
 	}
 	return Result{AssignmentID: request.AssignmentID, Revision: request.ObservedRevision, Applied: false}, nil
 }
+
+// SyncHandler binds authenticated config.apply requests to the hosted config
+// restore operation while preserving immutable assignment revision checks.
+type SyncHandler struct {
+	Apply func(context.Context) error
+}
+
+func (h SyncHandler) Handle(ctx context.Context, request Request) (Result, error) {
+	if request.Action != "pull" && request.Action != "apply" && request.Action != "report" {
+		return Result{}, ErrInvalidRequest
+	}
+	if request.AssignmentID == "" || request.ExpectedRevision == "" || request.ObservedRevision == "" {
+		return Result{}, ErrInvalidRequest
+	}
+	if request.ExpectedRevision != request.ObservedRevision {
+		return Result{}, ErrRevisionConflict
+	}
+	applied := false
+	if request.Action != "report" {
+		if h.Apply == nil {
+			return Result{}, ErrInvalidRequest
+		}
+		if err := h.Apply(ctx); err != nil {
+			return Result{}, err
+		}
+		applied = true
+	}
+	return Result{AssignmentID: request.AssignmentID, Revision: request.ObservedRevision, Applied: applied}, nil
+}

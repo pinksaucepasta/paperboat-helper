@@ -35,6 +35,12 @@ type helperProber struct{}
 
 func (helperProber) Probe(context.Context, preview.Target) error { return nil }
 
+type hostedLifecycleStub struct{}
+
+func (hostedLifecycleStub) Start(context.Context) error    { return nil }
+func (hostedLifecycleStub) Shutdown(context.Context) error { return nil }
+func (hostedLifecycleStub) Capabilities() []string         { return []string{"hosted.lifecycle.v1"} }
+
 type helperListener struct {
 	mu     sync.Mutex
 	conn   net.Conn
@@ -173,6 +179,31 @@ func TestHelperCompositionRejectsMissingTrustBoundaryBeforeStateCreation(t *test
 	}
 	if _, err := os.Stat(filepath.Join(root, "state.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state file err=%v", err)
+	}
+}
+
+func TestHelperCompositionEnforcesHostedProfileBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile helperconfig.Profile
+		hosted  HostedLifecycle
+	}{
+		{name: "hosted requires lifecycle", profile: helperconfig.Hosted},
+		{name: "byod forbids lifecycle", profile: helperconfig.BYOD, hosted: hostedLifecycleStub{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			runtimeConfig := helperconfig.Config{Profile: tc.profile, StateRoot: root, Version: "test", Limits: helperconfig.DefaultLimits, Resources: helperconfig.DefaultResources}
+			_, err := NewHelper(context.Background(), HelperConfig{Runtime: runtimeConfig, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root, ShellPath: "/bin/sh"}, HelperDependencies{
+				Authorizer: func(string) (server.Authorizer, error) { return helperAuthorizer{}, nil }, HostedLifecycle: tc.hosted,
+			})
+			if !errors.Is(err, ErrHelperInvalid) {
+				t.Fatalf("error=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "state.db")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state file error=%v", err)
+			}
+		})
 	}
 }
 

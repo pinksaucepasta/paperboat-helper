@@ -73,6 +73,30 @@ func TestFRPDialerReturnsOnlyAfterProxyReadiness(t *testing.T) {
 	}
 }
 
+func TestFRPDialerConnectionOutlivesReadinessContext(t *testing.T) {
+	client := &fakeFRPClient{}
+	client.running.Store(true)
+	dialer, err := NewFRPDialer(FRPDialerConfig{ReadyTimeout: time.Second, Factory: func(Admission, Transport) (FRPClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	connection, err := dialer.Dial(ctx, TCPTLS, admission(1, "jti_lifetime", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+	if client.exited.Load() {
+		t.Fatal("established FRP session inherited readiness cancellation")
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFRPDialerTimeoutClosesClient(t *testing.T) {
 	client := &fakeFRPClient{}
 	dialer, _ := NewFRPDialer(FRPDialerConfig{ReadyTimeout: 20 * time.Millisecond, Factory: func(Admission, Transport) (FRPClient, error) { return client, nil }})
@@ -96,6 +120,19 @@ func TestNativeFRPClientBuildsFromAuthenticatedHandoff(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("nil native client")
+	}
+}
+
+func TestConnectorPortMatchesTransportAndSupportsLegacyAdmission(t *testing.T) {
+	endpoint := EdgeEndpoint{Port: 7000, TCPPort: 7001, QUICPort: 7002}
+	if got := connectorPort(endpoint, QUIC); got != 7002 {
+		t.Fatalf("QUIC port = %d", got)
+	}
+	if got := connectorPort(endpoint, TCPTLS); got != 7001 {
+		t.Fatalf("TCP port = %d", got)
+	}
+	if got := connectorPort(EdgeEndpoint{Port: 7000}, QUIC); got != 7000 {
+		t.Fatalf("legacy port = %d", got)
 	}
 }
 

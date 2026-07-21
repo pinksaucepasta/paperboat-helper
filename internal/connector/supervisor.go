@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -122,7 +123,13 @@ func (s *Supervisor) loop(ctx context.Context) {
 	for ctx.Err() == nil {
 		admission, err := s.config.Admissions.Admission(ctx)
 		if err == nil {
-			result, acceptErr := s.config.Manager.Accept(ctx, admission)
+			// QUIC probing is bounded separately, but TCP FRP login and proxy
+			// publication can legitimately take several seconds on a cold edge.
+			// Keep the acceptance bound below the hosted service readiness budget
+			// while leaving enough time for that control exchange to settle.
+			acceptCtx, cancelAccept := context.WithTimeout(ctx, 25*time.Second)
+			result, acceptErr := s.config.Manager.Accept(acceptCtx, admission)
+			cancelAccept()
 			if acceptErr == nil {
 				metricResult := "connected"
 				if result.Replaced {
@@ -130,7 +137,14 @@ func (s *Supervisor) loop(ctx context.Context) {
 				}
 				s.recordRetry(string(result.Transport), metricResult)
 				backoff = s.config.InitialBackoff
-				waitErr := s.config.Manager.WaitDisconnected(ctx, result.Generation)
+				refreshAt := admission.ExpiresAt.Add(-admissionRefreshMargin(time.Until(admission.ExpiresAt)))
+				waitCtx, cancelWait := context.WithDeadline(ctx, refreshAt)
+				waitErr := s.config.Manager.WaitDisconnected(waitCtx, result.Generation)
+				refreshDue := errors.Is(waitErr, context.DeadlineExceeded) && ctx.Err() == nil
+				cancelWait()
+				if refreshDue {
+					continue
+				}
 				if waitErr != nil && ctx.Err() == nil {
 					if s.config.Waiter.Wait(ctx, s.jitter(backoff), s.wake) != nil {
 						return
@@ -138,6 +152,9 @@ func (s *Supervisor) loop(ctx context.Context) {
 				}
 				continue
 			}
+			slog.Warn("connector admission acceptance failed", "error", acceptErr)
+		} else {
+			slog.Warn("connector admission request failed", "error", err)
 		}
 		s.recordRetry("none", "failed")
 		if s.config.Waiter.Wait(ctx, s.jitter(backoff), s.wake) != nil {
@@ -148,6 +165,17 @@ func (s *Supervisor) loop(ctx context.Context) {
 			backoff = s.config.MaxBackoff
 		}
 	}
+}
+
+func admissionRefreshMargin(lifetime time.Duration) time.Duration {
+	margin := lifetime / 5
+	if margin > 30*time.Second {
+		margin = 30 * time.Second
+	}
+	if margin < time.Second {
+		margin = time.Second
+	}
+	return margin
 }
 
 func (s *Supervisor) recordRetry(transport, result string) {

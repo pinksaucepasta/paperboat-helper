@@ -22,6 +22,26 @@ type StaticAuthConfig struct {
 	Clock         auth.Clock
 }
 
+type CredentialAuthConfig struct {
+	Issuer        string
+	EnvironmentID string
+	HelperID      string
+	Verifier      server.CredentialVerifier
+}
+
+func NewCredentialAuthorizer(config CredentialAuthConfig) (server.AuthorizerFactory, error) {
+	if config.Issuer == "" || config.EnvironmentID == "" || config.HelperID == "" || config.Verifier == nil {
+		return nil, ErrStaticAuthInvalid
+	}
+	resolver := staticPolicyResolver{issuer: config.Issuer, environmentID: config.EnvironmentID, helperID: config.HelperID}
+	return func(token string) (server.Authorizer, error) {
+		if token == "" || len(token) > 16<<10 {
+			return nil, ErrStaticAuthInvalid
+		}
+		return server.CredentialAuthorizer{Verifier: config.Verifier, Resolver: resolver, Token: token}, nil
+	}, nil
+}
+
 func NewStaticAuthorizer(config StaticAuthConfig) (server.AuthorizerFactory, error) {
 	if config.Issuer == "" || config.EnvironmentID == "" || config.Clock == nil || len(config.Keys) == 0 {
 		return nil, ErrStaticAuthInvalid

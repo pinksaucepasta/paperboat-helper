@@ -53,6 +53,12 @@ type HelperDependencies struct {
 	ConfigApply      configapply.Handler
 	ConfigApplyProof bool
 	Random           io.Reader
+	HostedLifecycle  HostedLifecycle
+}
+
+type HostedLifecycle interface {
+	Service
+	protocol.CapabilityProvider
 }
 
 type Helper struct {
@@ -77,7 +83,9 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		dependencies.ActivityService != nil && dependencies.Activity == nil
 	invalidPreview := dependencies.PreviewService != nil && dependencies.Previews == nil
 	invalidConfigApply := dependencies.ConfigApplyProof && dependencies.ConfigApply == nil
-	if invalidActivity || invalidPreview || invalidConfigApply {
+	invalidHosted := config.Runtime.Profile == helperconfig.Hosted && dependencies.HostedLifecycle == nil ||
+		config.Runtime.Profile == helperconfig.BYOD && dependencies.HostedLifecycle != nil
+	if invalidActivity || invalidPreview || invalidConfigApply || invalidHosted {
 		return nil, ErrHelperInvalid
 	}
 	if _, err := pty.ValidateProcessPolicy(config.ShellPath, config.ShellArgs, config.ShellEnvironment); err != nil {
@@ -150,7 +158,11 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err != nil {
 		return nil, err
 	}
-	available, err := protocol.AvailableCapabilities(dispatcher, uploadHandler)
+	providers := []protocol.CapabilityProvider{dispatcher, uploadHandler}
+	if dependencies.HostedLifecycle != nil {
+		providers = append(providers, dependencies.HostedLifecycle)
+	}
+	available, err := protocol.AvailableCapabilities(providers...)
 	if err != nil {
 		return nil, err
 	}
@@ -185,11 +197,12 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err != nil {
 		return nil, err
 	}
-	components := []Component{
-		{Capability: "storage", Required: true, Service: shutdownService{shutdown: func(context.Context) error { return durable.Close() }}},
-		{Capability: "sessions", Required: true, Service: shutdownService{shutdown: sessions.Shutdown}},
-		{Capability: "protocol", Required: true, Service: protocolServer},
-	}
+	components := make([]Component, 0, 8)
+	components = append(components,
+		Component{Capability: "storage", Required: true, Service: shutdownService{shutdown: func(context.Context) error { return durable.Close() }}},
+		Component{Capability: "sessions", Required: true, Service: shutdownService{shutdown: sessions.Shutdown}},
+		Component{Capability: "protocol", Required: true, Service: protocolServer},
+	)
 	if dependencies.PreviewService != nil {
 		components = append(components, Component{Capability: "target", Required: false, Service: dependencies.PreviewService})
 	}
@@ -197,7 +210,12 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		components = append(components, Component{Capability: "activity_delivery", Required: false, Service: dependencies.ActivityService})
 	}
 	if dependencies.Connector != nil {
-		components = append(components, Component{Capability: "edge", Required: false, Service: dependencies.Connector})
+		components = append(components, Component{Capability: "edge", Required: config.Runtime.Profile == helperconfig.Hosted, Service: dependencies.Connector})
+	}
+	// Start hosted preparation after transport dependencies. Reverse shutdown then
+	// flushes hosted state before connector drain and the final activity report.
+	if dependencies.HostedLifecycle != nil {
+		components = append(components, Component{Capability: "hosted_lifecycle", Required: true, Service: dependencies.HostedLifecycle})
 	}
 	components = append(components, Component{Capability: "control_plane", Required: true, Service: httpService})
 	runtime, err := NewRuntime(Config{Version: config.Runtime.Version, Components: components, ShutdownTimeout: config.ShutdownTimeout})

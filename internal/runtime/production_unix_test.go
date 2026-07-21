@@ -1,0 +1,73 @@
+//go:build darwin || linux
+
+package runtime
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
+)
+
+type testTokenSource struct{}
+
+func (testTokenSource) Token(context.Context) (string, error) { return "helper-identity", nil }
+
+type testProofSource struct{ body []byte }
+
+func (p *testProofSource) Proof(_ context.Context, _ string, method, path string, body []byte) ([]byte, error) {
+	if method != http.MethodPost || path != "/api/machine/activity-heartbeat" {
+		return nil, errors.New("wrong proof target")
+	}
+	p.body = append([]byte(nil), body...)
+	return []byte("proof"), nil
+}
+
+func TestHeartbeatSenderUsesRenewableIdentityAndExactBodyProof(t *testing.T) {
+	var gotAuth, gotProof string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := new(bytes.Buffer)
+		_, _ = body.ReadFrom(r.Body)
+		gotAuth, gotProof = r.Header.Get("Authorization"), r.Header.Get("X-Paperboat-Helper-Proof")
+		if r.URL.Path != "/api/machine/activity-heartbeat" || !strings.Contains(body.String(), `"project_id":"prj_1"`) {
+			t.Errorf("request path/body = %s %s", r.URL.Path, body.String())
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	proofs := &testProofSource{}
+	sender := &heartbeatSender{endpoint: server.URL + "/api/machine/activity-heartbeat", tokens: testTokenSource{}, proofs: proofs, operationID: func() (string, error) { return "op-1", nil }, projectID: "prj_1", machineID: "mach_1", reporterVersion: "test", client: server.Client(), lastActivity: time.Unix(1, 0).UTC()}
+	if err := sender.Heartbeat(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer helper-identity" || gotProof != base64.RawURLEncoding.EncodeToString([]byte("proof")) {
+		t.Fatalf("headers auth=%q proof=%q", gotAuth, gotProof)
+	}
+	if len(proofs.body) == 0 || !bytes.Contains(proofs.body, []byte(`"machine_id":"mach_1"`)) {
+		t.Fatalf("proof body=%s", proofs.body)
+	}
+	_ = activity.Batch{}
+}
+
+func TestProductionHelperRequiresHostedProfileAndHTTPSControl(t *testing.T) {
+	base := map[string]string{"PAPERBOAT_HELPER_STATE_ROOT": filepath.Join(t.TempDir(), "state")}
+	if _, err := NewProductionHelper(context.Background(), "test", func(name string) string { return base[name] }); !errors.Is(err, ErrProductionInvalid) {
+		t.Fatalf("byod error=%v", err)
+	}
+	base["PAPERBOAT_HELPER_PROFILE"] = "hosted"
+	base["PAPERBOAT_WORKSPACE"] = filepath.Join(t.TempDir(), "volume")
+	base["PAPERBOAT_PROJECT_ID"] = "prj_1"
+	base["PAPERBOAT_REPOSITORY_URL"] = "https://github.com/paperboat/example.git"
+	base["PAPERBOAT_CONTROL_URL"] = "http://control.example.test"
+	if _, err := NewProductionHelper(context.Background(), "test", func(name string) string { return base[name] }); !errors.Is(err, ErrProductionInvalid) {
+		t.Fatalf("control error=%v", err)
+	}
+}

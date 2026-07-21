@@ -16,6 +16,10 @@ type Sender interface {
 	Send(context.Context, Batch) error
 }
 
+type HeartbeatSender interface {
+	Heartbeat(context.Context) error
+}
+
 type DeliveryConfig struct {
 	Collector *Collector
 	Sender    Sender
@@ -92,6 +96,12 @@ func (d *Delivery) Shutdown(ctx context.Context) error {
 		d.mu.Lock()
 		err := d.runErr
 		d.mu.Unlock()
+		if sender, ok := d.config.Sender.(HeartbeatSender); ok {
+			heartbeatCtx, cancel := context.WithTimeout(ctx, d.config.Timeout)
+			heartbeatErr := sender.Heartbeat(heartbeatCtx)
+			cancel()
+			return errors.Join(err, heartbeatErr)
+		}
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
@@ -163,8 +173,17 @@ func (d *Delivery) loop(ctx context.Context) {
 	ticker := time.NewTicker(d.config.Interval)
 	defer ticker.Stop()
 	for {
-		if _, err := d.DeliverOnce(ctx); err != nil && ctx.Err() != nil {
+		available, err := d.DeliverOnce(ctx)
+		if err != nil && ctx.Err() != nil {
 			return
+		}
+		if !available {
+			if sender, ok := d.config.Sender.(HeartbeatSender); ok {
+				heartbeatCtx, cancel := context.WithTimeout(ctx, d.config.Timeout)
+				err = sender.Heartbeat(heartbeatCtx)
+				cancel()
+				d.recordResult(err)
+			}
 		}
 		select {
 		case <-ctx.Done():

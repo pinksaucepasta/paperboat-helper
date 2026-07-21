@@ -38,8 +38,10 @@ type Admission struct {
 	ExpiresAt       time.Time
 }
 type EdgeEndpoint struct {
-	Host string `json:"host"`
-	Port uint16 `json:"port"`
+	Host     string `json:"host"`
+	Port     uint16 `json:"port"`
+	TCPPort  uint16 `json:"tcp_port,omitempty"`
+	QUICPort uint16 `json:"quic_port,omitempty"`
 }
 type RouteTarget struct {
 	Host string `json:"host"`
@@ -148,7 +150,7 @@ func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, erro
 	if _, used := m.used[admission.JTI]; used {
 		return Result{}, ErrAdmissionReplayed
 	}
-	if admission.Generation <= currentGeneration {
+	if admission.Generation < currentGeneration {
 		return Result{}, ErrGenerationStale
 	}
 	m.used[admission.JTI] = admission.ExpiresAt
@@ -176,7 +178,11 @@ func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, erro
 }
 
 func (m *Manager) dial(ctx context.Context, admission Admission) (Connection, Transport, error) {
-	connection, err := m.config.Dialer.Dial(ctx, QUIC, admission)
+	// QUIC may be filtered by an upstream network. Keep its probe bounded so a
+	// successful TCP fallback still has the caller's remaining readiness budget.
+	quicCtx, cancelQUIC := context.WithTimeout(ctx, 5*time.Second)
+	connection, err := m.config.Dialer.Dial(quicCtx, QUIC, admission)
+	cancelQUIC()
 	if err == nil && connection != nil {
 		return connection, QUIC, nil
 	}

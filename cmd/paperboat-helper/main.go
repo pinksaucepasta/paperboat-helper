@@ -17,6 +17,7 @@ Usage:
   paperboat-helper version
   paperboat-helper help
   paperboat-helper enroll <absolute-config-path>
+  paperboat-helper run
   paperboat-helper phase2-harness <absolute-config-path>
 
 The enroll command exchanges a server-issued grant and persists helper identity.
@@ -64,6 +65,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "enrolled helper %s in environment %s\n", result.HelperID, result.EnvironmentID)
+		return 0
+	}
+	if args[0] == "run" {
+		if len(args) != 1 {
+			writeError(stderr, fmt.Errorf("run does not accept arguments"))
+			return 2
+		}
+		if err := runProduction(stdout); err != nil {
+			writeError(stderr, err)
+			return 1
+		}
 		return 0
 	}
 

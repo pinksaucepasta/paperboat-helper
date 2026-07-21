@@ -38,12 +38,12 @@ func TestPhase2HarnessRequiresExactlyOneConfigPath(t *testing.T) {
 	}
 }
 
-func TestHelpLabelsPhase2HarnessAsFakePeerOnly(t *testing.T) {
+func TestHelpSeparatesProductionRunFromFakePeerHarness(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "phase2-harness") || !strings.Contains(stdout.String(), "fake-peer runtime evidence only") || strings.Contains(stdout.String(), "paperboat-helper run") {
+	if !strings.Contains(stdout.String(), "phase2-harness") || !strings.Contains(stdout.String(), "fake-peer runtime evidence only") || !strings.Contains(stdout.String(), "paperboat-helper run") {
 		t.Fatalf("help=%q", stdout.String())
 	}
 }
