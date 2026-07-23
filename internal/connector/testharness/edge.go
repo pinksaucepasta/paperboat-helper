@@ -101,12 +101,7 @@ func (c *Client) Close() {
 func (c *Client) GracefulClose(_ time.Duration) { c.Close() }
 
 func (c *Client) ProxyRunning(name string) bool {
-	for _, route := range c.admission.Routes {
-		if route.ProxyName == name {
-			return c.ready
-		}
-	}
-	return false
+	return name != "" && len(c.admission.Routes) > 0 && c.ready
 }
 
 func (c *Client) Done() <-chan struct{} { return c.done }

@@ -15,13 +15,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentVersion = 1
+const (
+	CurrentVersion          = 1
+	MaxOperationResultBytes = 64 << 10
+)
 
 var (
-	ErrIncompatible = errors.New("store version is incompatible")
-	ErrCorrupt      = errors.New("store is corrupt")
-	ErrConflict     = errors.New("store state conflict")
-	ErrReplayGap    = errors.New("replay gap")
+	ErrIncompatible   = errors.New("store version is incompatible")
+	ErrCorrupt        = errors.New("store is corrupt")
+	ErrConflict       = errors.New("store state conflict")
+	ErrReplayGap      = errors.New("replay gap")
+	ErrResultTooLarge = errors.New("operation result is too large")
 )
 
 type Config struct {
@@ -205,11 +209,11 @@ func (s *Store) AppendOutput(ctx context.Context, sessionID string, channel byte
 		return OutputEvent{}, 0, err
 	}
 	defer tx.Rollback()
-	var latest uint64
-	if err := tx.QueryRowContext(ctx, `SELECT latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&latest); err != nil {
+	var latest, earliest uint64
+	if err := tx.QueryRowContext(ctx, `SELECT latest_sequence,earliest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&latest, &earliest); err != nil {
 		return OutputEvent{}, 0, err
 	}
-	if latest != start {
+	if latest != start || earliest > latest {
 		return OutputEvent{}, 0, ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO output_events(session_id,start_sequence,end_sequence,channel,data) VALUES(?,?,?,?,?)`, sessionID, start, end, channel, append([]byte(nil), data...)); err != nil {
@@ -218,14 +222,10 @@ func (s *Store) AppendOutput(ctx context.Context, sessionID string, channel byte
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET latest_sequence=?,updated_at=? WHERE id=?`, end, time.Now().UTC().UnixNano(), sessionID); err != nil {
 		return OutputEvent{}, 0, err
 	}
-	var retained uint64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(data)),0) FROM output_events WHERE session_id=?`, sessionID).Scan(&retained); err != nil {
-		return OutputEvent{}, 0, err
-	}
-	earliest := uint64(0)
-	if err := tx.QueryRowContext(ctx, `SELECT earliest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&earliest); err != nil {
-		return OutputEvent{}, 0, err
-	}
+	// Session bounds are contiguous by construction, so they are the exact
+	// retained byte count. Avoid scanning every historical BLOB on each PTY
+	// write: that can starve terminal attach behind high-output sessions.
+	retained := end - earliest
 	for retained > maxRetained {
 		var eventStart, eventEnd, size uint64
 		if err := tx.QueryRowContext(ctx, `SELECT start_sequence,end_sequence,length(data) FROM output_events WHERE session_id=? ORDER BY start_sequence LIMIT 1`, sessionID).Scan(&eventStart, &eventEnd, &size); err != nil {
@@ -252,6 +252,54 @@ func (s *Store) AppendOutput(ctx context.Context, sessionID string, channel byte
 		return OutputEvent{}, 0, err
 	}
 	return OutputEvent{Channel: channel, StartSequence: start, EndSequence: end, Data: append([]byte(nil), data...)}, earliest, nil
+}
+
+// ReplaceOutput stores one complete bounded in-memory history snapshot. It is
+// intended for a coalescing background writer, keeping SQLite transactions out
+// of the PTY read and live fan-out path.
+func (s *Store) ReplaceOutput(ctx context.Context, sessionID string, earliest, latest uint64, events []OutputEvent) error {
+	if earliest > latest {
+		return ErrConflict
+	}
+	next := earliest
+	for _, event := range events {
+		if event.StartSequence != next || event.EndSequence < event.StartSequence || event.EndSequence-event.StartSequence != uint64(len(event.Data)) {
+			return ErrConflict
+		}
+		next = event.EndSequence
+	}
+	if next != latest {
+		return ErrConflict
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var persistedLatest uint64
+	if err := tx.QueryRowContext(ctx, `SELECT latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&persistedLatest); err != nil {
+		return err
+	}
+	if latest < persistedLatest {
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM output_events WHERE session_id=?`, sessionID); err != nil {
+		return err
+	}
+	for _, event := range events {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO output_events(session_id,start_sequence,end_sequence,channel,data) VALUES(?,?,?,?,?)`, sessionID, event.StartSequence, event.EndSequence, event.Channel, append([]byte(nil), event.Data...)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET earliest_sequence=?,latest_sequence=?,updated_at=? WHERE id=?`, earliest, latest, time.Now().UTC().UnixNano(), sessionID); err != nil {
+		return err
+	}
+	if s.hook != nil {
+		if err := s.hook("replace_output_before_commit"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Replay(ctx context.Context, sessionID string, from, limit uint64) ([]OutputEvent, uint64, uint64, error) {
@@ -298,6 +346,46 @@ func (s *Store) Replay(ctx context.Context, sessionID string, from, limit uint64
 		}
 	}
 	return events, earliest, latest, rows.Err()
+}
+
+// TrimOutput compacts a session's retained output to maxRetained bytes. It is
+// used at startup so a reduced configured history limit takes effect before
+// old output is restored into memory or replayed to a newly attached client.
+func (s *Store) TrimOutput(ctx context.Context, sessionID string, maxRetained uint64) (uint64, error) {
+	if maxRetained == 0 {
+		return 0, ErrConflict
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var earliest, latest uint64
+	if err := tx.QueryRowContext(ctx, `SELECT earliest_sequence,latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&earliest, &latest); err != nil {
+		return 0, err
+	}
+	retained := latest - earliest
+	for retained > maxRetained {
+		var start, end, size uint64
+		if err := tx.QueryRowContext(ctx, `SELECT start_sequence,end_sequence,length(data) FROM output_events WHERE session_id=? ORDER BY start_sequence LIMIT 1`, sessionID).Scan(&start, &end, &size); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM output_events WHERE session_id=? AND start_sequence=?`, sessionID, start); err != nil {
+			return 0, err
+		}
+		retained -= size
+		earliest = end
+	}
+	if retained == 0 {
+		earliest = latest
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET earliest_sequence=? WHERE id=?`, earliest, sessionID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return earliest, nil
 }
 
 func (s *Store) PutInputDecision(ctx context.Context, decision InputDecision) (bool, error) {
@@ -378,6 +466,9 @@ func (s *Store) ReserveOperation(ctx context.Context, operationID string, reques
 }
 
 func (s *Store) CompleteOperation(ctx context.Context, operation OperationResult) error {
+	if len(operation.Result) > MaxOperationResultBytes {
+		return ErrResultTooLarge
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE operation_results SET state='completed',result=?,error_code=?,completed_at=?,expires_at=? WHERE operation_id=? AND request_hash=? AND state='pending'`, operation.Result, nullableString(operation.ErrorCode), operation.CompletedAt.UnixNano(), operation.ExpiresAt.UnixNano(), operation.OperationID, operation.RequestHash)
 	if err != nil {
 		return err
@@ -399,11 +490,22 @@ func (s *Store) CompleteOperation(ctx context.Context, operation OperationResult
 	return ErrConflict
 }
 
+func (s *Store) DeleteExpiredOperations(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM operation_results WHERE expires_at<=?`, now.UnixNano())
+	return err
+}
+
 func (s *Store) Operations(ctx context.Context, now time.Time, limit int) ([]OperationResult, error) {
 	if limit < 1 {
 		return nil, ErrConflict
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM operation_results WHERE state='completed' AND expires_at<=?`, now.UnixNano()); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM operation_results WHERE expires_at<=?`, now.UnixNano()); err != nil {
+		return nil, err
+	}
+	// Older helpers persisted terminal replay inside attach outcomes. Discard
+	// those oversized payloads without releasing the operation ID for reuse:
+	// pending makes a retry uncertain instead of rerunning a mutation.
+	if _, err := s.db.ExecContext(ctx, `UPDATE operation_results SET state='pending',result=NULL,error_code=NULL,completed_at=NULL WHERE length(result)>?`, MaxOperationResultBytes); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT operation_id,request_hash,state,result,COALESCE(error_code,''),completed_at,expires_at FROM operation_results ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END,completed_at ASC LIMIT ?`, limit)

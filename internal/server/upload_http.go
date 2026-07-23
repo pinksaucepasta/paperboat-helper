@@ -54,6 +54,14 @@ type uploadMetadata struct {
 	SHA256 string `json:"sha256"`
 }
 
+type uploadRequestError struct {
+	stage string
+	cause error
+}
+
+func (e *uploadRequestError) Error() string { return e.cause.Error() }
+func (e *uploadRequestError) Unwrap() error { return e.cause }
+
 func NewUploadHandler(config UploadHandlerConfig) (*UploadHandler, error) {
 	if config.MaxConcurrent == 0 {
 		config.MaxConcurrent = helperconfig.DefaultResources.MaxConcurrentUploads
@@ -79,8 +87,12 @@ func (h *UploadHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	requestID := request.Header.Get(HeaderRequestID)
 	operationID := request.Header.Get(HeaderOperationID)
 	metadata, deadline, err := parseUploadMetadata(request)
-	if err != nil || len(requestID) < 1 || len(requestID) > 128 || len(operationID) < 8 || len(operationID) > 128 {
-		writeHTTPError(writer, requestID, "invalid_request", http.StatusBadRequest, false)
+	if err != nil {
+		writeHTTPErrorDetails(writer, requestID, "invalid_request", http.StatusBadRequest, false, map[string]any{"stage": "metadata"})
+		return
+	}
+	if len(requestID) < 1 || len(requestID) > 128 || len(operationID) < 8 || len(operationID) > 128 {
+		writeHTTPErrorDetails(writer, requestID, "invalid_request", http.StatusBadRequest, false, map[string]any{"stage": "request_identity"})
 		return
 	}
 	token, ok := bearerToken(request.Header.Values("Authorization"))
@@ -121,7 +133,12 @@ func (h *UploadHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	outcome, replay, executeErr := h.config.Journal.Execute(ctx, operationID, canonical, func(runCtx context.Context) operation.Outcome {
 		result, stageErr := h.stageMultipart(runCtx, writer, request, authorization, metadata)
 		if stageErr != nil {
-			return operation.Outcome{ErrorCode: uploadErrorCode(stageErr)}
+			failure := operation.Outcome{ErrorCode: uploadErrorCode(stageErr)}
+			var requestErr *uploadRequestError
+			if errors.As(stageErr, &requestErr) {
+				failure.Result, _ = json.Marshal(map[string]string{"stage": requestErr.stage})
+			}
+			return failure
 		}
 		encoded, marshalErr := json.Marshal(result)
 		if marshalErr != nil {
@@ -137,7 +154,11 @@ func (h *UploadHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	if outcome.ErrorCode != "" {
 		h.record(metricResult(outcome.ErrorCode, false))
-		writeHTTPError(writer, requestID, outcome.ErrorCode, uploadHTTPStatus(outcome.ErrorCode), outcome.ErrorCode == "resource_limit" || outcome.ErrorCode == "storage_unavailable")
+		var details map[string]any
+		if len(outcome.Result) != 0 {
+			_ = json.Unmarshal(outcome.Result, &details)
+		}
+		writeHTTPErrorDetails(writer, requestID, outcome.ErrorCode, uploadHTTPStatus(outcome.ErrorCode), outcome.ErrorCode == "resource_limit" || outcome.ErrorCode == "storage_unavailable", details)
 		return
 	}
 	if replay {
@@ -180,15 +201,15 @@ func (h *UploadHandler) stageMultipart(ctx context.Context, writer http.Response
 	request.Body = http.MaxBytesReader(writer, request.Body, h.config.MaxBodyBytes)
 	reader, err := request.MultipartReader()
 	if err != nil {
-		return upload.Result{}, err
+		return upload.Result{}, &uploadRequestError{stage: "multipart_header", cause: err}
 	}
 	part, err := reader.NextPart()
 	if err != nil {
-		return upload.Result{}, err
+		return upload.Result{}, &uploadRequestError{stage: "multipart_part", cause: err}
 	}
 	if part.FormName() != "file" || part.FileName() != metadata.Name || part.Header.Get("Content-Type") != metadata.MIME {
 		part.Close()
-		return upload.Result{}, errors.New("multipart metadata mismatch")
+		return upload.Result{}, &uploadRequestError{stage: "multipart_metadata", cause: errors.New("multipart metadata mismatch")}
 	}
 	result, err := h.config.Stager.Stage(ctx, upload.Request{EnvironmentID: authorization.EnvironmentID, DisplayName: metadata.Name, DeclaredMIME: metadata.MIME, DeclaredSize: metadata.Size, CredentialExpiry: authorization.ExpiresAt, ExpectedSHA256: metadata.SHA256, Body: part})
 	part.Close()
@@ -201,8 +222,14 @@ func (h *UploadHandler) stageMultipart(ctx context.Context, writer http.Response
 	}
 	if nextErr != io.EOF {
 		removeErr := h.config.Stager.Remove(result.Path)
-		return upload.Result{}, errors.Join(errors.New("multipart must contain exactly one file"), nextErr, removeErr)
+		return upload.Result{}, &uploadRequestError{stage: "multipart_extra", cause: errors.Join(errors.New("multipart must contain exactly one file"), nextErr, removeErr)}
 	}
+	relativePath := result.Path
+	absolutePath, pathErr := h.config.Stager.AbsolutePath(relativePath)
+	if pathErr != nil {
+		return upload.Result{}, errors.Join(pathErr, h.config.Stager.Remove(relativePath))
+	}
+	result.Path = absolutePath
 	return result, nil
 }
 
@@ -247,10 +274,14 @@ func operationHTTPStatus(code string) int {
 }
 
 func writeHTTPError(writer http.ResponseWriter, requestID, code string, status int, retryable bool) {
+	writeHTTPErrorDetails(writer, requestID, code, status, retryable, nil)
+}
+
+func writeHTTPErrorDetails(writer http.ResponseWriter, requestID, code string, status int, retryable bool, details map[string]any) {
 	if requestID == "" {
 		requestID = "unknown"
 	}
-	payload, _ := json.Marshal(pberrors.Error{Code: pberrors.Code(code), Message: http.StatusText(status), RequestID: requestID, Retryable: retryable})
+	payload, _ := json.Marshal(pberrors.Error{Code: pberrors.Code(code), Message: http.StatusText(status), RequestID: requestID, Retryable: retryable, Details: details})
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_, _ = fmt.Fprintln(writer, string(payload))

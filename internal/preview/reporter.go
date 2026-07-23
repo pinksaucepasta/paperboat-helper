@@ -81,6 +81,16 @@ func (r *Reporter) DeliverOnce(ctx context.Context) (bool, error) {
 	err := r.config.Sender.Send(sendCtx, observation)
 	cancel()
 	if err != nil {
+		if IsPermanentObservationError(err) {
+			r.mu.Lock()
+			if r.acknowledged[observation.Identity] < observation.Revision {
+				r.acknowledged[observation.Identity] = observation.Revision
+			}
+			if r.active != nil && r.active.Identity == observation.Identity && r.active.Revision == observation.Revision {
+				r.active = nil
+			}
+			r.mu.Unlock()
+		}
 		r.recordDelivery("failed")
 		return true, err
 	}

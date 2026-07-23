@@ -86,6 +86,52 @@ func TestAppendCompactsWholeEventsAndRollsBackInjectedFailure(t *testing.T) {
 	}
 }
 
+func TestReplaceOutputAtomicallyStoresNewestBoundedSnapshot(t *testing.T) {
+	state, _ := openStore(t, nil)
+	defer state.Close()
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 0, []byte("old"), 64); err != nil {
+		t.Fatal(err)
+	}
+	events := []OutputEvent{
+		{Channel: 1, StartSequence: 100, EndSequence: 103, Data: []byte("new")},
+		{Channel: 1, StartSequence: 103, EndSequence: 107, Data: []byte("tail")},
+	}
+	if err := state.ReplaceOutput(context.Background(), "ses_1", 100, 107, events); err != nil {
+		t.Fatal(err)
+	}
+	got, earliest, latest, err := state.Replay(context.Background(), "ses_1", 100, 0)
+	if err != nil || earliest != 100 || latest != 107 || len(got) != 2 || string(got[0].Data) != "new" || string(got[1].Data) != "tail" {
+		t.Fatalf("events=%#v bounds=(%d,%d) err=%v", got, earliest, latest, err)
+	}
+	if err := state.ReplaceOutput(context.Background(), "ses_1", 0, 1, []OutputEvent{{Channel: 1, StartSequence: 0, EndSequence: 1, Data: []byte("x")}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("regression err=%v", err)
+	}
+}
+
+func TestTrimOutputCompactsExistingHistory(t *testing.T) {
+	state, _ := openStore(t, nil)
+	defer state.Close()
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, data := range [][]byte{[]byte("abc"), []byte("def"), []byte("ghi")} {
+		if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, uint64(sequence*3), data, 64); err != nil {
+			t.Fatal(err)
+		}
+	}
+	earliest, err := state.TrimOutput(context.Background(), "ses_1", 4)
+	if err != nil || earliest != 6 {
+		t.Fatalf("earliest=%d err=%v", earliest, err)
+	}
+	events, gotEarliest, latest, err := state.Replay(context.Background(), "ses_1", 6, 0)
+	if err != nil || gotEarliest != 6 || latest != 9 || len(events) != 1 || string(events[0].Data) != "ghi" {
+		t.Fatalf("events=%#v bounds=(%d,%d) err=%v", events, gotEarliest, latest, err)
+	}
+}
+
 func TestInputAndOperationConflictsSurviveUniqueness(t *testing.T) {
 	store, _ := openStore(t, nil)
 	defer store.Close()
@@ -111,6 +157,48 @@ func TestInputAndOperationConflictsSurviveUniqueness(t *testing.T) {
 	operation.RequestHash = []byte("b")
 	if err := store.PutOperation(context.Background(), operation); !errors.Is(err, ErrConflict) {
 		t.Fatalf("operation conflict=%v", err)
+	}
+}
+
+func TestOperationResultsAreBoundedAndExpiredRowsAreDeleted(t *testing.T) {
+	state, _ := openStore(t, nil)
+	defer state.Close()
+	now := time.Now().UTC()
+	expired := OperationResult{OperationID: "op_expired_0001", RequestHash: []byte("a"), Result: []byte(`{"ok":true}`), CompletedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute)}
+	if err := state.PutOperation(context.Background(), expired); err != nil {
+		t.Fatal(err)
+	}
+	if _, inserted, err := state.ReserveOperation(context.Background(), "op_pending_0001", []byte("b"), now.Add(-time.Minute)); err != nil || !inserted {
+		t.Fatalf("pending inserted=%v err=%v", inserted, err)
+	}
+	if err := state.DeleteExpiredOperations(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := state.db.QueryRow(`SELECT count(*) FROM operation_results`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+	large := OperationResult{OperationID: "op_large_0001", RequestHash: []byte("c"), Result: make([]byte, MaxOperationResultBytes+1), CompletedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := state.PutOperation(context.Background(), large); !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("large result err=%v", err)
+	}
+}
+
+func TestOperationsStripLegacyOversizedResultsWithoutReleasingReservation(t *testing.T) {
+	state, _ := openStore(t, nil)
+	defer state.Close()
+	now := time.Now().UTC()
+	result := make([]byte, MaxOperationResultBytes+1)
+	if _, err := state.db.Exec(`INSERT INTO operation_results(operation_id,request_hash,state,result,completed_at,expires_at) VALUES(?,?,'completed',?,?,?)`, "op_legacy_large", []byte("hash"), result, now.UnixNano(), now.Add(time.Hour).UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	records, err := state.Operations(context.Background(), now, 8)
+	if err != nil || len(records) != 1 || records[0].State != "pending" || len(records[0].Result) != 0 || !records[0].CompletedAt.IsZero() {
+		t.Fatalf("records=%#v err=%v", records, err)
+	}
+	var count int
+	if err := state.db.QueryRow(`SELECT count(*) FROM operation_results WHERE operation_id='op_legacy_large' AND state='pending' AND result IS NULL`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
 	}
 }
 

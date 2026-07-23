@@ -68,6 +68,51 @@ func TestLifecyclePreparesCheckoutRunsStagesAndFlushes(t *testing.T) {
 	}
 }
 
+func TestLifecycleConfigRestoreFailureIsDegradedNotFatal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "volume")
+	runner := &recordingRunner{}
+	lifecycle, err := New(testConfig(root), Hooks{Restore: func(context.Context, string) error {
+		return errors.New("restore unavailable")
+	}}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := lifecycle.Snapshot()
+	if !snapshot.Ready || snapshot.Stage != StageReady || snapshot.ErrorCode != "stage_failed" {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+	if len(runner.commands) != 3 {
+		t.Fatalf("commands=%#v", runner.commands)
+	}
+}
+
+func TestConfigSyncHooksRetainTokenForShutdownSubprocess(t *testing.T) {
+	root := t.TempDir()
+	checkout := filepath.Join(root, "project")
+	if err := os.Mkdir(checkout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := filepath.Join(root, "config-sync")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n[ \"$PB_TEST_GITHUB_TOKEN\" = expected-secret ] && [ \"$1\" = save ]\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{
+		"PAPERBOAT_CONFIG_SYNC_COMMAND": command,
+		"PAPERBOAT_GITHUB_TOKEN_ENV":    "PB_TEST_GITHUB_TOKEN",
+		"PB_TEST_GITHUB_TOKEN":          "expected-secret",
+	}
+	config := testConfig(root)
+	config.CheckoutRoot = checkout
+	hooks := ConfigSyncHooks(config, func(name string) string { return values[name] })
+	delete(values, "PB_TEST_GITHUB_TOKEN")
+	if err := hooks.Flush(context.Background(), checkout); err != nil {
+		t.Fatalf("shutdown config sync lost captured token: %v", err)
+	}
+}
+
 func TestLifecycleRejectsWorkspaceIdentityMismatch(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "volume")
 	first, err := New(testConfig(root), Hooks{}, &recordingRunner{})

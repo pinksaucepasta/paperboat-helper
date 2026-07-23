@@ -29,6 +29,12 @@ var (
 	ErrResourceLimit  = errors.New("session resource limit")
 )
 
+// initialReplayBytes bounds attach replay to a terminal-sized recent tail while
+// reserving attachment queue capacity for output that arrives during setup.
+const initialReplayBytes uint64 = 64 << 10
+
+const outputPersistDebounce = 20 * time.Millisecond
+
 type PTYProcess interface {
 	io.Reader
 	InputWriter
@@ -83,9 +89,14 @@ type managedSession struct {
 	resizeTime      time.Time
 	activitySeq     map[string]uint64
 	pendingActivity []activity.Event
+	persistNotify   chan struct{}
+	persistStop     chan struct{}
+	persistDone     chan error
+	persistErr      error
 }
 
 type CreateRequest struct {
+	ID      string
 	Name    string
 	Command pty.Command
 }
@@ -187,8 +198,16 @@ func (m *Manager) Create(ctx context.Context, request CreateRequest) (Snapshot, 
 	if _, exists := m.names[request.Name]; exists {
 		return Snapshot{}, ErrSessionExists
 	}
-	var id string
+	id := request.ID
+	if id != "" {
+		if _, exists := m.sessions[id]; exists {
+			return Snapshot{}, ErrSessionExists
+		}
+	}
 	for attempt := 0; attempt < 8; attempt++ {
+		if id != "" {
+			break
+		}
 		candidate, err := randomID(m.config.Random)
 		if err != nil {
 			return Snapshot{}, err
@@ -228,6 +247,7 @@ func (m *Manager) Create(ctx context.Context, request CreateRequest) (Snapshot, 
 	}
 	session.inputs = NewBoundedInputJournal(generation, m.config.MaxInputDecisions)
 	session.process = process
+	m.startOutputPersistence(session)
 	m.sessions[id] = session
 	m.names[request.Name] = id
 	snapshot := session.snapshotLocked()
@@ -242,12 +262,45 @@ func (m *Manager) Attach(sessionID, attachmentID string, fromSequence uint64) (A
 	}
 	session.opMu.Lock()
 	defer session.opMu.Unlock()
+	return m.attachLocked(session, attachmentID, fromSequence)
+}
+
+// AttachLive resolves the current output boundary and registers the attachment
+// while holding the same session lock. High-output terminals therefore cannot
+// compact past a boundary observed by a separate snapshot request.
+func (m *Manager) AttachLive(sessionID, attachmentID string) (AttachResult, error) {
+	session, err := m.get(sessionID)
+	if err != nil {
+		return AttachResult{}, err
+	}
+	session.opMu.Lock()
+	defer session.opMu.Unlock()
+	_, latest, _ := session.history.Bounds()
+	return m.attachLocked(session, attachmentID, latest)
+}
+
+func (m *Manager) attachLocked(session *managedSession, attachmentID string, fromSequence uint64) (AttachResult, error) {
 	if session.fanout.Count() >= m.config.MaxAttachments {
 		return AttachResult{}, ErrResourceLimit
 	}
-	replay, err := session.history.Replay(fromSequence, 0)
+	replayLimit := attachmentReplayLimit(m.config.AttachmentBytes)
+	replay, err := session.history.Replay(fromSequence, replayLimit)
 	if err != nil {
 		return AttachResult{}, err
+	}
+	// A durable session may retain more history than a live attachment can
+	// queue. Start at the newest bounded tail so reconnect always succeeds and
+	// presents the most recent output instead of repeatedly racing replay gaps.
+	if replay.ToSequence < replay.LatestSequence {
+		boundary := replay.LatestSequence - replayLimit
+		if boundary < replay.EarliestSequence {
+			boundary = replay.EarliestSequence
+		}
+		fromSequence = boundary
+		replay, err = session.history.Replay(fromSequence, replayLimit)
+		if err != nil {
+			return AttachResult{}, err
+		}
 	}
 	if err := session.fanout.Attach(attachmentID, m.config.AttachmentBytes); err != nil {
 		return AttachResult{}, err
@@ -260,6 +313,17 @@ func (m *Manager) Attach(sessionID, attachmentID string, fromSequence uint64) (A
 		}
 	}
 	return AttachResult{Snapshot: session.snapshotLocked(), Replay: replay}, nil
+}
+
+func attachmentReplayLimit(attachmentBytes uint64) uint64 {
+	limit := attachmentBytes / 2
+	if limit == 0 {
+		limit = 1
+	}
+	if limit > initialReplayBytes {
+		return initialReplayBytes
+	}
+	return limit
 }
 
 func (m *Manager) Detach(sessionID, attachmentID string) error {
@@ -360,6 +424,42 @@ func (m *Manager) Write(sessionID string, key InputKey, data []byte) (InputDecis
 		_ = m.recordInputActivityLocked(session, key, time.Now().UTC())
 	}
 	return decision, nil
+}
+
+// WriteStream writes ordered live terminal input without creating an
+// idempotency decision. Stream input is never replayed after disconnection.
+func (m *Manager) WriteStream(sessionID, attachmentID string, generation uint64, data []byte) error {
+	if len(data) == 0 || len(data) > 256<<10 {
+		return ErrInvalidInput
+	}
+	session, err := m.get(sessionID)
+	if err != nil {
+		return err
+	}
+	session.opMu.Lock()
+	defer session.opMu.Unlock()
+	state, currentGeneration := session.lifecycle.Snapshot()
+	if state != Running || session.process == nil || generation != currentGeneration {
+		return &StaleGenerationError{CurrentGeneration: currentGeneration}
+	}
+	if attachmentState, _, err := session.fanout.Status(attachmentID); err != nil || attachmentState != Attached {
+		return ErrInvalidInput
+	}
+	n, writeErr := session.process.Write(data)
+	if writeErr != nil {
+		return writeErr
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	if m.config.Activity != nil {
+		m.flushActivityLocked(session)
+		if len(session.pendingActivity) >= m.config.MaxPendingActivity {
+			return activity.ErrQueueFull
+		}
+		_ = m.recordInputActivityLocked(session, InputKey{AttachmentID: attachmentID, Generation: generation, InputID: "stream"}, time.Now().UTC())
+	}
+	return nil
 }
 
 func (m *Manager) QueryInput(sessionID string, key InputKey) (InputDecision, error) {
@@ -542,6 +642,7 @@ func (m *Manager) Restart(sessionID string) (Snapshot, error) {
 	_, generation := session.lifecycle.Snapshot()
 	session.inputs.SetGeneration(generation)
 	session.process, session.exit = process, nil
+	m.startOutputPersistence(session)
 	if err := m.persist(context.Background(), session, Restarting); err != nil {
 		terminateCtx, cancel := context.WithTimeout(context.Background(), m.config.TerminationTimeout)
 		_, _ = process.Terminate(terminateCtx, 0)
@@ -658,17 +759,10 @@ func (m *Manager) capture(session *managedSession, process PTYProcess) {
 		n, err := process.Read(buffer)
 		if n > 0 {
 			session.opMu.Lock()
-			_, latest, _ := session.history.Bounds()
-			appendErr := error(nil)
-			if m.config.Store != nil {
-				_, _, appendErr = m.config.Store.AppendOutput(context.Background(), session.id, 1, latest, buffer[:n], m.config.HistoryBytes)
-			}
-			var event history.Event
-			if appendErr == nil {
-				event, appendErr = session.history.Append(1, buffer[:n])
-			}
+			event, appendErr := session.history.Append(1, buffer[:n])
 			if appendErr == nil {
 				_, _ = session.fanout.Publish(event)
+				m.queueOutputPersistenceLocked(session)
 			}
 			session.opMu.Unlock()
 		}
@@ -676,6 +770,7 @@ func (m *Manager) capture(session *managedSession, process PTYProcess) {
 			break
 		}
 	}
+	persistErr := m.stopOutputPersistence(session)
 	result, _ := process.Wait(context.Background())
 	_ = process.CloseIO()
 	session.opMu.Lock()
@@ -683,12 +778,99 @@ func (m *Manager) capture(session *managedSession, process PTYProcess) {
 	if session.process != process {
 		return
 	}
+	session.persistErr = persistErr
+	if persistErr != nil && m.config.Metrics != nil {
+		_ = m.config.Metrics.Record("paperboat_helper_terminal_persistence_failures_total", 1, map[string]string{"session_id": session.id})
+	}
 	state, _ := session.lifecycle.Snapshot()
 	if state == Running {
 		_ = session.lifecycle.Transition(Exited)
 		session.exit = &result
 		session.process = nil
 		_ = m.persist(context.Background(), session, Running)
+	}
+}
+
+func (m *Manager) startOutputPersistence(session *managedSession) {
+	if m.config.Store == nil {
+		return
+	}
+	session.persistNotify = make(chan struct{}, 1)
+	session.persistStop = make(chan struct{})
+	session.persistDone = make(chan error, 1)
+	session.persistErr = nil
+	go m.runOutputPersistence(session, session.persistNotify, session.persistStop, session.persistDone)
+}
+
+func (m *Manager) queueOutputPersistenceLocked(session *managedSession) {
+	if session.persistNotify == nil {
+		return
+	}
+	select {
+	case session.persistNotify <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) stopOutputPersistence(session *managedSession) error {
+	if session.persistStop == nil {
+		return nil
+	}
+	close(session.persistStop)
+	err := <-session.persistDone
+	session.persistNotify, session.persistStop, session.persistDone = nil, nil, nil
+	return err
+}
+
+func (m *Manager) runOutputPersistence(session *managedSession, notify, stop <-chan struct{}, done chan<- error) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	dirty := false
+	flush := func() error {
+		session.opMu.Lock()
+		earliest, latest, _ := session.history.Bounds()
+		replay, err := session.history.Replay(earliest, 0)
+		session.opMu.Unlock()
+		if err != nil {
+			return err
+		}
+		events := make([]store.OutputEvent, len(replay.Events))
+		for i, event := range replay.Events {
+			events[i] = store.OutputEvent{Channel: event.Channel, StartSequence: event.StartSequence, EndSequence: event.EndSequence, Data: event.Data}
+		}
+		return m.config.Store.ReplaceOutput(context.Background(), session.id, earliest, latest, events)
+	}
+	for {
+		select {
+		case <-notify:
+			if !dirty {
+				dirty = true
+				timer.Reset(outputPersistDebounce)
+			}
+		case <-timer.C:
+			if dirty {
+				if err := flush(); err != nil {
+					done <- err
+					return
+				}
+				dirty = false
+			}
+		case <-stop:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if dirty {
+				done <- flush()
+			} else {
+				done <- nil
+			}
+			return
+		}
 	}
 }
 
@@ -768,7 +950,11 @@ func (m *Manager) recover(ctx context.Context) error {
 				return err
 			}
 		}
-		storedEvents, earliest, latest, err := m.config.Store.Replay(ctx, record.ID, record.EarliestSequence, 0)
+		earliestSequence, err := m.config.Store.TrimOutput(ctx, record.ID, m.config.HistoryBytes)
+		if err != nil {
+			return err
+		}
+		storedEvents, earliest, latest, err := m.config.Store.Replay(ctx, record.ID, earliestSequence, 0)
 		if err != nil {
 			return err
 		}

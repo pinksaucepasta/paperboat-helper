@@ -108,7 +108,24 @@ func TestFRPDialerTimeoutClosesClient(t *testing.T) {
 	for !client.exited.Load() && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if !client.exited.Load() || client.closed.Load() {
+	if !client.exited.Load() || !client.closed.Load() {
+		t.Fatalf("exited=%v close-called=%v", client.exited.Load(), client.closed.Load())
+	}
+}
+
+func TestFRPDialerCancellationClosesClient(t *testing.T) {
+	client := &fakeFRPClient{}
+	dialer, _ := NewFRPDialer(FRPDialerConfig{ReadyTimeout: time.Second, Factory: func(Admission, Transport) (FRPClient, error) { return client, nil }})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := dialer.Dial(ctx, TCPTLS, admission(1, "jti_canceled", time.Now())); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !client.exited.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !client.exited.Load() || !client.closed.Load() {
 		t.Fatalf("exited=%v close-called=%v", client.exited.Load(), client.closed.Load())
 	}
 }
@@ -120,6 +137,24 @@ func TestNativeFRPClientBuildsFromAuthenticatedHandoff(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("nil native client")
+	}
+}
+
+func TestFRPProxyIdentityIsUniquePerAdmissionAndStablePerRoute(t *testing.T) {
+	first := admission(1, "jti_first", time.Now())
+	first.OperationID = "op_admit_first"
+	second := first
+	second.OperationID = "op_admit_second"
+	firstIdentity := frpProxyIdentity(first, first.Routes[0])
+	secondIdentity := frpProxyIdentity(second, second.Routes[0])
+	if firstIdentity.name == secondIdentity.name {
+		t.Fatal("physical proxy name was reused across admissions")
+	}
+	if firstIdentity.group != secondIdentity.group || firstIdentity.groupKey != secondIdentity.groupKey {
+		t.Fatalf("logical route group changed: first=%+v second=%+v", firstIdentity, secondIdentity)
+	}
+	if firstIdentity.name != "pbp_b9aa8011e6c3c308b9f59c4bd62d4820" || firstIdentity.group != "pbg_34cfd20ff1119486c1c1f9cc96bfcc26" || firstIdentity.groupKey != "18a2a9e008f6d4fb0476cbfa0c4faf3f704051fde0a1db07bac74e6d5a5aa1df" {
+		t.Fatalf("identity contract changed: %+v", firstIdentity)
 	}
 }
 

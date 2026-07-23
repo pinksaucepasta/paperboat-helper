@@ -37,6 +37,31 @@ func TestNegotiationRequiresVersionAndRequiredCapabilities(t *testing.T) {
 	}
 }
 
+func TestNegotiationSelectsOptionalTerminalInputStream(t *testing.T) {
+	for _, profile := range []config.Profile{config.Hosted, config.BYOD} {
+		n := Negotiator{Profile: profile, Available: map[string]bool{
+			"terminal.v1":              true,
+			"terminal.input-stream.v1": true,
+			"health.v1":                true,
+		}}
+		w, err := n.Negotiate("1.0", "1.0", []string{"terminal.v1", "terminal.input-stream.v1", "health.v1"})
+		if err != nil {
+			t.Fatalf("profile=%s: %v", profile, err)
+		}
+		if !slices.Contains(w.Capabilities, "terminal.input-stream.v1") {
+			t.Fatalf("profile=%s capabilities=%v", profile, w.Capabilities)
+		}
+
+		w, err = n.Negotiate("1.0", "1.0", []string{"terminal.v1", "health.v1"})
+		if err != nil {
+			t.Fatalf("legacy client profile=%s: %v", profile, err)
+		}
+		if slices.Contains(w.Capabilities, "terminal.input-stream.v1") {
+			t.Fatalf("unoffered capability selected for profile=%s: %v", profile, w.Capabilities)
+		}
+	}
+}
+
 type capabilityProvider []string
 
 func (p capabilityProvider) Capabilities() []string { return append([]string(nil), p...) }

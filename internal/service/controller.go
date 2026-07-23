@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 type Runner interface {
@@ -56,7 +57,7 @@ func (w *boundedCommandOutput) String() string { return string(w.bytes) }
 
 type SystemdController struct{ Runner Runner }
 
-func (c SystemdController) Apply(ctx context.Context, _ string, _ bool) error {
+func (c SystemdController) Apply(ctx context.Context, _ string, upgrading bool) error {
 	if c.Runner == nil {
 		return ErrInvalidDefinition
 	}
@@ -65,6 +66,11 @@ func (c SystemdController) Apply(ctx context.Context, _ string, _ bool) error {
 	}
 	if err := c.Runner.Run(ctx, "systemctl", "--user", "enable", "--now", "paperboat-helper.service"); err != nil {
 		return err
+	}
+	if upgrading {
+		if err := c.Runner.Run(ctx, "systemctl", "--user", "restart", "paperboat-helper.service"); err != nil {
+			return err
+		}
 	}
 	return c.Runner.Run(ctx, "systemctl", "--user", "is-active", "--quiet", "paperboat-helper.service")
 }
@@ -91,7 +97,7 @@ func (c LaunchdController) Apply(ctx context.Context, path string, upgrading boo
 	domain := fmt.Sprintf("gui/%d", c.UID)
 	service := domain + "/" + Label
 	if upgrading {
-		if err := c.Runner.Run(ctx, "launchctl", "bootout", service); err != nil {
+		if err := c.Runner.Run(ctx, "launchctl", "bootout", service); err != nil && !strings.Contains(err.Error(), "No such process") {
 			return err
 		}
 	}
@@ -108,5 +114,9 @@ func (c LaunchdController) Remove(ctx context.Context, _ string) error {
 	if c.Runner == nil || c.UID < 0 {
 		return ErrInvalidDefinition
 	}
-	return c.Runner.Run(ctx, "launchctl", "bootout", fmt.Sprintf("gui/%d/%s", c.UID, Label))
+	err := c.Runner.Run(ctx, "launchctl", "bootout", fmt.Sprintf("gui/%d/%s", c.UID, Label))
+	if err != nil && strings.Contains(err.Error(), "No such process") {
+		return nil
+	}
+	return err
 }

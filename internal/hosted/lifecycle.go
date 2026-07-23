@@ -120,19 +120,28 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		}},
 		{StagePresets, l.applyPresets}, {StageSetup, l.applySetup},
 	}
+	var degradedCode string
 	for _, step := range steps {
 		l.set(step.stage, false, "")
 		stepCtx, cancel := context.WithTimeout(ctx, l.config.OperationTimeout)
 		err := step.run(stepCtx)
 		cancel()
 		if err != nil {
-			l.set(step.stage, false, errorCode(err))
+			code := errorCode(err)
+			l.set(step.stage, false, code)
+			// Config sync is an optional hosted capability. A restore failure
+			// must not make terminal, upload, preview, or connector startup
+			// unavailable; retain the typed degradation for health/diagnostics.
+			if step.stage == StageConfigRestore {
+				degradedCode = code
+				continue
+			}
 			return fmt.Errorf("hosted %s: %w", step.stage, err)
 		}
 	}
 	l.mu.Lock()
 	l.started = true
-	l.snapshot = Snapshot{Stage: StageReady, Ready: true}
+	l.snapshot = Snapshot{Stage: StageReady, Ready: true, ErrorCode: degradedCode}
 	l.mu.Unlock()
 	return nil
 }

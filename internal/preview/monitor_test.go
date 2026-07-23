@@ -53,6 +53,13 @@ func TestMonitorProducesMonotonicReadinessObservations(t *testing.T) {
 	if ready.State != Ready || ready.Revision <= degraded.Revision {
 		t.Fatalf("ready=%#v", ready)
 	}
+	if err := monitor.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat, _ := registry.Get(registered.Identity)
+	if heartbeat.State != Ready || heartbeat.Revision <= ready.Revision {
+		t.Fatalf("readiness heartbeat=%#v", heartbeat)
+	}
 }
 
 func TestMonitorShutdownCancelsProbe(t *testing.T) {

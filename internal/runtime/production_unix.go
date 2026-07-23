@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,7 +29,9 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/connector"
 	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
+	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/hosted"
+	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
 )
 
 var ErrProductionInvalid = errors.New("invalid production helper configuration")
@@ -42,18 +45,21 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		return nil, ErrProductionInvalid
 	}
 	runtimeConfig, err := helperconfig.FromEnv(version, environ)
-	if err != nil || runtimeConfig.Profile != helperconfig.Hosted {
+	if err != nil {
 		return nil, errors.Join(ErrProductionInvalid, err)
 	}
-	hostedConfig, err := hosted.FromEnv(environ)
-	if err != nil {
-		return nil, err
-	}
-	if setupName := environ("PAPERBOAT_SETUP_SCRIPT_ENV"); setupName != "" && safeProductionEnvironmentName(setupName) {
-		_ = os.Unsetenv(setupName)
-	}
-	if err := materializeConfigIdentity(environ); err != nil {
-		return nil, err
+	var hostedConfig hosted.Config
+	if runtimeConfig.Profile == helperconfig.Hosted {
+		hostedConfig, err = hosted.FromEnv(environ)
+		if err != nil {
+			return nil, err
+		}
+		if setupName := environ("PAPERBOAT_SETUP_SCRIPT_ENV"); setupName != "" && safeProductionEnvironmentName(setupName) {
+			_ = os.Unsetenv(setupName)
+		}
+		if err := materializeConfigIdentity(environ); err != nil {
+			return nil, err
+		}
 	}
 	controlURL, err := validatedControlURL(environ("PAPERBOAT_CONTROL_URL"))
 	if err != nil {
@@ -142,8 +148,35 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
+	previews, err := preview.New(preview.Config{Prober: preview.TCPProber{Dialer: net.Dialer{Timeout: 2 * time.Second}}, MaxTargets: runtimeConfig.Resources.MaxPreviewTargets, MaxConcurrentProbes: runtimeConfig.Resources.MaxConcurrentProbes})
+	if err != nil {
+		return nil, err
+	}
+	previewMonitor, err := preview.NewMonitor(preview.MonitorConfig{Registry: previews})
+	if err != nil {
+		return nil, err
+	}
+	previewCredentials, err := preview.NewCredentialSource(preview.CredentialSourceConfig{Endpoint: controlURL.ResolveReference(&url.URL{Path: "/v1/previews/credentials"}).String(), AllowedHosts: []string{controlURL.Hostname()}, Identities: renewingTokens, Proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, OperationID: operationID, Transport: transport})
+	if err != nil {
+		return nil, err
+	}
+	previewControl, err := preview.NewControlClient(preview.ControlClientConfig{Endpoint: controlURL.ResolveReference(&url.URL{Path: "/v1/previews/operations"}).String(), AllowedHosts: []string{controlURL.Hostname()}, EnvironmentID: identity.EnvironmentID, Tokens: previewCredentials, Identities: renewingTokens, Proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, Transport: transport})
+	if err != nil {
+		return nil, err
+	}
+	previewSender, err := preview.NewHTTPSender(preview.HTTPSenderConfig{Endpoint: controlURL.ResolveReference(&url.URL{Path: "/v1/previews/observations"}).String(), AllowedHosts: []string{controlURL.Hostname()}, Tokens: previewCredentials, Identities: renewingTokens, Proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, OperationID: operationID, Transport: transport})
+	if err != nil {
+		return nil, err
+	}
+	previewReporter, err := preview.NewReporter(preview.ReporterConfig{Registry: previews, Sender: previewSender, Interval: runtimeConfig.Limits.HeartbeatInterval, Timeout: 10 * time.Second})
+	if err != nil {
+		return nil, err
+	}
 	var activityDelivery *activity.Delivery
-	machineID := valueOrRuntime(environ("FLY_MACHINE_ID"), environ("PAPERBOAT_MACHINE_ID"))
+	machineID := environ("PAPERBOAT_MACHINE_ID")
+	if runtimeConfig.Profile == helperconfig.Hosted {
+		machineID = valueOrRuntime(environ("FLY_MACHINE_ID"), machineID)
+	}
 	if machineID == "" {
 		return nil, ErrProductionInvalid
 	}
@@ -155,25 +188,82 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 			return nil, err
 		}
 	}
-	configSyncHooks := hosted.ConfigSyncHooks(hostedConfig, environ)
-	hostedLifecycle, err := hosted.New(hostedConfig, configSyncHooks, nil)
-	if err != nil {
-		return nil, err
+	var hostedLifecycle *hosted.Lifecycle
+	var configSyncHooks hosted.Hooks
+	workspaceRoot := environ("PAPERBOAT_WORKSPACE_ROOT")
+	agentShell := "/bin/bash"
+	if runtimeConfig.Profile == helperconfig.BYOD {
+		agentShell, err = validatedBYODShell(environ("PAPERBOAT_SHELL"))
+		if err != nil {
+			return nil, err
+		}
 	}
-	// Prepare the checkout before constructing the PTY adapter. The adapter
-	// validates its root eagerly, while hosted lifecycle owns creating/cloning it.
-	if err := hostedLifecycle.Start(ctx); err != nil {
-		return nil, err
+	agentEnvironment := []string{"PATH=" + os.Getenv("PATH"), "SHELL=" + agentShell, "TERM=xterm-256color"}
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && filepath.IsAbs(home) {
+		agentEnvironment = append(agentEnvironment, "HOME="+home)
 	}
-	if tokenName := environ("PAPERBOAT_GITHUB_TOKEN_ENV"); safeProductionEnvironmentName(tokenName) {
-		_ = os.Unsetenv(tokenName)
+	shutdownTimeout := 30 * time.Second
+	if runtimeConfig.Profile == helperconfig.Hosted {
+		configSyncHooks = hosted.ConfigSyncHooks(hostedConfig, environ)
+		hostedLifecycle, err = hosted.New(hostedConfig, configSyncHooks, nil)
+		if err != nil {
+			return nil, err
+		}
+		// Prepare the checkout before constructing the PTY adapter. The adapter
+		// validates its root eagerly, while hosted lifecycle owns creating/cloning it.
+		if err := hostedLifecycle.Start(ctx); err != nil {
+			return nil, err
+		}
+		if tokenName := environ("PAPERBOAT_GITHUB_TOKEN_ENV"); safeProductionEnvironmentName(tokenName) {
+			_ = os.Unsetenv(tokenName)
+		}
+		workspaceRoot = hostedConfig.VolumeRoot
+		shutdownTimeout = hostedConfig.FlushTimeout + 15*time.Second
+	} else {
+		if err := validateBYODWorkspace(workspaceRoot); err != nil {
+			return nil, err
+		}
 	}
 	listen := valueOrRuntime(environ("PAPERBOAT_HELPER_LISTEN_ADDRESS"), "127.0.0.1:8080")
-	shell := valueOrRuntime(environ("PAPERBOAT_SHELL_PATH"), "/bin/bash")
-	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: hostedConfig.VolumeRoot, ShellPath: shell, ShellArgs: []string{"-l"}, ShellEnvironment: []string{"HOME=" + hostedConfig.VolumeRoot, "PATH=" + os.Getenv("PATH")}, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: hostedConfig.FlushTimeout + 15*time.Second}, HelperDependencies{
-		Authorizer: authorizer, Connector: connectorService, Activity: collector, ActivityService: activityDelivery, HostedLifecycle: hostedLifecycle,
-		ConfigApply: configapply.SyncHandler{Apply: func(ctx context.Context) error { return configSyncHooks.Restore(ctx, hostedConfig.CheckoutRoot) }}, ConfigApplyProof: true,
-	})
+	herdrPath := valueOrRuntime(environ("PAPERBOAT_HERDR_PATH"), "/usr/local/bin/herdr")
+	herdrVersion := valueOrRuntime(environ("PAPERBOAT_HERDR_VERSION"), "0.7.4")
+	dependencies := HelperDependencies{Authorizer: authorizer, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, Activity: collector, ActivityService: activityDelivery}
+	if runtimeConfig.Profile == helperconfig.Hosted {
+		dependencies.HostedLifecycle = hostedLifecycle
+		dependencies.ConfigApply = configapply.SyncHandler{Apply: func(ctx context.Context) error { return configSyncHooks.Restore(ctx, hostedConfig.CheckoutRoot) }}
+		dependencies.ConfigApplyProof = true
+	}
+	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout}, dependencies)
+}
+
+func validatedBYODShell(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "/bin/sh"
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", errors.Join(ErrProductionInvalid, errors.New("BYOD shell must be an absolute canonical path"))
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", errors.Join(ErrProductionInvalid, errors.New("BYOD shell must be an executable regular file"))
+	}
+	return path, nil
+}
+
+func validateBYODWorkspace(root string) error {
+	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return errors.Join(ErrProductionInvalid, errors.New("BYOD workspace must be an absolute canonical path"))
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.Join(ErrProductionInvalid, errors.New("BYOD workspace must be an existing non-symlink directory"))
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != root {
+		return errors.Join(ErrProductionInvalid, errors.New("BYOD workspace symlink resolution is not permitted"))
+	}
+	return nil
 }
 
 type heartbeatSender struct {
@@ -290,6 +380,17 @@ func (s *connectorReadinessService) Start(ctx context.Context) error {
 }
 func (s *connectorReadinessService) Shutdown(ctx context.Context) error {
 	return s.supervisor.Shutdown(ctx)
+}
+
+func (s *connectorReadinessService) CapabilityHealth() health.Capability {
+	status := s.manager.Status()
+	if status.Stopping {
+		return health.Capability{State: health.Unavailable, Reason: "stopped"}
+	}
+	if status.Connected {
+		return health.Capability{State: health.Ready}
+	}
+	return health.Capability{State: health.Unavailable, Reason: "connector_unavailable", RetryAfterMs: 1000}
 }
 
 func validatedControlURL(raw string) (*url.URL, error) {

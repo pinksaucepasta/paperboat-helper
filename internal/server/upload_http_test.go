@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,11 +90,14 @@ func TestUploadHTTPStagesExactlyOneAuthenticatedFile(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	var result upload.Result
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.SHA256 == "" {
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.SHA256 == "" || !filepath.IsAbs(result.Path) {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, result.Path)); err != nil {
+	if _, err := os.Stat(result.Path); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.Path, root+string(filepath.Separator)) {
+		t.Fatalf("path escaped upload root: %q", result.Path)
 	}
 }
 
@@ -143,9 +147,24 @@ func TestUploadHTTPRejectsExtraPartAndRemovesPublication(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"stage":"multipart_extra"`)) {
+		t.Fatalf("missing bounded failure stage: %s", response.Body.String())
+	}
 	entries, err := os.ReadDir(filepath.Join(root, "env_1"))
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+}
+
+func TestUploadHTTPReportsBoundedMetadataFailureStage(t *testing.T) {
+	handler, _ := uploadTestHandler(t, uploadAuthorization)
+	request := httptest.NewRequest(http.MethodPost, "http://helper.test/upload", nil)
+	request.Header.Set(HeaderRequestID, "req_upload")
+	request.Header.Set(HeaderOperationID, "op_upload_0001")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte(`"stage":"metadata"`)) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -156,6 +158,30 @@ func TestWebSocketHandlerRejectsMissingOrAmbiguousCredentialBeforeUpgrade(t *tes
 	}
 	if seen != "" {
 		t.Fatalf("credential reached factory: %q", seen)
+	}
+}
+
+func TestDecodeTerminalInputPreservesBindingAndBytes(t *testing.T) {
+	sessionID, attachmentID := "ses_12345678", "att_12345678"
+	raw := []byte("\x1b[<64;20;10M")
+	data := make([]byte, 12+len(sessionID)+len(attachmentID)+len(raw))
+	binary.BigEndian.PutUint16(data[:2], uint16(len(sessionID)))
+	binary.BigEndian.PutUint16(data[2:4], uint16(len(attachmentID)))
+	binary.BigEndian.PutUint64(data[4:12], 7)
+	copy(data[12:], sessionID)
+	copy(data[12+len(sessionID):], attachmentID)
+	copy(data[12+len(sessionID)+len(attachmentID):], raw)
+	payload, err := decodeTerminalInput(protocol.BinaryFrame{Channel: protocol.TerminalInput, StartSequence: 9, Data: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input terminalStreamInput
+	if json.Unmarshal(payload, &input) != nil || input.Sequence != 9 || input.SessionID != sessionID || input.AttachmentID != attachmentID || input.Generation != 7 {
+		t.Fatalf("input=%#v", input)
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(input.BytesBase64)
+	if err != nil || !bytes.Equal(decoded, raw) {
+		t.Fatalf("bytes=%q err=%v", decoded, err)
 	}
 }
 

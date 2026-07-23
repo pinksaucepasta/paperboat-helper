@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/pinksaucepasta/paperboat-helper/internal/history"
 	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
 )
 
@@ -80,6 +82,104 @@ func TestManagerMirrorsReplayAndDeduplicatesInput(t *testing.T) {
 	if _, err := manager.Close(context.Background(), created.ID); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestManagerStreamInputPreservesBytesWithoutIdempotencyRows(t *testing.T) {
+	manager, root, shell := realManager(t)
+	created, err := manager.Create(context.Background(), CreateRequest{Name: "stream-input", Command: shellCommand(shell, root, "read line; printf 'got:%s' \"$line\"; read line")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.AttachLive(created.ID, "att_stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WriteStream(created.ID, "att_stream", created.Generation, []byte("hello\n")); err != nil {
+		t.Fatal(err)
+	}
+	output := collectUntil(t, manager, created.ID, "att_stream", "got:hello")
+	if !strings.Contains(output, "got:hello") {
+		t.Fatalf("output=%q", output)
+	}
+	session, err := manager.get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.inputs.mu.Lock()
+	decisionCount := len(session.inputs.decisions)
+	session.inputs.mu.Unlock()
+	if decisionCount != 0 {
+		t.Fatalf("stream input created %d idempotency decisions", decisionCount)
+	}
+	_, _ = manager.Close(context.Background(), created.ID)
+}
+
+func TestManagerAttachUsesLatestWindowWhenReplayExceedsQueue(t *testing.T) {
+	manager, root, shell := realManager(t)
+	manager.config.AttachmentBytes = 8
+	created, err := manager.Create(context.Background(), CreateRequest{
+		Name:    "bounded-replay",
+		Command: shellCommand(shell, root, "printf 0123456789abcdef; read line"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitLatest(t, manager, created.ID, 16)
+
+	attached, err := manager.Attach(created.ID, "att_tail", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attached.Replay.FromSequence != attached.Replay.LatestSequence-4 || attached.Replay.ToSequence != attached.Replay.LatestSequence {
+		t.Fatalf("attach=%#v", attached)
+	}
+	session, err := manager.get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evictions, err := session.fanout.Publish(history.Event{Channel: 1, StartSequence: attached.Replay.LatestSequence, EndSequence: attached.Replay.LatestSequence + 4, Data: []byte("live")}); err != nil || len(evictions) != 0 {
+		t.Fatalf("publish evictions=%#v err=%v", evictions, err)
+	}
+	if state, queued, err := session.fanout.Status("att_tail"); err != nil || state != Attached || queued != 8 {
+		t.Fatalf("attachment state=%s queued=%d err=%v", state, queued, err)
+	}
+}
+
+func TestManagerAttachLiveCannotRaceContinuousCompaction(t *testing.T) {
+	retained, err := history.New(64 << 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := NewLifecycle()
+	if err := lifecycle.Transition(Running); err != nil {
+		t.Fatal(err)
+	}
+	session := &managedSession{id: "ses_hot", name: "hot", lifecycle: lifecycle, history: retained, fanout: NewFanout()}
+	manager := &Manager{config: ManagerConfig{AttachmentBytes: 1 << 20, MaxAttachments: 16}, sessions: map[string]*managedSession{"ses_hot": session}, names: map[string]string{"hot": "ses_hot"}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		chunk := bytes.Repeat([]byte("x"), 32<<10)
+		for i := 0; i < 500; i++ {
+			session.opMu.Lock()
+			_, _ = session.history.Append(1, chunk)
+			session.opMu.Unlock()
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		attachmentID := fmt.Sprintf("att_%d", i)
+		attached, err := manager.AttachLive("ses_hot", attachmentID)
+		if err != nil {
+			t.Fatalf("attach %d: %v", i, err)
+		}
+		if attached.Replay.FromSequence != attached.Replay.LatestSequence || attached.Replay.ToSequence != attached.Replay.LatestSequence || len(attached.Replay.Events) != 0 {
+			t.Fatalf("attach %d replay=%#v", i, attached.Replay)
+		}
+		if err := manager.Detach("ses_hot", attachmentID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-done
 }
 
 func TestManagerClearRestartCloseAndDeleteRemainDistinct(t *testing.T) {

@@ -2,13 +2,13 @@ package process
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
@@ -21,6 +21,8 @@ var (
 	ErrLaunchRejected      = errors.New("Herdr launch rejected")
 )
 
+const maxUnixSocketPathBytes = 100
+
 type CommandRunner interface {
 	Output(context.Context, string, ...string) ([]byte, error)
 }
@@ -32,20 +34,19 @@ type Config struct {
 	Executable      string
 	ExpectedVersion string
 	Environment     []string
+	StateRoot       string
 	Sessions        SessionRuntime
 	Runner          CommandRunner
 	VersionTimeout  time.Duration
 }
 type LaunchRequest struct {
+	ID         string
 	Name       string
 	CWD        string
 	Dimensions pty.Dimensions
 }
 type Supervisor struct {
-	mu       sync.Mutex
-	config   Config
-	sessions map[string]string
-	stopping bool
+	config Config
 }
 
 func NewSupervisor(ctx context.Context, config Config) (*Supervisor, error) {
@@ -55,8 +56,11 @@ func NewSupervisor(ctx context.Context, config Config) (*Supervisor, error) {
 	if config.VersionTimeout == 0 {
 		config.VersionTimeout = 3 * time.Second
 	}
-	if config.Sessions == nil || config.ExpectedVersion == "" || config.VersionTimeout <= 0 || !validEnvironment(config.Environment) {
+	if config.Sessions == nil || config.ExpectedVersion == "" || config.VersionTimeout <= 0 || !validEnvironment(config.Environment) || !filepath.IsAbs(config.StateRoot) {
 		return nil, ErrLaunchRejected
+	}
+	if err := privateDirectory(config.StateRoot); err != nil {
+		return nil, fmt.Errorf("prepare Herdr state: %w", ErrLaunchRejected)
 	}
 	executable, err := validateExecutable(config.Executable)
 	if err != nil {
@@ -72,10 +76,14 @@ func NewSupervisor(ctx context.Context, config Config) (*Supervisor, error) {
 	if strings.TrimSpace(string(output)) != "herdr "+config.ExpectedVersion {
 		return nil, fmt.Errorf("%w: expected %s", ErrVersionIncompatible, config.ExpectedVersion)
 	}
-	return &Supervisor{config: config, sessions: make(map[string]string)}, nil
+	return &Supervisor{config: config}, nil
 }
 
-var allowedEnvironment = map[string]bool{"HOME": true, "XDG_CONFIG_HOME": true, "PATH": true, "SHELL": true, "TERM": true, "COLORTERM": true, "LANG": true, "LC_ALL": true, "NO_COLOR": true}
+var allowedEnvironment = map[string]bool{
+	"HOME": true, "XDG_CONFIG_HOME": true, "PATH": true, "SHELL": true,
+	"TERM": true, "COLORTERM": true, "LANG": true, "LC_ALL": true, "NO_COLOR": true,
+	"PAPERBOAT_HELPER_AGENT_ENDPOINT": true, "PAPERBOAT_HELPER_AGENT_TOKEN_FILE": true,
+}
 
 func validEnvironment(environment []string) bool {
 	seen := make(map[string]bool, len(environment))
@@ -90,43 +98,73 @@ func validEnvironment(environment []string) bool {
 }
 
 func (s *Supervisor) Launch(ctx context.Context, request LaunchRequest) (session.Snapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
+	if !validSessionID(request.ID) {
 		return session.Snapshot{}, ErrLaunchRejected
 	}
-	if _, exists := s.sessions[request.Name]; exists {
-		return session.Snapshot{}, session.ErrSessionExists
+	stateRoot := filepath.Join(s.config.StateRoot, request.ID)
+	if err := privateDirectory(stateRoot); err != nil {
+		return session.Snapshot{}, fmt.Errorf("prepare Herdr session state: %w", err)
 	}
-	command := pty.Command{Path: s.config.Executable, Args: []string{"--no-session"}, Env: append([]string(nil), s.config.Environment...), CWD: request.CWD, Dimensions: request.Dimensions}
-	snapshot, err := s.config.Sessions.Create(ctx, session.CreateRequest{Name: request.Name, Command: command})
-	if err != nil {
-		return session.Snapshot{}, err
+	socketRoot := filepath.Join("/tmp", fmt.Sprintf("paperboat-herdr-%d", os.Getuid()))
+	digest := sha256.Sum256([]byte(s.config.StateRoot + "\x00" + request.ID))
+	socketDirectory := filepath.Join(socketRoot, fmt.Sprintf("%x", digest[:12]))
+	if err := privateDirectory(socketDirectory); err != nil {
+		return session.Snapshot{}, fmt.Errorf("prepare Herdr session sockets: %w", err)
 	}
-	s.sessions[request.Name] = snapshot.ID
-	return snapshot, nil
+	serverSocket := filepath.Join(socketDirectory, "herdr.sock")
+	clientSocket := filepath.Join(socketDirectory, "client.sock")
+	if len(serverSocket) > maxUnixSocketPathBytes || len(clientSocket) > maxUnixSocketPathBytes {
+		return session.Snapshot{}, fmt.Errorf("Herdr session socket path is too long: %w", ErrLaunchRejected)
+	}
+	environment := replaceEnvironment(s.config.Environment, "XDG_CONFIG_HOME", stateRoot)
+	environment = replaceEnvironment(environment, "HERDR_SOCKET_PATH", serverSocket)
+	environment = replaceEnvironment(environment, "HERDR_CLIENT_SOCKET_PATH", clientSocket)
+	command := pty.Command{Path: s.config.Executable, Args: []string{"--no-session"}, Env: environment, CWD: request.CWD, Dimensions: request.Dimensions}
+	return s.config.Sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: command})
 }
 
-func (s *Supervisor) Shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	if s.stopping {
-		s.mu.Unlock()
-		return nil
+func validSessionID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
 	}
-	s.stopping = true
-	ids := make([]string, 0, len(s.sessions))
-	for _, id := range s.sessions {
-		ids = append(ids, id)
-	}
-	s.mu.Unlock()
-	var result error
-	for _, id := range ids {
-		if _, err := s.config.Sessions.Close(ctx, id); err != nil {
-			result = errors.Join(result, err)
+	for _, character := range value {
+		if character != '-' && character != '_' && (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
 		}
+	}
+	return true
+}
+
+func replaceEnvironment(environment []string, key, value string) []string {
+	replaced := false
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		entryKey, _, _ := strings.Cut(entry, "=")
+		if entryKey == key {
+			result = append(result, key+"="+value)
+			replaced = true
+		} else {
+			result = append(result, entry)
+		}
+	}
+	if !replaced {
+		result = append(result, key+"="+value)
 	}
 	return result
 }
+
+func privateDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrLaunchRejected
+	}
+	return os.Chmod(path, 0o700)
+}
+
+func (*Supervisor) Shutdown(context.Context) error { return nil }
 
 type ExecRunner struct{ MaxOutput int }
 

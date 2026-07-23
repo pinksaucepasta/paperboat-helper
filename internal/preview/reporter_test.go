@@ -78,3 +78,31 @@ func TestReporterLifecycleStopsBoundedSend(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReporterDropsPermanentlyRejectedObservationForNewerRevision(t *testing.T) {
+	clock := &fixedClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	registry, _ := New(Config{Clock: clock, Prober: &fakeProber{}})
+	first, _ := registry.Register("p-abcdefghijklmnopqrstuvwxyz", "env", "web", Target{"127.0.0.1", 3000}, true)
+	var sent []Observation
+	reporter, _ := NewReporter(ReporterConfig{Registry: registry, Sender: observationSenderFunc(func(_ context.Context, observation Observation) error {
+		sent = append(sent, observation)
+		if len(sent) == 1 {
+			return &ObservationRejectedError{StatusCode: 400}
+		}
+		return nil
+	})})
+	if _, err := reporter.DeliverOnce(context.Background()); !IsPermanentObservationError(err) {
+		t.Fatalf("permanent rejection = %v", err)
+	}
+	if available, err := reporter.DeliverOnce(context.Background()); available || err != nil {
+		t.Fatalf("permanently rejected revision was retried: available=%v err=%v", available, err)
+	}
+	clock.now = clock.now.Add(time.Second)
+	second, _ := registry.Probe(context.Background(), first.Identity)
+	if _, err := reporter.DeliverOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0].Revision != first.Revision || sent[1].Revision != second.Revision {
+		t.Fatalf("sent=%#v", sent)
+	}
+}

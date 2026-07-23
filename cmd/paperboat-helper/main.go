@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/buildinfo"
-	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
 )
 
 const usage = `paperboat-helper is the Paperboat remote environment runtime.
@@ -16,18 +14,24 @@ const usage = `paperboat-helper is the Paperboat remote environment runtime.
 Usage:
   paperboat-helper version
   paperboat-helper help
-  paperboat-helper enroll <absolute-config-path>
+  paperboat-helper bootstrap --server <url> --enrollment-token <token> --name <name> [--shell <absolute-path>]
+  paperboat-helper preview create --name <name> --port <port> --public
+  paperboat-helper preview list
+  paperboat-helper preview remove <name>
   paperboat-helper run
-  paperboat-helper phase2-harness <absolute-config-path>
 
-The enroll command exchanges a server-issued grant and persists helper identity.
-The phase2-harness command is for deterministic fake-peer runtime evidence only.`
+The bootstrap command performs dashboard-started enrollment, verifies the signed helper
+artifact, installs the user service, and waits for readiness.`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithInput(args, os.Stdin, stdout, stderr)
+}
+
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(stdout, usage)
 		return 0
@@ -37,34 +41,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "paperboat-helper %s (%s)\n", buildinfo.Version, buildinfo.Commit)
 		return 0
 	}
-	if args[0] == "phase2-harness" {
-		if len(args) != 2 {
-			writeError(stderr, fmt.Errorf("phase2-harness requires one absolute config path"))
-			return 2
-		}
-		if err := runPhase2Harness(args[1], stdout); err != nil {
+	if args[0] == "bootstrap" {
+		if err := runBootstrap(context.Background(), args[1:], stdin, stdout, stderr); err != nil {
 			writeError(stderr, err)
 			return 1
 		}
 		return 0
 	}
-	if args[0] == "enroll" {
-		if len(args) != 2 {
-			writeError(stderr, fmt.Errorf("enroll requires one absolute config path"))
-			return 2
-		}
-		config, err := enrollment.LoadConfig(args[1])
-		if err != nil {
+	if args[0] == "preview" {
+		if err := runPreview(context.Background(), args[1:], stdout, stderr); err != nil {
 			writeError(stderr, err)
 			return 1
 		}
-		client, _ := enrollment.NewClient(nil, 15*time.Second)
-		result, err := client.Enroll(context.Background(), config)
-		if err != nil {
-			writeError(stderr, err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "enrolled helper %s in environment %s\n", result.HelperID, result.EnvironmentID)
 		return 0
 	}
 	if args[0] == "run" {

@@ -199,21 +199,23 @@ func renderLaunchd(config Config) ([]byte, error) {
 func renderSystemd(config Config) []byte {
 	var output strings.Builder
 	output.WriteString("[Unit]\nDescription=Paperboat helper runtime\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=")
-	output.WriteString(config.Executable)
+	output.WriteString(systemdEscape(config.Executable))
 	for _, argument := range config.Arguments {
 		output.WriteByte(' ')
-		output.WriteString(argument)
+		output.WriteString(systemdEscape(argument))
 	}
 	output.WriteByte('\n')
 	for _, key := range sortedKeys(config.Environment) {
 		output.WriteString("Environment=")
-		output.WriteString(key)
-		output.WriteByte('=')
-		output.WriteString(config.Environment[key])
+		output.WriteString(systemdEscape(key + "=" + config.Environment[key]))
 		output.WriteByte('\n')
 	}
 	output.WriteString("Restart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n")
 	return []byte(output.String())
+}
+
+func systemdEscape(value string) string {
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `"`, `\"`) + `"`
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
@@ -222,7 +224,14 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrInvalidDefinition
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return err
+	}
+	info, err = os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return ErrInvalidDefinition
 	}
 	temporary, err := os.CreateTemp(directory, ".service-*")
@@ -268,20 +277,27 @@ func safeExecutable(path string) error {
 }
 func safeValues(values []string) bool {
 	for _, value := range values {
-		if value == "" {
+		if value == "" || strings.ContainsAny(value, "\x00\r\n") {
 			return false
-		}
-		for _, char := range value {
-			if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune("_./:=@+-", char)) {
-				return false
-			}
 		}
 	}
 	return true
 }
 func safeEnvironment(environment map[string]string) bool {
 	for key, value := range environment {
-		if !safeValues([]string{key, value}) {
+		if !safeEnvironmentKey(key) || !safeValues([]string{value}) {
+			return false
+		}
+	}
+	return true
+}
+
+func safeEnvironmentKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if !(char == '_' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9') {
 			return false
 		}
 	}

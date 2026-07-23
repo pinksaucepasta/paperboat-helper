@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -28,11 +29,11 @@ func TestRealHerdrStartsInsideHelperPTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	home := t.TempDir()
-	supervisor, err := NewSupervisor(context.Background(), Config{Executable: executable, ExpectedVersion: "0.7.4", Environment: []string{"HOME=" + home, "XDG_CONFIG_HOME=" + home, "PATH=/usr/bin:/bin", "SHELL=/bin/sh", "TERM=xterm-256color"}, Sessions: manager})
+	supervisor, err := NewSupervisor(context.Background(), Config{Executable: executable, ExpectedVersion: "0.7.4", Environment: []string{"HOME=" + home, "XDG_CONFIG_HOME=" + home, "PATH=/usr/bin:/bin", "SHELL=/bin/sh", "TERM=xterm-256color"}, StateRoot: filepath.Join(home, "herdr"), Sessions: manager})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := supervisor.Launch(context.Background(), LaunchRequest{Name: "herdr-smoke", CWD: workspace, Dimensions: pty.Dimensions{Columns: 100, Rows: 30}})
+	snapshot, err := supervisor.Launch(context.Background(), LaunchRequest{ID: "ses_herdr_smoke", Name: "herdr-smoke", CWD: workspace, Dimensions: pty.Dimensions{Columns: 100, Rows: 30}})
 	if err != nil {
 		t.Fatal(err)
 	}

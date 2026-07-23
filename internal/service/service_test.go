@@ -68,6 +68,32 @@ func TestSystemdInstallUpgradeAndUninstallAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestServiceDefinitionsSafelyPreservePathsWithSpaces(t *testing.T) {
+	control := &controller{}
+	executable := executable(t)
+	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable, Arguments: []string{"run", "--state", "/home/test/Application Support/Paperboat"}, Environment: map[string]string{"HOME": "/home/test/Application Support"}, Controller: control})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := os.ReadFile(installer.DefinitionPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(definition), `Environment="HOME=/home/test/Application Support"`) || !strings.Contains(string(definition), `"/home/test/Application Support/Paperboat"`) {
+		t.Fatalf("definition did not quote spaced values: %s", definition)
+	}
+}
+
+func TestServiceDefinitionRejectsControlCharacters(t *testing.T) {
+	_, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), Arguments: []string{"run\nExecStart=/tmp/other"}, Environment: map[string]string{"HOME": "/home/test"}, Controller: &controller{}})
+	if !errors.Is(err, ErrInvalidDefinition) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestLaunchdDefinitionIsEscapedValidXML(t *testing.T) {
 	root := t.TempDir()
 	installer, err := New(Config{Platform: "darwin", ConfigRoot: root, Executable: executable(t), Arguments: []string{"run"}, Environment: map[string]string{"HOME": "/Users/test"}, Controller: &controller{}})
@@ -107,6 +133,12 @@ func TestControllerFailureIsNotReportedAsSuccess(t *testing.T) {
 		t.Fatalf("install err=%v", err)
 	}
 	control.applyErr = nil
+	if err := installer.Install(context.Background()); err != nil {
+		t.Fatalf("install retry: %v", err)
+	}
+	if len(control.applied) != 2 || control.applied[0] || !control.applied[1] {
+		t.Fatalf("apply modes=%v", control.applied)
+	}
 	control.removeErr = errors.New("stop failed")
 	if err := installer.Uninstall(context.Background()); !errors.Is(err, control.removeErr) {
 		t.Fatalf("uninstall err=%v", err)
@@ -116,7 +148,7 @@ func TestControllerFailureIsNotReportedAsSuccess(t *testing.T) {
 	}
 }
 
-func TestDefinitionRejectsAmbiguousExecutablePath(t *testing.T) {
+func TestDefinitionQuotesExecutablePathWithSpaces(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "with space")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -125,8 +157,19 @@ func TestDefinitionRejectsAmbiguousExecutablePath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: path, Arguments: []string{"run"}, Controller: &controller{}}); !errors.Is(err, ErrInvalidDefinition) {
-		t.Fatalf("err=%v", err)
+	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: path, Arguments: []string{"run"}, Controller: &controller{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := os.ReadFile(installer.DefinitionPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(definition), `ExecStart="`+path+`" "run"`) {
+		t.Fatalf("definition=%s", definition)
 	}
 }
 
@@ -145,6 +188,31 @@ func TestInstallDoesNotRewriteExistingConfigRootPermissions(t *testing.T) {
 	info, err := os.Stat(root)
 	if err != nil || info.Mode().Perm() != 0o750 {
 		t.Fatalf("mode=%v err=%v", info.Mode().Perm(), err)
+	}
+}
+
+func TestInstallSecuresExistingServiceDefinitionDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "systemd", "user")
+	if err := os.MkdirAll(directory, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	installer, err := New(Config{Platform: "linux", ConfigRoot: root, Executable: executable(t), Arguments: []string{"run"}, Controller: &controller{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("service definition directory mode = %o, want 700", got)
 	}
 }
 
@@ -170,6 +238,14 @@ func TestNativeControllerCommandSequences(t *testing.T) {
 	}
 	if len(runner.calls) != 3 || strings.Join(runner.calls[1], " ") != "systemctl --user enable --now paperboat-helper.service" || strings.Join(runner.calls[2], " ") != "systemctl --user is-active --quiet paperboat-helper.service" {
 		t.Fatalf("calls=%v", runner.calls)
+	}
+	runner = &commandRunner{}
+	systemd.Runner = runner
+	if err := systemd.Apply(context.Background(), "", true); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 4 || strings.Join(runner.calls[2], " ") != "systemctl --user restart paperboat-helper.service" || strings.Join(runner.calls[3], " ") != "systemctl --user is-active --quiet paperboat-helper.service" {
+		t.Fatalf("upgrade calls=%v", runner.calls)
 	}
 	runner = &commandRunner{}
 	launchd := LaunchdController{Runner: runner, UID: 501}

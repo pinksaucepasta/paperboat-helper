@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,6 +82,72 @@ func TestManagerRecoversHistoryInputAndRestartGeneration(t *testing.T) {
 	}
 }
 
+func TestManagerLiveOutputDoesNotWaitForSQLitePersistence(t *testing.T) {
+	workspace := t.TempDir()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePersistence := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releasePersistence()
+	state, err := store.Open(context.Background(), store.Config{Root: filepath.Join(t.TempDir(), "state"), FailureHook: func(point string) error {
+		if point == "replace_output_before_commit" {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	adapter, err := pty.NewAdapter(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(ManagerConfig{
+		Store:  state,
+		Launch: func(command pty.Command) (PTYProcess, error) { return adapter.Start(command) },
+		Random: bytes.NewReader(make([]byte, 64)), HistoryBytes: 64 << 10, AttachmentBytes: 1 << 20,
+		TerminationTimeout: 3 * time.Second, TerminationGrace: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := manager.Create(context.Background(), CreateRequest{Name: "nonblocking", Command: shellCommand("/bin/sh", workspace, "read line; printf live-output; read line")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AttachLive(created.ID, "att_live"); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := manager.Write(created.ID, InputKey{ClientID: "cli", AttachmentID: "att_live", Generation: created.Generation, InputID: "inp_live"}, []byte("go\n"))
+	if err != nil || decision.Status != InputAccepted {
+		t.Fatalf("decision=%#v err=%v", decision, err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("persistence worker did not enter blocked commit")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var output []byte
+	for !bytes.Contains(output, []byte("live-output")) {
+		event, err := manager.WaitNext(ctx, created.ID, "att_live")
+		if err != nil {
+			t.Fatalf("output=%q err=%v", output, err)
+		}
+		output = append(output, event.Data...)
+	}
+	releasePersistence()
+	if _, err := manager.Close(context.Background(), created.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagerMarksUnverifiedRunningGenerationLostOnRecovery(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	state, err := store.Open(context.Background(), store.Config{Root: stateRoot})
@@ -107,5 +174,36 @@ func TestManagerMarksUnverifiedRunningGenerationLostOnRecovery(t *testing.T) {
 	snapshot, err := manager.Snapshot("ses_lost")
 	if err != nil || snapshot.State != Exited || snapshot.Generation != 3 || snapshot.Exit == nil || snapshot.Exit.Signal != "helper_restart" {
 		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestManagerRecoveryCompactsHistoryToConfiguredLimit(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	state, err := store.Open(context.Background(), store.Config{Root: stateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	record := store.Session{ID: "ses_compact", Name: "compact", CWD: t.TempDir(), CommandPath: "/bin/sh", CommandArgs: []string{"-c", "exit"}, CommandEnv: []string{"PATH=/bin"}, Columns: 80, Rows: 24, State: "exited", Generation: 1, CreatedAt: now, UpdatedAt: now}
+	if err := state.CreateSession(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, data := range [][]byte{[]byte("abc"), []byte("def"), []byte("ghi")} {
+		if _, _, err := state.AppendOutput(context.Background(), record.ID, 1, uint64(sequence*3), data, 64); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer state.Close()
+	manager, err := NewManager(ManagerConfig{Store: state, Launch: func(pty.Command) (PTYProcess, error) { t.Fatal("recovery must not launch"); return nil, nil }, HistoryBytes: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := manager.Snapshot(record.ID)
+	if err != nil || snapshot.EarliestSequence != 6 || snapshot.LatestSequence != 9 {
+		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
+	}
+	attached, err := manager.Attach(record.ID, "att_compact", snapshot.EarliestSequence)
+	if err != nil || len(attached.Replay.Events) != 1 || string(attached.Replay.Events[0].Data) != "ghi" {
+		t.Fatalf("attached=%#v err=%v", attached, err)
 	}
 }

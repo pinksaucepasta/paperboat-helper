@@ -65,7 +65,7 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 			targetPort, _ := strconv.Atoi(targetURL.Port())
 			host := fmt.Sprintf("preview-%d.test", index)
 			admission := Admission{
-				Credential: token, Endpoint: EdgeEndpoint{Host: "127.0.0.1", Port: uint16(controlPort)},
+				OperationID: "op_admit_first", EnvironmentID: "env_test", HelperID: "helper_test", Credential: token, Endpoint: EdgeEndpoint{Host: "127.0.0.1", Port: uint16(controlPort)},
 				Routes: []RouteHandoff{{RouteID: fmt.Sprintf("route_%d", index), Revision: 1, Kind: "preview_public_https_wss", PublicHost: host, ProxyName: fmt.Sprintf("proxy_%d", index), LocalTarget: RouteTarget{Host: "127.0.0.1", Port: uint16(targetPort)}}},
 			}
 			dialer, err := NewFRPDialer(FRPDialerConfig{ReadyTimeout: 10 * time.Second})
@@ -89,9 +89,34 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 				_ = connection.Close()
 				t.Fatalf("status=%d body=%q err=%v", response.StatusCode, body, readErr)
 			}
+			replacementAdmission := admission
+			replacementAdmission.OperationID = "op_admit_second"
+			replacement, err := dialer.Dial(context.Background(), transport, replacementAdmission)
+			if err != nil {
+				_ = connection.Close()
+				t.Fatal(err)
+			}
+			retireCtx, cancelRetire := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			if err := connection.Drain(retireCtx); err != nil {
+				cancelRetire()
+				_ = replacement.Close()
+				t.Fatal(err)
+			}
+			cancelRetire()
+			response, err = (&http.Client{Timeout: 5 * time.Second}).Do(request)
+			if err != nil {
+				_ = replacement.Close()
+				t.Fatal(err)
+			}
+			body, readErr = io.ReadAll(io.LimitReader(response.Body, 1024))
+			response.Body.Close()
+			if readErr != nil || response.StatusCode != http.StatusOK || string(body) != "work-connection:/ready" {
+				_ = replacement.Close()
+				t.Fatalf("replacement status=%d body=%q err=%v", response.StatusCode, body, readErr)
+			}
 			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelDrain()
-			if err := connection.Drain(drainCtx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := replacement.Drain(drainCtx); err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatal(err)
 			}
 		})

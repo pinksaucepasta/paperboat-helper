@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,7 +66,7 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 	for {
 		ready := true
 		for _, route := range admission.Routes {
-			if !client.ProxyRunning(route.ProxyName) {
+			if !client.ProxyRunning(frpProxyIdentity(admission, route).name) {
 				ready = false
 				break
 			}
@@ -75,16 +76,16 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 		}
 		select {
 		case err := <-c.done:
-			cancel()
+			_ = c.Close()
 			if err == nil {
 				err = ErrFRPReady
 			}
 			return nil, fmt.Errorf("%w: %v", ErrFRPReady, err)
 		case <-ctx.Done():
-			cancel()
+			_ = c.Close()
 			return nil, ctx.Err()
 		case <-deadline.C:
-			cancel()
+			_ = c.Close()
 			return nil, ErrFRPReady
 		case <-ticker.C:
 		}
@@ -142,7 +143,8 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 	configSource := source.NewConfigSource()
 	proxies := make([]v1.ProxyConfigurer, 0, len(admission.Routes))
 	for _, route := range admission.Routes {
-		proxy := &v1.HTTPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: route.ProxyName, Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: route.LocalTarget.Host, LocalPort: int(route.LocalTarget.Port)}}, DomainConfig: v1.DomainConfig{CustomDomains: []string{route.PublicHost}}}
+		identity := frpProxyIdentity(admission, route)
+		proxy := &v1.HTTPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: identity.name, Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: route.LocalTarget.Host, LocalPort: int(route.LocalTarget.Port)}, LoadBalancer: v1.LoadBalancerConfig{Group: identity.group, GroupKey: identity.groupKey}}, DomainConfig: v1.DomainConfig{CustomDomains: []string{route.PublicHost}}}
 		proxies = append(proxies, proxy)
 	}
 	if err := configSource.ReplaceAll(proxies, nil); err != nil {
@@ -199,3 +201,20 @@ func admissionMetadata(admission Admission) (string, error) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+type frpIdentity struct{ name, group, groupKey string }
+
+func frpProxyIdentity(admission Admission, route RouteHandoff) frpIdentity {
+	stable := admission.EnvironmentID + "\x00" + admission.HelperID + "\x00" + route.RouteID + "\x00" + route.ProxyName
+	physical := stable + "\x00" + admission.OperationID
+	return frpIdentity{
+		name:     "pbp_" + hashPrefix("paperboat-frp-proxy-v1\x00"+physical, 32),
+		group:    "pbg_" + hashPrefix("paperboat-frp-group-v1\x00"+stable, 32),
+		groupKey: hashPrefix("paperboat-frp-group-key-v1\x00"+stable, 64),
+	}
+}
+
+func hashPrefix(value string, length int) string {
+	digest := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", digest)[:length]
+}

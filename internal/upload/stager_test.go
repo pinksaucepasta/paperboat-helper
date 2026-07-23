@@ -51,6 +51,15 @@ func TestStagePublishesPrivateScopedImage(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, result.Path) + ".meta"); err != nil {
 		t.Fatal(err)
 	}
+	absolute, err := s.AbsolutePath(result.Path)
+	if err != nil || absolute != filepath.Join(root, result.Path) {
+		t.Fatalf("absolute=%q err=%v", absolute, err)
+	}
+	for _, invalid := range []string{"../image.png", filepath.Join("env_test_01", "missing.png"), absolute} {
+		if _, err := s.AbsolutePath(invalid); err == nil {
+			t.Fatalf("AbsolutePath accepted %q", invalid)
+		}
+	}
 }
 
 func TestStageRejectsPathMimeAndSize(t *testing.T) {

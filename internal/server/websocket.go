@@ -3,9 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -127,11 +131,50 @@ func (c *webSocketConnection) Read(buffer []byte) (int, error) {
 		if err != nil {
 			return 0, classifyWebSocketRead(err)
 		}
+		if messageType == websocket.MessageBinary {
+			binaryFrame, binaryErr := protocol.ReadBinaryFrame(reader)
+			if binaryErr != nil || binaryFrame.Channel != protocol.TerminalInput {
+				return 0, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("invalid terminal input frame")}
+			}
+			payload, payloadErr := decodeTerminalInput(binaryFrame)
+			if payloadErr != nil {
+				return 0, payloadErr
+			}
+			var encoded bytes.Buffer
+			frame := protocol.Frame{Type: "input", RequestID: "input_" + strconv.FormatUint(binaryFrame.StartSequence, 10), Version: protocol.ProtocolVersion, Capability: "terminal.v1", Payload: payload}
+			if writeErr := protocol.WriteFrame(&encoded, frame); writeErr != nil {
+				return 0, writeErr
+			}
+			c.reader = bytes.NewReader(encoded.Bytes())
+			continue
+		}
 		if messageType != websocket.MessageText {
-			return 0, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("structured client message must be text")}
+			return 0, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("unsupported client message type")}
 		}
 		c.reader = reader
 	}
+}
+
+func decodeTerminalInput(frame protocol.BinaryFrame) (json.RawMessage, error) {
+	if len(frame.Data) < 12 {
+		return nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input binding is truncated")}
+	}
+	sessionLength := int(binary.BigEndian.Uint16(frame.Data[:2]))
+	attachmentLength := int(binary.BigEndian.Uint16(frame.Data[2:4]))
+	generation := binary.BigEndian.Uint64(frame.Data[4:12])
+	headerEnd := 12 + sessionLength + attachmentLength
+	if sessionLength < 1 || sessionLength > 128 || attachmentLength < 1 || attachmentLength > 128 || generation == 0 || headerEnd >= len(frame.Data) {
+		return nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input binding is invalid")}
+	}
+	payload, err := json.Marshal(terminalStreamInput{
+		Sequence: frame.StartSequence, SessionID: string(frame.Data[12 : 12+sessionLength]),
+		AttachmentID: string(frame.Data[12+sessionLength : headerEnd]), Generation: generation,
+		BytesBase64: base64.StdEncoding.EncodeToString(frame.Data[headerEnd:]),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 func (c *webSocketConnection) Write(data []byte) (int, error) {

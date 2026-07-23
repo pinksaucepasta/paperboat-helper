@@ -6,16 +6,21 @@ length equals the decoded byte count. Sequence spans stdout and stderr in one to
 the channel is metadata. Acknowledgements are cumulative and mean all bytes before
 `next_sequence` were delivered to that attachment.
 
-Replay requests carry `from_sequence` and an optional byte limit. A complete response
+Replay requests carry `from_sequence` and an optional byte limit. Attach requests may
+set `at_live_boundary` to atomically join at the helper's current sequence. A complete response
 states the exact returned interval. If the cursor precedes retained history, the helper
 returns `replay_gap` with `requested_sequence`, `earliest_sequence`, and `latest_sequence`;
-it does not return partial output unless the caller explicitly retries at the earliest
-sequence. Duplicate ranges are removed by sequence, not content.
+it does not return partial output. A reconnecting CLI treats a valid boundary as normal
+history compaction: it emits a visible `Earlier terminal output is unavailable` marker,
+advances its cursor to `earliest_sequence`, and retries once from that boundary. It only
+surfaces `replay_gap` when the boundary is missing/invalid or recovery fails. Duplicate
+ranges are removed by sequence, not content.
 
-Input uses a client-generated `input_id`, attachment ID, and process generation. The helper
-records one of `accepted`, `duplicate`, or `rejected`. A disconnect before a recorded result
-is `uncertain`; the client queries that input ID and never repeats bytes without a recorded
-`rejected` result. Input IDs are retained through the maximum reconnect window.
+Input uses ordered binary channel `3`, a connection-local monotonically increasing
+sequence, attachment ID, and process generation. The helper authorizes and writes frames
+to the PTY synchronously in WebSocket order without creating operation or input-idempotency
+rows. Socket backpressure is bounded. A disconnect makes only the last unconfirmed frame
+uncertain; the client discards it and never replays terminal input.
 
 All authorized attachments receive the same ordered output. Accepted input is ordered by
 the helper's monotonic input order. Resize ownership belongs to the most recently active

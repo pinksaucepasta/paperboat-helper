@@ -1,1 +1,12 @@
-{"repository":"paperboat-helper","contract_version":"1.0.0","canonical_source":"contracts/manifest.json","copied_manifest_sha256":"0ebf5c6d0c206fdcdfac11b17fb10d77b64698dd80f42a8ccb321526054c0900","supported":{"fixture_manifest":"1","helper_protocol":"1.0-1.0","connector_protocol":"1.0-1.0"},"last_review":"phase-1-draft"}
+{
+  "repository": "paperboat-helper",
+  "contract_version": "1.0.0",
+  "canonical_source": "contracts/manifest.json",
+  "copied_manifest_sha256": "c5cbede35559ece037ede4592f3a59037cd8e167c2410a1bba3eac95e29c4c19",
+  "supported": {
+    "fixture_manifest": "1",
+    "helper_protocol": "1.0-1.0",
+    "connector_protocol": "1.0-1.0"
+  },
+  "last_review": "phase-6-preview-ownership"
+}

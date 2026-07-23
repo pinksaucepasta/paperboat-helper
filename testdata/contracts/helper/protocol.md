@@ -23,8 +23,17 @@ capabilities must be selected exactly; optional unknown capabilities are ignored
 WebSocket message boundaries are not application boundaries. Parsers accept fragmented
 and coalesced frames. A structured frame is a four-byte unsigned big-endian length followed
 by UTF-8 JSON. Binary terminal data is a four-byte length, one-byte channel (`1` stdout,
-`2` stderr), eight-byte unsigned big-endian sequence, then bytes. Length includes the
-channel and sequence header. Frames remain ordered on one connection.
+`2` stderr, `3` client input), eight-byte unsigned big-endian sequence, then bytes.
+Length includes the channel and sequence header. Client-input data begins with two
+unsigned big-endian 16-bit lengths for session and attachment IDs, an unsigned
+big-endian 64-bit process generation, both IDs, then the PTY bytes. Input sequences
+start at one per connection and frames remain ordered; input frames receive no
+per-frame response and are never replayed.
+
+After all queued terminal bytes have been delivered, an exited or closed terminal emits
+a structured `event` frame with `event: terminal_stream_end`, the session ID, final
+sequence, state, and exit result when present. Clients use this event for exact remote
+exit status; transport closure alone never implies process success.
 
 Every mutation carries `operation_id`. A duplicate operation ID with the same canonical
 request returns the recorded result; reuse with different content returns

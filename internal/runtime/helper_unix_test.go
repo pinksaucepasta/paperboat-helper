@@ -91,7 +91,7 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 	}
 	helper, err := NewHelper(context.Background(), HelperConfig{
 		Runtime: config, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root,
-		ShellPath: "/bin/sh", ShellArgs: []string{"-l"}, ShellEnvironment: []string{"PATH=/usr/bin:/bin"}, EnvironmentID: "env_test",
+		EnvironmentID: "env_test",
 	}, HelperDependencies{
 		Authorizer: func(token string) (server.Authorizer, error) {
 			if token != "signed-operation-credential" {
@@ -102,6 +102,7 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 		Listener: func() (net.Listener, error) { return listener, nil },
 		Previews: previews, Activity: activityCollector,
 		ConfigApply: configapply.ConformanceHandler{}, ConfigApplyProof: true,
+		SessionLauncherFactory: commandSessionLauncherFactory("/bin/sh", []string{"-l"}, []string{"PATH=/usr/bin:/bin"}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -174,7 +175,7 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 func TestHelperCompositionRejectsMissingTrustBoundaryBeforeStateCreation(t *testing.T) {
 	root := t.TempDir()
 	config := helperconfig.Config{Profile: helperconfig.BYOD, StateRoot: root, Version: "test", Limits: helperconfig.DefaultLimits, Resources: helperconfig.DefaultResources}
-	if _, err := NewHelper(context.Background(), HelperConfig{Runtime: config, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root, ShellPath: "/bin/sh"}, HelperDependencies{}); !errors.Is(err, ErrHelperInvalid) {
+	if _, err := NewHelper(context.Background(), HelperConfig{Runtime: config, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root}, HelperDependencies{}); !errors.Is(err, ErrHelperInvalid) {
 		t.Fatalf("err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "state.db")); !errors.Is(err, os.ErrNotExist) {
@@ -194,7 +195,7 @@ func TestHelperCompositionEnforcesHostedProfileBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			runtimeConfig := helperconfig.Config{Profile: tc.profile, StateRoot: root, Version: "test", Limits: helperconfig.DefaultLimits, Resources: helperconfig.DefaultResources}
-			_, err := NewHelper(context.Background(), HelperConfig{Runtime: runtimeConfig, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root, ShellPath: "/bin/sh"}, HelperDependencies{
+			_, err := NewHelper(context.Background(), HelperConfig{Runtime: runtimeConfig, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root}, HelperDependencies{
 				Authorizer: func(string) (server.Authorizer, error) { return helperAuthorizer{}, nil }, HostedLifecycle: tc.hosted,
 			})
 			if !errors.Is(err, ErrHelperInvalid) {
@@ -210,7 +211,7 @@ func TestHelperCompositionEnforcesHostedProfileBoundary(t *testing.T) {
 func TestHelperCompositionRejectsUnsafeBindBeforeStateCreation(t *testing.T) {
 	root := t.TempDir()
 	config := helperconfig.Config{Profile: helperconfig.BYOD, StateRoot: root, Version: "test", Limits: helperconfig.DefaultLimits, Resources: helperconfig.DefaultResources}
-	_, err := NewHelper(context.Background(), HelperConfig{Runtime: config, ListenAddress: "0.0.0.0:8080", WorkspaceRoot: root, ShellPath: "/bin/sh"}, HelperDependencies{
+	_, err := NewHelper(context.Background(), HelperConfig{Runtime: config, ListenAddress: "0.0.0.0:8080", WorkspaceRoot: root}, HelperDependencies{
 		Authorizer: func(string) (server.Authorizer, error) { return helperAuthorizer{}, nil },
 	})
 	if !errors.Is(err, ErrHelperInvalid) {

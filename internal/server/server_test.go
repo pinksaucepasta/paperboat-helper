@@ -196,6 +196,21 @@ func TestSlowConsumerStreamSendsBoundedErrorBefore4408Close(t *testing.T) {
 	}
 }
 
+func TestTerminalStreamEndEmitsStructuredEvent(t *testing.T) {
+	payload := json.RawMessage(`{"event":"terminal_stream_end","session_id":"ses_1","state":"exited","final_sequence":12,"exit":{"code":7}}`)
+	connection := &streamTestConnection{}
+	server := &Server{}
+	server.wg.Add(1)
+	server.stream(context.Background(), &lockedWriter{writer: connection, connection: connection}, connection, errorOutputStream{&StreamEnd{Payload: payload}})
+	if connection.closeCode != 0 || len(connection.structured) != 1 {
+		t.Fatalf("code=%d frames=%#v", connection.closeCode, connection.structured)
+	}
+	frame := connection.structured[0]
+	if frame.Type != "event" || frame.Capability != "terminal.v1" || frame.RequestID != "stream" || string(frame.Payload) != string(payload) {
+		t.Fatalf("frame=%#v", frame)
+	}
+}
+
 func TestHelloRejectsDuplicateCapabilities(t *testing.T) {
 	server := testServer(t, func(context.Context, protocol.Frame) (Authorization, error) {
 		return Authorization{JournalBinding: "user:1"}, nil

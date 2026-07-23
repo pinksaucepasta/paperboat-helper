@@ -22,6 +22,10 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
+	"github.com/pinksaucepasta/paperboat-helper/internal/process"
+	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
+	"github.com/pinksaucepasta/paperboat-helper/internal/server"
+	"github.com/pinksaucepasta/paperboat-helper/internal/session"
 )
 
 const maxPhase2HarnessConfigBytes = 64 << 10
@@ -105,12 +109,33 @@ func NewPhase2Harness(ctx context.Context, config Phase2HarnessConfig, version s
 	static := helperconfig.Config{Profile: config.Profile, StateRoot: config.StateRoot, Version: version, Limits: helperconfig.DefaultLimits, Resources: helperconfig.DefaultResources}
 	return NewHelper(ctx, HelperConfig{
 		Runtime: static, ListenAddress: config.ListenAddress, WorkspaceRoot: config.WorkspaceRoot,
-		ShellPath: config.ShellPath, ShellArgs: config.ShellArgs, ShellEnvironment: config.ShellEnvironment,
 		OriginPatterns: config.OriginPatterns, EnvironmentID: config.EnvironmentID,
 	}, HelperDependencies{
 		Authorizer: authorizer, Previews: previews, PreviewService: monitor,
 		Activity: collector, ConfigApply: configHandler, ConfigApplyProof: config.ConfigApplyProof,
+		SessionLauncherFactory: commandSessionLauncherFactory(config.ShellPath, config.ShellArgs, config.ShellEnvironment),
 	})
+}
+
+type commandSessionLauncher struct {
+	sessions *session.Manager
+	path     string
+	args     []string
+	env      []string
+}
+
+func (l commandSessionLauncher) Launch(ctx context.Context, request process.LaunchRequest) (session.Snapshot, error) {
+	return l.sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: pty.Command{Path: l.path, Args: append([]string(nil), l.args...), Env: append([]string(nil), l.env...), CWD: request.CWD, Dimensions: request.Dimensions}})
+}
+
+func commandSessionLauncherFactory(path string, args, env []string) func(*session.Manager) (server.SessionLauncher, error) {
+	return func(sessions *session.Manager) (server.SessionLauncher, error) {
+		resolved, err := pty.ValidateProcessPolicy(path, args, env)
+		if err != nil {
+			return nil, err
+		}
+		return commandSessionLauncher{sessions: sessions, path: resolved, args: args, env: env}, nil
+	}
 }
 
 func validatePhase2HarnessConfig(config Phase2HarnessConfig) error {

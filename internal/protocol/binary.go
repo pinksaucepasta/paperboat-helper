@@ -13,6 +13,7 @@ const (
 	binaryHeaderLen = 9
 	Stdout          = byte(1)
 	Stderr          = byte(2)
+	TerminalInput   = byte(3)
 )
 
 const UnsupportedChannel Code = "unsupported_channel"
@@ -46,7 +47,7 @@ func ReadBinaryFrame(r io.Reader) (BinaryFrame, error) {
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return BinaryFrame{}, &Error{Code: InvalidFrame, Cause: err}
 	}
-	if header[0] != Stdout && header[0] != Stderr {
+	if header[0] != Stdout && header[0] != Stderr && header[0] != TerminalInput {
 		return BinaryFrame{}, &Error{Code: UnsupportedChannel}
 	}
 	f := BinaryFrame{Channel: header[0], StartSequence: binary.BigEndian.Uint64(header[1:])}
@@ -61,7 +62,7 @@ func ReadBinaryFrame(r io.Reader) (BinaryFrame, error) {
 }
 
 func WriteBinaryFrame(w io.Writer, f BinaryFrame) error {
-	if f.Channel != Stdout && f.Channel != Stderr {
+	if f.Channel != Stdout && f.Channel != Stderr && f.Channel != TerminalInput {
 		return &Error{Code: UnsupportedChannel}
 	}
 	if len(f.Data) > MaxBinaryFrame-binaryHeaderLen {

@@ -5,10 +5,12 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/operation"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
+	"github.com/pinksaucepasta/paperboat-helper/internal/process"
 	"github.com/pinksaucepasta/paperboat-helper/internal/protocol"
 	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
 	"github.com/pinksaucepasta/paperboat-helper/internal/server"
@@ -33,27 +36,31 @@ type HelperConfig struct {
 	Runtime          helperconfig.Config
 	ListenAddress    string
 	WorkspaceRoot    string
-	ShellPath        string
-	ShellArgs        []string
-	ShellEnvironment []string
+	HerdrPath        string
+	HerdrVersion     string
+	AgentEnvironment []string
 	OriginPatterns   []string
 	EnvironmentID    string
+	AgentTokenFile   string
 	ShutdownTimeout  time.Duration
 }
 
 type HelperDependencies struct {
-	Authorizer       server.AuthorizerFactory
-	Listener         ListenerFactory
-	Connector        Service
-	Previews         *preview.Registry
-	PreviewService   Service
-	Activity         *activity.Collector
-	ActivityService  Service
-	SignalVerifier   *activity.SignalVerifier
-	ConfigApply      configapply.Handler
-	ConfigApplyProof bool
-	Random           io.Reader
-	HostedLifecycle  HostedLifecycle
+	Authorizer             server.AuthorizerFactory
+	Listener               ListenerFactory
+	Connector              Service
+	Previews               *preview.Registry
+	PreviewControl         preview.PreviewControl
+	PreviewRoutesChanged   func()
+	PreviewService         Service
+	Activity               *activity.Collector
+	ActivityService        Service
+	SignalVerifier         *activity.SignalVerifier
+	ConfigApply            configapply.Handler
+	ConfigApplyProof       bool
+	Random                 io.Reader
+	HostedLifecycle        HostedLifecycle
+	SessionLauncherFactory func(*session.Manager) (server.SessionLauncher, error)
 }
 
 type HostedLifecycle interface {
@@ -69,8 +76,11 @@ type Helper struct {
 }
 
 func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDependencies) (_ *Helper, resultErr error) {
-	if err := config.Runtime.Validate(); err != nil || !LoopbackAddress(config.ListenAddress) || !filepath.IsAbs(config.WorkspaceRoot) || config.ShellPath == "" || dependencies.Authorizer == nil {
+	if err := config.Runtime.Validate(); err != nil || !LoopbackAddress(config.ListenAddress) || !filepath.IsAbs(config.WorkspaceRoot) || dependencies.Authorizer == nil {
 		return nil, errors.Join(ErrHelperInvalid, err)
+	}
+	if dependencies.SessionLauncherFactory == nil && (config.HerdrPath == "" || config.HerdrVersion == "") {
+		return nil, ErrHelperInvalid
 	}
 	if config.ShutdownTimeout == 0 {
 		config.ShutdownTimeout = 30 * time.Second
@@ -78,6 +88,16 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if config.ShutdownTimeout <= 0 {
 		return nil, ErrHelperInvalid
 	}
+	if config.AgentTokenFile == "" {
+		config.AgentTokenFile = filepath.Join(config.Runtime.StateRoot, "agent", "token")
+	}
+	if !filepath.IsAbs(config.AgentTokenFile) {
+		return nil, ErrHelperInvalid
+	}
+	config.AgentEnvironment = append(config.AgentEnvironment,
+		"PAPERBOAT_HELPER_AGENT_ENDPOINT=http://"+config.ListenAddress+"/v1/agent/previews",
+		"PAPERBOAT_HELPER_AGENT_TOKEN_FILE="+config.AgentTokenFile,
+	)
 	invalidActivity := dependencies.Activity != nil && config.EnvironmentID == "" ||
 		dependencies.SignalVerifier != nil && dependencies.Activity == nil ||
 		dependencies.ActivityService != nil && dependencies.Activity == nil
@@ -85,11 +105,17 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	invalidConfigApply := dependencies.ConfigApplyProof && dependencies.ConfigApply == nil
 	invalidHosted := config.Runtime.Profile == helperconfig.Hosted && dependencies.HostedLifecycle == nil ||
 		config.Runtime.Profile == helperconfig.BYOD && dependencies.HostedLifecycle != nil
-	if invalidActivity || invalidPreview || invalidConfigApply || invalidHosted {
-		return nil, ErrHelperInvalid
+	if invalidActivity {
+		return nil, errors.Join(ErrHelperInvalid, errors.New("invalid activity dependencies"))
 	}
-	if _, err := pty.ValidateProcessPolicy(config.ShellPath, config.ShellArgs, config.ShellEnvironment); err != nil {
-		return nil, errors.Join(ErrHelperInvalid, err)
+	if invalidPreview {
+		return nil, errors.Join(ErrHelperInvalid, errors.New("invalid preview dependencies"))
+	}
+	if invalidConfigApply {
+		return nil, errors.Join(ErrHelperInvalid, errors.New("invalid config-apply dependencies"))
+	}
+	if invalidHosted {
+		return nil, errors.Join(ErrHelperInvalid, errors.New("invalid hosted lifecycle dependencies"))
 	}
 	adapter, err := pty.NewAdapter(config.WorkspaceRoot)
 	if err != nil {
@@ -104,6 +130,10 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		random = rand.Reader
 	}
 	random = &lockedReader{reader: random}
+	agentToken, err := writeAgentToken(config.AgentTokenFile, random)
+	if err != nil {
+		return nil, err
+	}
 
 	durable, err := store.Open(ctx, store.Config{Root: config.Runtime.StateRoot})
 	if err != nil {
@@ -126,6 +156,15 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err != nil {
 		return nil, err
 	}
+	var sessionLauncher server.SessionLauncher
+	if dependencies.SessionLauncherFactory != nil {
+		sessionLauncher, err = dependencies.SessionLauncherFactory(sessions)
+	} else {
+		sessionLauncher, err = process.NewSupervisor(ctx, process.Config{Executable: config.HerdrPath, ExpectedVersion: config.HerdrVersion, Environment: append([]string(nil), config.AgentEnvironment...), StateRoot: filepath.Join(config.Runtime.StateRoot, "herdr"), Sessions: sessions})
+	}
+	if err != nil || sessionLauncher == nil {
+		return nil, errors.Join(ErrHelperInvalid, err)
+	}
 	journal, err := operation.NewPersistentJournal(ctx, resources.MaxConcurrentOps*32, durable, time.Hour, nil)
 	if err != nil {
 		return nil, err
@@ -133,11 +172,9 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 
 	healthSource := &runtimeHealthSource{}
 	dispatcher, err := server.NewDispatcher(server.DispatcherConfig{
-		Sessions: sessions, Health: healthSource, ShellPath: config.ShellPath,
-		ShellArgs:     append([]string(nil), config.ShellArgs...),
-		ShellEnv:      append([]string(nil), config.ShellEnvironment...),
+		Sessions: sessions, Health: healthSource, SessionLauncher: sessionLauncher,
 		WorkspaceRoot: config.WorkspaceRoot, Random: random,
-		Previews: dependencies.Previews, Activity: dependencies.Activity,
+		Previews: dependencies.Previews, PreviewControl: dependencies.PreviewControl, Activity: dependencies.Activity,
 		SignalVerifier: dependencies.SignalVerifier, ConfigApply: dependencies.ConfigApply,
 	})
 	if err != nil {
@@ -188,6 +225,13 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	mux := http.NewServeMux()
 	mux.Handle("/v1/runtime", websocketHandler)
 	mux.Handle("/v1/uploads", uploadHandler)
+	if dependencies.Previews != nil && dependencies.PreviewControl != nil && config.EnvironmentID != "" {
+		agentHandler, agentErr := preview.NewAgentHandler(preview.AgentHandlerConfig{Token: agentToken, EnvironmentID: config.EnvironmentID, Registry: dependencies.Previews, Control: dependencies.PreviewControl, RoutesChanged: dependencies.PreviewRoutesChanged})
+		if agentErr != nil {
+			return nil, agentErr
+		}
+		mux.Handle("/v1/agent/previews", agentHandler)
+	}
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.Header().Set("Cache-Control", "no-store")
@@ -210,7 +254,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		components = append(components, Component{Capability: "activity_delivery", Required: false, Service: dependencies.ActivityService})
 	}
 	if dependencies.Connector != nil {
-		components = append(components, Component{Capability: "edge", Required: config.Runtime.Profile == helperconfig.Hosted, Service: dependencies.Connector})
+		components = append(components, Component{Capability: "edge", Required: true, Service: dependencies.Connector})
 	}
 	// Start hosted preparation after transport dependencies. Reverse shutdown then
 	// flushes hosted state before connector drain and the final activity report.
@@ -222,8 +266,57 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err != nil {
 		return nil, err
 	}
-	healthSource.set(runtime)
+	healthSource.set(runtime, components)
 	return &Helper{runtime: runtime, http: httpService, handler: mux, sessions: sessions}, nil
+}
+
+func writeAgentToken(path string, random io.Reader) (string, error) {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", ErrHelperInvalid
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return "", err
+	}
+	if info, err = os.Lstat(path); err == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+		return "", ErrHelperInvalid
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	raw := make([]byte, 32)
+	if _, err := io.ReadFull(random, raw); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	temporary, err := os.CreateTemp(directory, ".agent-token-*")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return "", err
+	}
+	if _, err := io.WriteString(temporary, token+"\n"); err != nil {
+		temporary.Close()
+		return "", err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return "", err
+	}
+	if err := temporary.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 func (h *Helper) Start(ctx context.Context) error    { return h.runtime.Start(ctx) }
@@ -237,6 +330,30 @@ type shutdownService struct{ shutdown func(context.Context) error }
 
 func (shutdownService) Start(context.Context) error          { return nil }
 func (s shutdownService) Shutdown(ctx context.Context) error { return s.shutdown(ctx) }
+
+type serviceGroup []Service
+
+func (g serviceGroup) Start(ctx context.Context) error {
+	started := 0
+	for i, service := range g {
+		if err := service.Start(ctx); err != nil {
+			for j := started - 1; j >= 0; j-- {
+				_ = g[j].Shutdown(ctx)
+			}
+			return err
+		}
+		started = i + 1
+	}
+	return nil
+}
+
+func (g serviceGroup) Shutdown(ctx context.Context) error {
+	var result error
+	for i := len(g) - 1; i >= 0; i-- {
+		result = errors.Join(result, g[i].Shutdown(ctx))
+	}
+	return result
+}
 
 type lockedReader struct {
 	mu     sync.Mutex
@@ -252,15 +369,37 @@ func (r *lockedReader) Read(buffer []byte) (int, error) {
 type runtimeHealthSource struct {
 	mu      sync.RWMutex
 	runtime *Runtime
+	dynamic map[string]capabilityHealthProvider
 }
 
-func (s *runtimeHealthSource) set(runtime *Runtime) { s.mu.Lock(); s.runtime = runtime; s.mu.Unlock() }
+type capabilityHealthProvider interface {
+	CapabilityHealth() health.Capability
+}
+
+func (s *runtimeHealthSource) set(runtime *Runtime, components []Component) {
+	dynamic := make(map[string]capabilityHealthProvider)
+	for _, component := range components {
+		if provider, ok := component.Service.(capabilityHealthProvider); ok {
+			dynamic[component.Capability] = provider
+		}
+	}
+	s.mu.Lock()
+	s.runtime, s.dynamic = runtime, dynamic
+	s.mu.Unlock()
+}
 func (s *runtimeHealthSource) Snapshot() (snapshot health.Snapshot) {
 	s.mu.RLock()
 	runtime := s.runtime
+	dynamic := make(map[string]capabilityHealthProvider, len(s.dynamic))
+	for capability, provider := range s.dynamic {
+		dynamic[capability] = provider
+	}
 	s.mu.RUnlock()
 	if runtime != nil {
-		return runtime.Health()
+		snapshot = runtime.Health()
+		for capability, provider := range dynamic {
+			snapshot.Capabilities[capability] = provider.CapabilityHealth()
+		}
 	}
 	return snapshot
 }

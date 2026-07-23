@@ -36,14 +36,17 @@ type entry struct {
 }
 
 type Journal struct {
-	mu        sync.Mutex
-	max       int
-	entries   map[string]*entry
-	order     []string
-	store     *store.Store
-	retention time.Duration
-	now       func() time.Time
+	mu          sync.Mutex
+	max         int
+	entries     map[string]*entry
+	order       []string
+	store       *store.Store
+	retention   time.Duration
+	now         func() time.Time
+	lastCleanup time.Time
 }
+
+const cleanupInterval = time.Minute
 
 func NewPersistentJournal(ctx context.Context, maxEntries int, durable *store.Store, retention time.Duration, now func() time.Time) (*Journal, error) {
 	if durable == nil || retention <= 0 {
@@ -57,10 +60,12 @@ func NewPersistentJournal(ctx context.Context, maxEntries int, durable *store.St
 		return nil, err
 	}
 	journal.store, journal.retention, journal.now = durable, retention, now
-	records, err := durable.Operations(ctx, now(), maxEntries)
+	currentTime := now()
+	records, err := durable.Operations(ctx, currentTime, maxEntries)
 	if err != nil {
 		return nil, err
 	}
+	journal.lastCleanup = currentTime
 	for _, record := range records {
 		if len(record.RequestHash) != sha256.Size {
 			return nil, ErrInvalidRequest
@@ -141,6 +146,14 @@ func (j *Journal) Execute(ctx context.Context, operationID string, request []byt
 		return Outcome{}, false, ErrJournalFull
 	}
 	if j.store != nil {
+		now := j.now()
+		if !now.Before(j.lastCleanup.Add(cleanupInterval)) {
+			if cleanupErr := j.store.DeleteExpiredOperations(ctx, now); cleanupErr != nil {
+				j.mu.Unlock()
+				return Outcome{}, false, cleanupErr
+			}
+			j.lastCleanup = now
+		}
 		record, inserted, reserveErr := j.store.ReserveOperation(ctx, operationID, hash[:], j.now().Add(j.retention))
 		if reserveErr != nil {
 			j.mu.Unlock()
@@ -167,7 +180,11 @@ func (j *Journal) Execute(ctx context.Context, operationID string, request []byt
 	var persistenceErr error
 	if j.store != nil {
 		now := j.now()
-		persistenceErr = j.store.CompleteOperation(context.Background(), store.OperationResult{OperationID: operationID, RequestHash: hash[:], State: "completed", Result: outcome.Result, ErrorCode: outcome.ErrorCode, CompletedAt: now, ExpiresAt: now.Add(j.retention)})
+		if len(outcome.Result) > store.MaxOperationResultBytes {
+			persistenceErr = store.ErrResultTooLarge
+		} else {
+			persistenceErr = j.store.CompleteOperation(context.Background(), store.OperationResult{OperationID: operationID, RequestHash: hash[:], State: "completed", Result: outcome.Result, ErrorCode: outcome.ErrorCode, CompletedAt: now, ExpiresAt: now.Add(j.retention)})
+		}
 	}
 	j.mu.Lock()
 	current.outcome = outcome

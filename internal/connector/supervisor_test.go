@@ -164,3 +164,46 @@ func TestNetworkChangeInterruptsBackoff(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRouteChangeRefreshesActiveAdmission(t *testing.T) {
+	now := time.Now()
+	dialer := &recoveringDialer{}
+	manager := manager(t, dialer, now)
+	source := &admissionSource{now: now, calls: make(chan uint64, 16)}
+	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.calls:
+	case <-time.After(time.Second):
+		t.Fatal("initial admission was not requested")
+	}
+	for !manager.Status().Connected {
+		time.Sleep(time.Millisecond)
+	}
+	first := manager.Status().Generation
+	supervisor.RoutesChanged()
+	select {
+	case <-source.calls:
+	case <-time.After(time.Second):
+		t.Fatal("route change did not refresh admission")
+	}
+	deadline := time.After(time.Second)
+	for manager.Status().Generation == first {
+		select {
+		case <-deadline:
+			t.Fatal("route change did not replace connector")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := supervisor.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -74,12 +74,22 @@ type StreamError struct {
 
 func (e *StreamError) Error() string { return e.Code }
 
+type StreamEnd struct {
+	Payload json.RawMessage
+}
+
+func (e *StreamEnd) Error() string { return "output stream ended" }
+
 type StreamHandler interface {
 	OpenStream(context.Context, Authorization, string, json.RawMessage, operation.Outcome, bool) (OutputStream, bool, error)
 }
 
 type ControlHandler interface {
 	HandleControl(context.Context, Authorization, protocol.Frame) operation.Outcome
+}
+
+type InputHandler interface {
+	HandleInput(context.Context, Authorization, json.RawMessage) error
 }
 
 type Config struct {
@@ -203,6 +213,7 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 	for _, capability := range welcome.Capabilities {
 		selected[capability] = true
 	}
+	var lastInputSequence uint64
 
 	frames := make(chan readResult, 1)
 	readerDone := make(chan struct{})
@@ -233,6 +244,18 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 				continue
 			case "ack", "detach":
 				s.handleControl(result.frame, writer, authorizer)
+			case "input":
+				if !selected["terminal.v1"] {
+					return ErrCapabilityUnavailable
+				}
+				var input terminalStreamInput
+				if decodePayload(result.frame.Payload, &input) != nil || input.Sequence != lastInputSequence+1 {
+					return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input sequence is invalid")}
+				}
+				if err := s.handleInput(result.frame, authorizer); err != nil {
+					return err
+				}
+				lastInputSequence = input.Sequence
 			case "cancel":
 				cancelCtx, cancel := context.WithTimeout(s.ctx, min(s.config.MutationDeadline, 5*time.Second))
 				authorization, authErr := authorizer.Authorize(cancelCtx, result.frame)
@@ -254,6 +277,20 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 			}
 		}
 	}
+}
+
+func (s *Server) handleInput(frame protocol.Frame, authorizer Authorizer) error {
+	handler, ok := s.config.Handler.(InputHandler)
+	if !ok {
+		return ErrCapabilityUnavailable
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, min(s.config.MutationDeadline, 5*time.Second))
+	defer cancel()
+	authorization, err := authorizer.Authorize(ctx, frame)
+	if err != nil || authorization.ClientID == "" {
+		return ErrCapabilityUnavailable
+	}
+	return handler.HandleInput(ctx, authorization, frame.Payload)
 }
 
 func (s *Server) handleControl(frame protocol.Frame, writer *lockedWriter, authorizer Authorizer) {
@@ -397,6 +434,11 @@ func (s *Server) stream(ctx context.Context, writer *lockedWriter, conn Connecti
 	for {
 		frame, err := stream.Next(ctx)
 		if err != nil {
+			var streamEnd *StreamEnd
+			if errors.As(err, &streamEnd) {
+				_ = writer.write(protocol.Frame{Type: "event", RequestID: "stream", Version: protocol.ProtocolVersion, Capability: "terminal.v1", Payload: streamEnd.Payload})
+				return
+			}
 			var streamError *StreamError
 			if errors.As(err, &streamError) {
 				_ = writer.write(errorFrameWithDetails("stream", streamError.Code, "output stream closed", false, streamError.Details))

@@ -57,6 +57,20 @@ func TestRegisterRequiresPublicAcknowledgementAndLoopback(t *testing.T) {
 	}
 }
 
+func TestListEnvironmentDoesNotDiscloseOtherEnvironment(t *testing.T) {
+	r := newRegistry(t, &fakeProber{}, 1)
+	if _, err := r.Register("prv-a", "env-a", "web", Target{"127.0.0.1", 3000}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Register("prv-b", "env-b", "web", Target{"127.0.0.1", 3001}, true); err != nil {
+		t.Fatal(err)
+	}
+	items := r.ListEnvironment("env-a")
+	if len(items) != 1 || items[0].Identity != "prv-a" {
+		t.Fatalf("items=%#v", items)
+	}
+}
+
 func TestTargetChangePreservesIdentityAndRequiresNewProbe(t *testing.T) {
 	r := newRegistry(t, &fakeProber{}, 1)
 	record, err := r.Register("prv", "env", "web", Target{"127.0.0.1", 3000}, true)

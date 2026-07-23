@@ -66,7 +66,7 @@ func TestSessionOperationVectorCoverage(t *testing.T) {
 	}
 	defer f.Close()
 	required := map[string]bool{
-		"create": false, "attach-replay": false, "input": false, "resize": false,
+		"create": false, "attach-replay": false, "attach-live-boundary": false, "input": false, "resize": false,
 		"signal": false, "replay-gap": false, "stale-generation-input": false,
 		"duplicate-input": false, "delete-running": false, "slow-consumer": false,
 	}

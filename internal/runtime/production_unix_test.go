@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,10 +58,14 @@ func TestHeartbeatSenderUsesRenewableIdentityAndExactBodyProof(t *testing.T) {
 	_ = activity.Batch{}
 }
 
-func TestProductionHelperRequiresHostedProfileAndHTTPSControl(t *testing.T) {
+func TestProductionHelperRequiresHTTPSControl(t *testing.T) {
 	base := map[string]string{"PAPERBOAT_HELPER_STATE_ROOT": filepath.Join(t.TempDir(), "state")}
+	base["PAPERBOAT_HELPER_PROFILE"] = "byod"
+	base["PAPERBOAT_WORKSPACE_ROOT"] = t.TempDir()
+	base["PAPERBOAT_CONTROL_URL"] = "http://control.example.test"
+	base["PAPERBOAT_MACHINE_ID"] = "cm_1"
 	if _, err := NewProductionHelper(context.Background(), "test", func(name string) string { return base[name] }); !errors.Is(err, ErrProductionInvalid) {
-		t.Fatalf("byod error=%v", err)
+		t.Fatalf("byod control error=%v", err)
 	}
 	base["PAPERBOAT_HELPER_PROFILE"] = "hosted"
 	base["PAPERBOAT_WORKSPACE"] = filepath.Join(t.TempDir(), "volume")
@@ -69,5 +74,47 @@ func TestProductionHelperRequiresHostedProfileAndHTTPSControl(t *testing.T) {
 	base["PAPERBOAT_CONTROL_URL"] = "http://control.example.test"
 	if _, err := NewProductionHelper(context.Background(), "test", func(name string) string { return base[name] }); !errors.Is(err, ErrProductionInvalid) {
 		t.Fatalf("control error=%v", err)
+	}
+}
+
+func TestValidatedBYODShellRequiresExecutableAbsoluteFile(t *testing.T) {
+	shell := filepath.Join(t.TempDir(), "shell")
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := validatedBYODShell(shell); err != nil || got != shell {
+		t.Fatalf("shell=%q err=%v", got, err)
+	}
+	for _, invalid := range []string{"relative", filepath.Join(t.TempDir(), "missing")} {
+		if _, err := validatedBYODShell(invalid); !errors.Is(err, ErrProductionInvalid) {
+			t.Fatalf("invalid shell %q err=%v", invalid, err)
+		}
+	}
+	if got, err := validatedBYODShell(""); err != nil || got != "/bin/sh" {
+		t.Fatalf("fallback shell=%q err=%v", got, err)
+	}
+}
+
+func TestValidateBYODWorkspaceRejectsNonCanonicalAndSymlinkRoots(t *testing.T) {
+	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBYODWorkspace(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBYODWorkspace(root + string(os.PathSeparator) + "."); !errors.Is(err, ErrProductionInvalid) {
+		t.Fatalf("non-canonical error=%v", err)
+	}
+	link := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBYODWorkspace(link); !errors.Is(err, ErrProductionInvalid) {
+		t.Fatalf("symlink error=%v", err)
+	}
+	if err := validateBYODWorkspace("relative"); !errors.Is(err, ErrProductionInvalid) {
+		t.Fatalf("relative error=%v", err)
 	}
 }

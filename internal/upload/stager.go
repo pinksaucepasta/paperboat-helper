@@ -283,6 +283,36 @@ func (s *Stager) Remove(relativePath string) error {
 	return nil
 }
 
+// AbsolutePath resolves a staged relative path for use by processes in the
+// environment. It accepts only an existing publication directly below the
+// configured environment directory.
+func (s *Stager) AbsolutePath(relativePath string) (string, error) {
+	if filepath.IsAbs(relativePath) || strings.ContainsRune(relativePath, 0) {
+		return "", &Error{Code: InvalidPath}
+	}
+	clean := filepath.Clean(relativePath)
+	environmentID, filename := filepath.Dir(clean), filepath.Base(clean)
+	if !safeSegment(environmentID) || filename == "." || filename == ".." || clean != filepath.Join(environmentID, filename) {
+		return "", &Error{Code: InvalidPath}
+	}
+	directory := filepath.Join(s.config.Root, environmentID)
+	resolved, err := filepath.EvalSymlinks(directory)
+	resolvedRoot, rootErr := filepath.EvalSymlinks(s.config.Root)
+	if err != nil || rootErr != nil || resolved != filepath.Join(resolvedRoot, environmentID) {
+		return "", &Error{Code: InvalidPath, Cause: errors.Join(err, rootErr)}
+	}
+	path := filepath.Join(directory, filename)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", &Error{Code: InvalidPath, Cause: err}
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || stat.Nlink != 1 {
+		return "", &Error{Code: InvalidPath}
+	}
+	return path, nil
+}
+
 func validSHA256(value string) bool {
 	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
 		return false

@@ -17,6 +17,7 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/operation"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
+	"github.com/pinksaucepasta/paperboat-helper/internal/process"
 	"github.com/pinksaucepasta/paperboat-helper/internal/protocol"
 	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
 	"github.com/pinksaucepasta/paperboat-helper/internal/session"
@@ -26,7 +27,20 @@ type healthyProber struct{}
 
 func (healthyProber) Probe(context.Context, preview.Target) error { return nil }
 
+type testSessionLauncher struct {
+	sessions *session.Manager
+	args     []string
+}
+
+func (l testSessionLauncher) Launch(ctx context.Context, request process.LaunchRequest) (session.Snapshot, error) {
+	return l.sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: pty.Command{Path: "/bin/sh", Args: append([]string(nil), l.args...), Env: []string{"PATH=/usr/bin:/bin", "TERM=xterm"}, CWD: request.CWD, Dimensions: request.Dimensions}})
+}
+
 func verticalServer(t *testing.T) (*Server, *activity.Collector) {
+	return verticalServerCommand(t, []string{"-c", "printf stream-data; read line"})
+}
+
+func verticalServerCommand(t *testing.T, shellArgs []string) (*Server, *activity.Collector) {
 	t.Helper()
 	root := t.TempDir()
 	adapter, err := pty.NewAdapter(root)
@@ -50,7 +64,7 @@ func verticalServer(t *testing.T) (*Server, *activity.Collector) {
 	readiness.Set("health.v1", health.Ready, "", 0)
 	dispatcher, err := NewDispatcher(DispatcherConfig{
 		Sessions: sessions, Previews: previews, Activity: collector, Health: readiness,
-		ShellPath: "/bin/sh", ShellArgs: []string{"-c", "printf stream-data; read line"}, ShellEnv: []string{"PATH=/usr/bin:/bin", "TERM=xterm"}, WorkspaceRoot: root,
+		SessionLauncher: testSessionLauncher{sessions: sessions, args: shellArgs}, WorkspaceRoot: root,
 		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 256)),
 	})
 	if err != nil {
@@ -75,6 +89,65 @@ func verticalServer(t *testing.T) (*Server, *activity.Collector) {
 		_ = sessions.Shutdown(ctx)
 	})
 	return server, collector
+}
+
+func TestTerminalStreamEndFollowsOutputWithExactExit(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("requires /bin/sh")
+	}
+	for _, test := range []struct {
+		name    string
+		command string
+		code    int
+		signal  string
+	}{
+		{name: "zero", command: "printf final-output; exit 0", code: 0},
+		{name: "nonzero", command: "printf final-output; exit 7", code: 7},
+		{name: "signal", command: "printf final-output; kill -TERM $$", code: 143, signal: "terminated"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, _ := verticalServerCommand(t, []string{"-c", test.command})
+			client, peer := net.Pipe()
+			go server.Serve(peer)
+			hello := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
+			_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: hello})
+			created := sendRequest(t, client, request("req_create", "op_create_exit", json.RawMessage(`{"action":"create","name":"exit-test","columns":80,"rows":24}`)))
+			var createResponse struct {
+				Result struct {
+					ID string `json:"id"`
+				} `json:"result"`
+			}
+			if json.Unmarshal(created.Payload, &createResponse) != nil || createResponse.Result.ID == "" {
+				t.Fatalf("create=%s", created.Payload)
+			}
+			attachPayload, _ := json.Marshal(map[string]any{"action": "attach", "session_id": createResponse.Result.ID, "from_sequence": 0})
+			if attached := sendRequest(t, client, request("req_attach", "op_attach_exit", attachPayload)); attached.Type != "response" {
+				t.Fatalf("attach=%s", attached.Payload)
+			}
+			output, err := protocol.ReadBinaryFrame(client)
+			if err != nil || string(output.Data) != "final-output" {
+				t.Fatalf("output=%q err=%v", output.Data, err)
+			}
+			end, err := protocol.ReadFrame(client)
+			if err != nil || end.Type != "event" || end.Capability != "terminal.v1" {
+				t.Fatalf("end=%#v err=%v", end, err)
+			}
+			var payload struct {
+				Event         string `json:"event"`
+				SessionID     string `json:"session_id"`
+				State         string `json:"state"`
+				FinalSequence uint64 `json:"final_sequence"`
+				Exit          struct {
+					Code   int    `json:"code"`
+					Signal string `json:"signal"`
+				} `json:"exit"`
+			}
+			if json.Unmarshal(end.Payload, &payload) != nil || payload.Event != "terminal_stream_end" || payload.SessionID != createResponse.Result.ID || payload.State != "exited" || payload.FinalSequence != uint64(len("final-output")) || payload.Exit.Code != test.code || payload.Exit.Signal != test.signal {
+				t.Fatalf("payload=%s", end.Payload)
+			}
+			_ = client.Close()
+		})
+	}
 }
 
 func TestAttachStreamsReplayAndLiveOutputAsBinaryFrames(t *testing.T) {
@@ -128,6 +201,38 @@ func TestAttachStreamsReplayAndLiveOutputAsBinaryFrames(t *testing.T) {
 	healthFrame.Capability = "health.v1"
 	if response = sendRequest(t, client, healthFrame); response.Type != "response" {
 		t.Fatalf("post-detach health=%s", response.Payload)
+	}
+	_ = client.Close()
+}
+
+func TestAttachLargeReplayUsesBinaryStreamNotStructuredResponse(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("requires /bin/sh")
+	}
+	server, _ := verticalServerCommand(t, []string{"-c", "dd if=/dev/zero bs=65536 count=1 2>/dev/null; read line"})
+	client, peer := net.Pipe()
+	go server.Serve(peer)
+	hello := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: hello})
+	response := sendRequest(t, client, request("req_create", "op_create_large", json.RawMessage(`{"action":"create","name":"large-replay","columns":80,"rows":24}`)))
+	var created struct {
+		Result struct {
+			ID string `json:"id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Payload, &created); err != nil || created.Result.ID == "" {
+		t.Fatalf("create=%s err=%v", response.Payload, err)
+	}
+	// Let the PTY output enter retained history before attaching.
+	time.Sleep(100 * time.Millisecond)
+	attachPayload, _ := json.Marshal(map[string]any{"action": "attach", "session_id": created.Result.ID, "from_sequence": 0})
+	response = sendRequest(t, client, request("req_attach", "op_attach_large", attachPayload))
+	if response.Type != "response" || len(response.Payload) > protocol.MaxStructuredFrame/8 || bytes.Contains(response.Payload, []byte(`"events"`)) {
+		t.Fatalf("attach response=%d bytes payload=%s", len(response.Payload), response.Payload)
+	}
+	frame, err := protocol.ReadBinaryFrame(client)
+	if err != nil || frame.Channel != protocol.Stdout || len(frame.Data) == 0 {
+		t.Fatalf("binary=%#v err=%v", frame, err)
 	}
 	_ = client.Close()
 }

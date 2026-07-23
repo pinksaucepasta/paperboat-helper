@@ -100,6 +100,10 @@ func (s *Supervisor) NetworkChanged() {
 	}
 }
 
+// RoutesChanged refreshes the admission snapshot without dropping the active
+// connector. Accept installs the replacement before draining the old client.
+func (s *Supervisor) RoutesChanged() { s.NetworkChanged() }
+
 func (s *Supervisor) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.running {
@@ -139,8 +143,18 @@ func (s *Supervisor) loop(ctx context.Context) {
 				backoff = s.config.InitialBackoff
 				refreshAt := admission.ExpiresAt.Add(-admissionRefreshMargin(time.Until(admission.ExpiresAt)))
 				waitCtx, cancelWait := context.WithDeadline(ctx, refreshAt)
-				waitErr := s.config.Manager.WaitDisconnected(waitCtx, result.Generation)
-				refreshDue := errors.Is(waitErr, context.DeadlineExceeded) && ctx.Err() == nil
+				waitResult := make(chan error, 1)
+				go func() { waitResult <- s.config.Manager.WaitDisconnected(waitCtx, result.Generation) }()
+				var waitErr error
+				refreshDue := false
+				select {
+				case waitErr = <-waitResult:
+					refreshDue = errors.Is(waitErr, context.DeadlineExceeded) && ctx.Err() == nil
+				case <-s.wake:
+					refreshDue = ctx.Err() == nil
+					cancelWait()
+					waitErr = <-waitResult
+				}
 				cancelWait()
 				if refreshDue {
 					continue

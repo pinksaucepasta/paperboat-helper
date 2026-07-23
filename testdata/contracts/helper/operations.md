@@ -15,6 +15,14 @@ Concurrent uploads are limited by helper configuration and excess work returns
 
 ## Preview identity and readiness
 
+Preview registration, listing, and removal are agent operations handled by the local
+`paperboat-helper`. Every operation is bound to the helper's assigned environment;
+cross-environment IDs, names, state, and URLs are rejected and never disclosed. A
+successful registration response returns the public URL to the calling agent, which
+surfaces it in the existing terminal session. `pb` and the dashboard may list the user's
+active previews/tunnels account-wide with associated project, machine, and user context,
+and may revoke an existing preview, but cannot create one.
+
 The control plane owns `preview_base_domain`. A preview key is lowercase ASCII matching
 `p-[a-z2-7]{26}`: `p-` plus the first 130 bits of
 `HMAC-SHA256(preview_identity_key, environment_id || 0x00 || logical_name)`, base32 without

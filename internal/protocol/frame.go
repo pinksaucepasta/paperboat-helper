@@ -46,7 +46,7 @@ type Frame struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
-var allowedTypes = map[string]bool{"hello": true, "welcome": true, "request": true, "response": true, "error": true, "cancel": true, "heartbeat": true, "ack": true, "detach": true}
+var allowedTypes = map[string]bool{"hello": true, "welcome": true, "request": true, "response": true, "error": true, "event": true, "cancel": true, "heartbeat": true, "ack": true, "detach": true, "input": true}
 var capabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{1,63}$`)
 
 func (f Frame) Validate() error {
@@ -87,6 +87,10 @@ func (f Frame) Validate() error {
 		}
 	case "cancel":
 		if f.OperationID == "" {
+			return &Error{Code: InvalidFrame}
+		}
+	case "input":
+		if f.Capability != "terminal.v1" || f.Payload == nil || f.OperationID != "" {
 			return &Error{Code: InvalidFrame}
 		}
 	}

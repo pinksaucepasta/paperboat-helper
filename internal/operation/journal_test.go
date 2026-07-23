@@ -187,3 +187,58 @@ func TestCompletionPersistenceFailureRemainsPending(t *testing.T) {
 		t.Fatalf("calls=%d err=%v", calls.Load(), err)
 	}
 }
+
+func TestPersistentJournalNeverStoresOversizedOutcome(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	durable, err := store.Open(context.Background(), store.Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer durable.Close()
+	now := time.Now().UTC()
+	journal, err := NewPersistentJournal(context.Background(), 8, durable, time.Hour, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = journal.Execute(context.Background(), "op_large_0001", []byte(`{}`), func(context.Context) Outcome {
+		return Outcome{Result: make([]byte, store.MaxOperationResultBytes+1)}
+	})
+	if !errors.Is(err, ErrOperationUncertain) || !errors.Is(err, store.ErrResultTooLarge) {
+		t.Fatalf("err=%v", err)
+	}
+	records, err := durable.Operations(context.Background(), now, 8)
+	if err != nil || len(records) != 1 || records[0].State != "pending" || len(records[0].Result) != 0 {
+		t.Fatalf("records=%#v err=%v", records, err)
+	}
+}
+
+func TestPersistentJournalDeletesExpiredRowsDuringNormalOperation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	durable, err := store.Open(context.Background(), store.Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer durable.Close()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	journal, err := NewPersistentJournal(context.Background(), 8, durable, time.Hour, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRequest := []byte(`{"old":true}`)
+	oldHash, err := CanonicalHash(oldRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.PutOperation(context.Background(), store.OperationResult{OperationID: "op_expired_0001", RequestHash: oldHash[:], Result: []byte(`{"old":true}`), CompletedAt: now, ExpiresAt: now.Add(30 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	var calls atomic.Int32
+	outcome, replay, err := journal.Execute(context.Background(), "op_expired_0001", []byte(`{"new":true}`), func(context.Context) Outcome {
+		calls.Add(1)
+		return Outcome{Result: []byte(`{"new":true}`)}
+	})
+	if err != nil || replay || calls.Load() != 1 || string(outcome.Result) != `{"new":true}` {
+		t.Fatalf("outcome=%s replay=%v calls=%d err=%v", outcome.Result, replay, calls.Load(), err)
+	}
+}

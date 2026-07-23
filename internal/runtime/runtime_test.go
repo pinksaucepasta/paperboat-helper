@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/testleak"
 )
 
@@ -26,6 +27,13 @@ type service struct {
 	recorder              *recorder
 	startErr, shutdownErr error
 }
+
+type dynamicHealthService struct {
+	service
+	capability health.Capability
+}
+
+func (s *dynamicHealthService) CapabilityHealth() health.Capability { return s.capability }
 
 func (s *service) Start(context.Context) error { s.recorder.add("start:" + s.name); return s.startErr }
 func (s *service) Shutdown(context.Context) error {
@@ -84,6 +92,29 @@ func TestRequiredFailureRollsBackButOptionalFailureDegradesOnlyCapability(t *tes
 		if rec.events[i] != want[i] {
 			t.Fatalf("events=%v", rec.events)
 		}
+	}
+}
+
+func TestRuntimeHealthSourceUsesCurrentComponentHealth(t *testing.T) {
+	rec := &recorder{}
+	connector := &dynamicHealthService{
+		service:    service{name: "edge", recorder: rec},
+		capability: health.Capability{State: health.Ready},
+	}
+	components := []Component{{Capability: "edge", Required: true, Service: connector}}
+	runtime, err := NewRuntime(Config{Version: "1", Components: components})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &runtimeHealthSource{}
+	source.set(runtime, components)
+	if err := runtime.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	connector.capability = health.Capability{State: health.Unavailable, Reason: "connector_unavailable", RetryAfterMs: 1000}
+	got := source.Snapshot().Capabilities["edge"]
+	if got.State != health.Unavailable || got.Reason != "connector_unavailable" || got.RetryAfterMs != 1000 {
+		t.Fatalf("edge health = %#v", got)
 	}
 }
 

@@ -46,7 +46,7 @@ type ResourceLimits struct {
 	MaxActivityEvents    int
 }
 
-var DefaultResources = ResourceLimits{MaxSessions: 64, MaxAttachments: 16, MaxInputDecisions: 10_000, HistoryBytes: 4 << 20, MaxConcurrentUploads: 2, MaxPreviewTargets: 128, MaxConcurrentProbes: 8, MaxConcurrentOps: 32, MaxActivityEvents: 1000}
+var DefaultResources = ResourceLimits{MaxSessions: 64, MaxAttachments: 16, MaxInputDecisions: 10_000, HistoryBytes: 64 << 10, MaxConcurrentUploads: 2, MaxPreviewTargets: 128, MaxConcurrentProbes: 8, MaxConcurrentOps: 32, MaxActivityEvents: 1000}
 
 func (c Config) Validate() error {
 	if c.Profile != Hosted && c.Profile != BYOD {

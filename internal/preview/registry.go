@@ -53,7 +53,24 @@ type Record struct {
 	Reason        string    `json:"reason,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	Revision      uint64    `json:"revision"`
+	PublicURL     string    `json:"public_url,omitempty"`
 }
+
+// RegisterCanonical records a server-assigned identity and public URL locally.
+// The control plane remains authoritative for identity, route, and lifecycle.
+func (r *Registry) RegisterCanonical(identity, publicURL, environmentID, logicalName string, target Target) (Record, error) {
+	record, err := r.Register(identity, environmentID, logicalName, target, true)
+	if err != nil {
+		return Record{}, err
+	}
+	r.mu.Lock()
+	record = r.records[identity]
+	record.PublicURL = publicURL
+	r.records[identity] = record
+	r.mu.Unlock()
+	return cloneRecord(record), nil
+}
+
 type Clock interface{ Now() time.Time }
 type realClock struct{}
 
@@ -148,6 +165,19 @@ func (r *Registry) List() []Record {
 	return records
 }
 
+func (r *Registry) ListEnvironment(environmentID string) []Record {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	records := make([]Record, 0, len(r.records))
+	for _, record := range r.records {
+		if record.EnvironmentID == environmentID && record.State != Removed {
+			records = append(records, cloneRecord(record))
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Identity < records[j].Identity })
+	return records
+}
+
 func (r *Registry) ResourceCounts() map[string]uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -214,9 +244,6 @@ func (r *Registry) Probe(ctx context.Context, identity string) (Record, error) {
 	}
 	if !transitions[current.State][next] && current.State != next {
 		return Record{}, fmt.Errorf("%s to %s: %w", current.State, next, ErrInvalidTransition)
-	}
-	if current.State == next && current.Reason == reason {
-		return cloneRecord(current), nil
 	}
 	current.State = next
 	current.Reason = reason
