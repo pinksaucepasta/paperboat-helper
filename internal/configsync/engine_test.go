@@ -55,6 +55,7 @@ func TestEngineRunsInitialSyncAndBoundedShutdownFlush(t *testing.T) {
 		AgeRecipient:     identity.Recipient().String(), AgeIdentities: identity.String(),
 		Policy: RuntimePolicy{
 			Format: "paperboat-chezmoi-age-v1", Revision: "policy",
+			Includes:            []string{".bashrc"},
 			MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
 			MaxFileBytes:        1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
 			MinimumPushInterval: time.Minute, MaximumDirtyDelay: time.Minute,
@@ -112,6 +113,7 @@ func TestEngineAcknowledgesRotatedKeyOnlyAfterSuccessfulSync(t *testing.T) {
 		AgeIdentities: identity.String(),
 		Policy: RuntimePolicy{
 			Format: "paperboat-chezmoi-age-v1", Revision: "policy",
+			Includes:            []string{".bashrc"},
 			MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
 			MaxFileBytes:        1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
 			MinimumPushInterval: time.Minute, MaximumDirtyDelay: time.Minute,
@@ -166,6 +168,7 @@ func TestEngineDoesNotAcknowledgeRotatedKeyAfterFailedSync(t *testing.T) {
 		AgeIdentities: identity.String(),
 		Policy: RuntimePolicy{
 			Format: "paperboat-chezmoi-age-v1", Revision: "policy",
+			Includes:            []string{".bashrc"},
 			MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
 			MaxFileBytes:        1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
 			MinimumPushInterval: time.Minute, MaximumDirtyDelay: time.Minute,

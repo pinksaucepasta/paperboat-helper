@@ -101,6 +101,7 @@ func TestControlClientCredentialAndLeaseLifecycle(t *testing.T) {
 				WarningRevision:  "warning-1", KeyVersion: 1, AgeRecipient: ageIdentity.Recipient().String(), AgeIdentities: ageIdentity.String(),
 				Policy: RuntimePolicy{
 					Format: "paperboat-chezmoi-age-v1", Revision: "policy-1",
+					Includes:            []string{".bashrc"},
 					MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
 					MaxFileBytes:        5 << 20, MaxBatchBytes: 25 << 20, Debounce: 10 * time.Second,
 					MinimumPushInterval: 5 * time.Minute, MaximumDirtyDelay: 5 * time.Minute,

@@ -44,7 +44,8 @@ func validateRuntimeDescriptor(descriptor RuntimeDescriptor, credential Credenti
 		policy.RetryLimit < 1 || policy.RetryLimit > 20 ||
 		policy.ShutdownFlushTimeout < time.Second || policy.ShutdownFlushTimeout > 10*time.Minute ||
 		policy.SummaryLimit < 1 || policy.SummaryLimit > 1000 ||
-		len(policy.Includes) > 256 || len(policy.Excludes) > 512 || len(policy.MandatoryExclusions) > 1024 {
+		len(policy.Includes) < 1 || len(policy.Includes) > 256 ||
+		len(policy.Excludes) > 512 || len(policy.MandatoryExclusions) > 1024 {
 		return ErrPolicyInvalid
 	}
 	for _, required := range requiredMandatoryExclusions {
