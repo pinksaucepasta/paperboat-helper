@@ -136,7 +136,7 @@ func (s *Supervisor) run(ctx context.Context) error {
 			case <-ctx.Done():
 				authorized = false
 			case <-revalidate.C:
-				s.credentials.InvalidateCredential()
+				revalidateCredential(s.credentials)
 				current, credentialErr := s.credentials.Credential(ctx)
 				authorized = credentialErr == nil && sameCredentialBinding(credential, current)
 			}
@@ -158,6 +158,14 @@ func (s *Supervisor) run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func revalidateCredential(credentials CredentialSource) {
+	if revalidator, ok := credentials.(interface{ RevalidateCredential() }); ok {
+		revalidator.RevalidateCredential()
+		return
+	}
+	credentials.InvalidateCredential()
 }
 
 func validActivationCredential(credential Credential) bool {

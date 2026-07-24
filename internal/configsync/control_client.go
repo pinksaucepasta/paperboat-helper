@@ -241,6 +241,15 @@ func (c *ControlClient) InvalidateCredential() {
 	c.mu.Unlock()
 }
 
+// RevalidateCredential forces a fresh eligibility decision without discarding
+// repository access that is independently scoped and unexpired. Full
+// invalidation still clears both layers after authorization loss or shutdown.
+func (c *ControlClient) RevalidateCredential() {
+	c.mu.Lock()
+	c.credential = Credential{}
+	c.mu.Unlock()
+}
+
 func (c *ControlClient) RepositoryAccess(ctx context.Context) (RepositoryAccess, error) {
 	c.mu.Lock()
 	now := c.clock().UTC()

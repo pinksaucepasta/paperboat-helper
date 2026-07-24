@@ -167,6 +167,56 @@ func TestControlClientCredentialAndLeaseLifecycle(t *testing.T) {
 	}
 }
 
+func TestControlClientRevalidationRetainsUnexpiredRepositoryAccess(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	var credentialRequests, accessRequests int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/config/credentials":
+			credentialRequests++
+			writeTestJSON(t, w, map[string]any{"data": map[string]any{
+				"credential": "credential", "environment_id": "env", "helper_id": "helper",
+				"assignment_id": "assignment", "warning_revision": "warning",
+				"expires_at": now.Add(5 * time.Minute),
+			}})
+		case "/v1/config/repository-access":
+			accessRequests++
+			writeTestJSON(t, w, map[string]any{"data": RepositoryAccess{
+				RepositoryID: "repository", AssignmentID: "assignment", EnvironmentID: "env",
+				HelperID: "helper", CloneURL: "https://github.example.test/example/config.git",
+				PublishURL: "https://github.example.test/example/config.git", Branch: "main",
+				Username: "x-access-token", Password: "token", Capability: "repository_contents_write",
+				ExpiresAt: now.Add(time.Hour),
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := NewControlClient(ControlClientConfig{
+		BaseURL: server.URL, AllowedHosts: []string{"127.0.0.1"}, RepositoryHosts: []string{"github.example.test"},
+		Identities: tokenSourceFunc(func(context.Context) (string, error) { return "identity", nil }),
+		Proofs:     &recordingProofSource{}, OperationID: func() (string, error) { return "operation", nil },
+		Transport: server.Client().Transport, Clock: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RepositoryAccess(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client.RevalidateCredential()
+	if _, err := client.Credential(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RepositoryAccess(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if credentialRequests != 2 || accessRequests != 1 {
+		t.Fatalf("credential requests=%d access requests=%d", credentialRequests, accessRequests)
+	}
+}
+
 func TestControlClientMapsLeaseFailuresAndInvalidatesAuthorization(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	status, code := http.StatusConflict, "lease_busy"
