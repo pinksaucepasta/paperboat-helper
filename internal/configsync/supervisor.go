@@ -147,13 +147,15 @@ func (s *Supervisor) run(ctx context.Context) error {
 			s.active = nil
 		}
 		s.mu.Unlock()
+		if ctx.Err() == nil {
+			s.credentials.InvalidateCredential()
+		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		shutdownErr := runtime.Shutdown(shutdownCtx)
 		shutdownCancel()
 		if ctx.Err() != nil {
 			return shutdownErr
 		}
-		s.credentials.InvalidateCredential()
 		if !resetSupervisorTimer(ctx, timer, s.retry) {
 			return nil
 		}
