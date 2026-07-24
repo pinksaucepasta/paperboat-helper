@@ -14,7 +14,13 @@ import (
 var ErrPolicyInvalid = errors.New("invalid config sync policy")
 
 var requiredMandatoryExclusions = []string{
-	".git", "**/.git", ".paperboat", "**/.paperboat", ".ssh", "**/.ssh", ".gnupg", "**/.gnupg",
+	".git", "**/.git", ".paperboat", "**/.paperboat",
+	".config/paperboat", ".config/paperboat/**",
+	".local/bin/paperboat-helper",
+	".config/systemd/user/paperboat-helper.service",
+	".config/systemd/user/default.target.wants/paperboat-helper.service",
+	"Library/LaunchAgents/com.pinksaucepasta.paperboat-helper.plist",
+	".ssh", "**/.ssh", ".gnupg", "**/.gnupg",
 	".aws", "**/.aws", ".kube", "**/.kube", ".docker/config.json",
 	".git-credentials", "**/.git-credentials", ".netrc", "**/.netrc",
 	".env", ".env.*", "**/.env", "**/.env.*", "**/credentials", "**/credentials.*",

@@ -24,6 +24,12 @@ func TestTakeSnapshotIsBoundedAndRejectsUnsafeEntries(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".ssh", "id"), []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(root, ".config", "paperboat", "helper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".config", "paperboat", "helper", "agent-token"), []byte("runtime secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink("../outside", filepath.Join(root, ".escape")); err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +46,9 @@ func TestTakeSnapshotIsBoundedAndRejectsUnsafeEntries(t *testing.T) {
 	}
 	if _, ok := snapshot.Files[".ssh/id"]; ok {
 		t.Fatal("mandatory-excluded secret was captured")
+	}
+	if _, ok := snapshot.Files[".config/paperboat/helper/agent-token"]; ok {
+		t.Fatal("Paperboat runtime credential was captured")
 	}
 	reasons := make(map[string]string)
 	for _, skipped := range snapshot.Skipped {
