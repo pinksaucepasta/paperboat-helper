@@ -35,6 +35,7 @@ func TestTakeSnapshotIsBoundedAndRejectsUnsafeEntries(t *testing.T) {
 	}
 	policy := RuntimePolicy{
 		MaxFileBytes: 8, MaxBatchBytes: 16,
+		Includes:            []string{".zshrc", ".large", ".escape", ".ssh/**", ".config/paperboat/**"},
 		MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
 	}
 	snapshot, err := TakeSnapshot(root, policy)
@@ -56,6 +57,30 @@ func TestTakeSnapshotIsBoundedAndRejectsUnsafeEntries(t *testing.T) {
 	}
 	if reasons[".large"] != "max_file_bytes" || reasons[".escape"] != "unsafe_symlink" {
 		t.Fatalf("skipped = %#v", snapshot.Skipped)
+	}
+}
+
+func TestTakeSnapshotWithEmptyIncludesIsFailClosed(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".cache"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".cache", "unmanaged"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := TakeSnapshot(root, RuntimePolicy{MaxFileBytes: 1 << 20, MaxBatchBytes: 2 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Files) != 0 || len(snapshot.Skipped) != 0 {
+		t.Fatalf("empty includes observed filesystem entries: %#v", snapshot)
+	}
+	if managedPath(".cache/unmanaged", RuntimePolicy{}) || mayContainManagedPath(".cache", RuntimePolicy{}) {
+		t.Fatal("empty includes retained implicit hidden-tree scope")
 	}
 }
 

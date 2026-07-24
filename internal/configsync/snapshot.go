@@ -123,22 +123,15 @@ func TakeSnapshot(root string, policy RuntimePolicy) (Snapshot, error) {
 
 func managedPath(path string, policy RuntimePolicy) bool {
 	path = filepath.ToSlash(filepath.Clean(path))
-	if path == "." || mandatoryExcluded(path, policy) || matchesAnyPolicyPattern(path, policy.Excludes) {
+	if path == "." || len(policy.Includes) == 0 || mandatoryExcluded(path, policy) || matchesAnyPolicyPattern(path, policy.Excludes) {
 		return false
 	}
-	if len(policy.Includes) > 0 {
-		return matchesAnyPolicyPattern(path, policy.Includes)
-	}
-	first := strings.Split(path, "/")[0]
-	return strings.HasPrefix(first, ".") && first != "." && first != ".."
+	return matchesAnyPolicyPattern(path, policy.Includes)
 }
 
 func mayContainManagedPath(path string, policy RuntimePolicy) bool {
-	if mandatoryExcluded(path, policy) || matchesAnyPolicyPattern(path, policy.Excludes) {
+	if len(policy.Includes) == 0 || mandatoryExcluded(path, policy) || matchesAnyPolicyPattern(path, policy.Excludes) {
 		return false
-	}
-	if len(policy.Includes) == 0 {
-		return strings.HasPrefix(strings.Split(path, "/")[0], ".")
 	}
 	prefix := path + "/"
 	for _, pattern := range policy.Includes {
