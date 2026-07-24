@@ -91,6 +91,13 @@ func mandatoryExcluded(path string, policy RuntimePolicy) bool {
 	if path == "." || strings.HasPrefix(path, "../") || strings.HasPrefix(path, "/") {
 		return true
 	}
+	for _, root := range policy.RuntimeExclusionRoots {
+		root = filepath.ToSlash(filepath.Clean(root))
+		if root != "." && root != ".." && !strings.HasPrefix(root, "../") &&
+			(path == root || strings.HasPrefix(path, root+"/")) {
+			return true
+		}
+	}
 	for _, pattern := range policy.MandatoryExclusions {
 		if matched, err := doublestar.Match(pattern, path); err == nil && matched {
 			return true

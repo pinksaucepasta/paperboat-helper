@@ -116,6 +116,7 @@ type RuntimePolicy struct {
 	ClassifierEnabled       bool          `json:"classifier_enabled"`
 	ClassifierRevision      string        `json:"classifier_revision"`
 	ClassifierModelRevision string        `json:"classifier_model_revision"`
+	RuntimeExclusionRoots   []string      `json:"-"`
 }
 
 type RuntimeDescriptor struct {

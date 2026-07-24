@@ -51,6 +51,10 @@ func newProductionConfigSync(config productionConfigSyncConfig) (*configsync.Sup
 				descriptor.WarningRevision != credential.WarningRevision {
 				return nil, configsync.ErrAuthorization
 			}
+			descriptor, err = protectConfigSyncRuntimeState(descriptor, config.HomeRoot, config.StateRoot)
+			if err != nil {
+				return nil, err
+			}
 			hash := sha256.Sum256([]byte(descriptor.AssignmentID))
 			assignmentRoot := filepath.Join(config.StateRoot, "config-sync", hex.EncodeToString(hash[:16]))
 			if err := os.MkdirAll(assignmentRoot, 0o700); err != nil {
@@ -94,6 +98,31 @@ func newProductionConfigSync(config productionConfigSyncConfig) (*configsync.Sup
 			})
 		},
 	})
+}
+
+func protectConfigSyncRuntimeState(
+	descriptor configsync.RuntimeDescriptor,
+	homeRoot string,
+	stateRoot string,
+) (configsync.RuntimeDescriptor, error) {
+	relative, err := filepath.Rel(homeRoot, stateRoot)
+	if err != nil {
+		return configsync.RuntimeDescriptor{}, errors.Join(ErrProductionInvalid, err)
+	}
+	if relative == "." {
+		return configsync.RuntimeDescriptor{}, errors.Join(ErrProductionInvalid, errors.New("config sync state root cannot be the managed home"))
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return descriptor, nil
+	}
+	relative = filepath.ToSlash(relative)
+	for _, existing := range descriptor.Policy.RuntimeExclusionRoots {
+		if existing == relative {
+			return descriptor, nil
+		}
+	}
+	descriptor.Policy.RuntimeExclusionRoots = append(descriptor.Policy.RuntimeExclusionRoots, relative)
+	return descriptor, nil
 }
 
 func productionConfigHome(profileHosted bool, hostedRoot string) (string, error) {

@@ -40,3 +40,13 @@ func TestValidateRuntimeDescriptorRejectsEmptyIncludes(t *testing.T) {
 		t.Fatalf("explicit include rejected: %v", err)
 	}
 }
+
+func TestMandatoryExcludedHonorsExactRuntimeRoots(t *testing.T) {
+	policy := RuntimePolicy{RuntimeExclusionRoots: []string{"Library/Application Support/paperboat/helper[state]"}}
+	if !mandatoryExcluded("Library/Application Support/paperboat/helper[state]/identity.json", policy) {
+		t.Fatal("runtime identity path was not excluded")
+	}
+	if mandatoryExcluded("Library/Application Support/paperboat/helper-state/identity.json", policy) {
+		t.Fatal("runtime exclusion matched a sibling prefix")
+	}
+}
