@@ -84,6 +84,29 @@ func TestTakeSnapshotWithEmptyIncludesIsFailClosed(t *testing.T) {
 	}
 }
 
+func TestTakeSnapshotTraversesLeadingGlobIncludes(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".config", "editor"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".config", "editor", ".vimrc"), []byte("portable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := TakeSnapshot(root, RuntimePolicy{
+		Includes: []string{"**/.vimrc"}, MaxFileBytes: 1 << 20, MaxBatchBytes: 2 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snapshot.Files[".config/editor/.vimrc"]; !ok {
+		t.Fatalf("leading glob did not traverse matching subtree: %#v", snapshot.Files)
+	}
+}
+
 func TestChangedPathsIncludesAddModifyAndDelete(t *testing.T) {
 	before := map[string]FileState{
 		".deleted": {Hash: "old"},

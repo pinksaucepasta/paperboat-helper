@@ -135,7 +135,13 @@ func mayContainManagedPath(path string, policy RuntimePolicy) bool {
 	}
 	prefix := path + "/"
 	for _, pattern := range policy.Includes {
-		literal := strings.SplitN(pattern, "*", 2)[0]
+		literal := pattern
+		if index := strings.IndexAny(pattern, "*?[{"); index >= 0 {
+			literal = pattern[:index]
+		}
+		if literal == "" {
+			return true
+		}
 		if strings.HasPrefix(literal, prefix) || strings.HasPrefix(prefix, strings.TrimSuffix(literal, "/")+"/") {
 			return true
 		}
