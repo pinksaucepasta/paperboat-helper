@@ -1,0 +1,15 @@
+{
+  "schema_version": "paperboat.config-sync-lifecycle/v1",
+  "vectors": [
+    {"id":"eligible-current","operation":"activate","current":{"assignment":7,"helper_generation":2,"warning":"config-sync-warning-v1"},"presented":{"assignment":7,"helper_generation":2,"warning":"config-sync-warning-v1"},"accepted":true,"mutation_allowed":true},
+    {"id":"stale-warning","operation":"activate","current":{"assignment":7,"helper_generation":2,"warning":"config-sync-warning-v2"},"presented":{"assignment":7,"helper_generation":2,"warning":"config-sync-warning-v1"},"accepted":false,"mutation_allowed":false,"error":"warning_revision_stale"},
+    {"id":"stale-assignment","operation":"repository_access","current":{"assignment":8,"helper_generation":2},"presented":{"assignment":7,"helper_generation":2},"accepted":false,"mutation_allowed":false,"error":"assignment_required"},
+    {"id":"stale-fence","operation":"publish","current":{"lease_fence":12,"remote_revision":"remote-b"},"presented":{"lease_fence":11,"remote_revision":"remote-b"},"accepted":false,"mutation_allowed":false,"error":"lease_lost"},
+    {"id":"remote-moved","operation":"publish","current":{"lease_fence":12,"remote_revision":"remote-b"},"presented":{"lease_fence":12,"remote_revision":"remote-a"},"accepted":false,"mutation_allowed":false,"error":"remote_revision_changed"},
+    {"id":"stale-status","operation":"report","current":{"sync_revision":43,"helper_generation":2},"presented":{"sync_revision":42,"helper_generation":2},"accepted":false,"mutation_allowed":false,"error":"status_revision_stale"},
+    {"id":"stale-conflict","operation":"resolve_conflict","current":{"assignment":8,"conflict_revision":"conflict-b","remote_revision":"remote-b"},"presented":{"assignment":8,"conflict_revision":"conflict-a","remote_revision":"remote-b"},"accepted":false,"mutation_allowed":false,"error":"config_conflict"},
+    {"id":"offline-key-overlap","operation":"retire_key","current":{"key_version":3,"minimum_acknowledged_key_version":2},"presented":{"key_version":3,"minimum_acknowledged_key_version":2},"accepted":false,"mutation_allowed":false,"error":"encryption_key_stale"},
+    {"id":"unknown-contract-version","operation":"activate","current":{"assignment":7,"helper_generation":2,"contract_version":"v1"},"presented":{"assignment":7,"helper_generation":2,"contract_version":"v2"},"accepted":false,"mutation_allowed":false,"error":"protocol_incompatible"},
+    {"id":"revoked-helper","operation":"publish","current":{"assignment":7,"helper_generation":3,"lease_fence":13},"presented":{"assignment":7,"helper_generation":2,"lease_fence":13},"accepted":false,"mutation_allowed":false,"error":"credential_expired"}
+  ]
+}

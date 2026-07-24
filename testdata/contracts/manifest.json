@@ -552,6 +552,18 @@
       ]
     },
     {
+      "id": "config-sync.lifecycle.vectors",
+      "path": "fixtures/config-sync/lifecycle.json",
+      "type": "lifecycle-vectors",
+      "sha256": "d223f6f072857026b9a16de8b03e155a342494c91929d8a49971af22929eaadd",
+      "owner": "server,helper",
+      "review": "phase-7-config-sync",
+      "consumers": [
+        "paperboat-helper",
+        "paperboat-server"
+      ]
+    },
+    {
       "id": "cli.command.transcripts",
       "path": "transcripts/cli/commands.json",
       "type": "transcripts",

@@ -2,11 +2,11 @@
   "repository": "paperboat-helper",
   "contract_version": "1.0.0",
   "canonical_source": "contracts/manifest.json",
-  "copied_manifest_sha256": "c5cbede35559ece037ede4592f3a59037cd8e167c2410a1bba3eac95e29c4c19",
+  "copied_manifest_sha256": "d76c24bf2347d48b8d05cd4abe74dd559cff786dbdaed96a96891d4e311bb1f9",
   "supported": {
     "fixture_manifest": "1",
     "helper_protocol": "1.0-1.0",
     "connector_protocol": "1.0-1.0"
   },
-  "last_review": "phase-6-preview-ownership"
+  "last_review": "phase-7-config-sync"
 }
