@@ -510,15 +510,20 @@ func (c *ControlClient) AcquireLease(ctx context.Context, baseRevision string, t
 }
 
 func (c *ControlClient) acquireLease(ctx context.Context, operationID, baseRevision string, ttl time.Duration) (Lease, error) {
+	baseRevision = strings.TrimSpace(baseRevision)
 	body, err := json.Marshal(struct {
 		OperationID        string `json:"operation_id"`
 		BaseRemoteRevision string `json:"base_remote_revision"`
 		TTLSeconds         int64  `json:"ttl_seconds"`
-	}{operationID, strings.TrimSpace(baseRevision), int64(ttl / time.Second)})
+	}{operationID, baseRevision, int64(ttl / time.Second)})
 	if err != nil {
 		return Lease{}, err
 	}
-	return c.leaseRequest(ctx, "/v1/config/leases/acquire", operationID, body)
+	lease, err := c.leaseRequest(ctx, "/v1/config/leases/acquire", operationID, body)
+	if err == nil && lease.BaseRevision != baseRevision {
+		return Lease{}, ErrControlClientInvalid
+	}
+	return lease, err
 }
 
 func (c *ControlClient) RenewLease(ctx context.Context, lease Lease, ttl time.Duration) (Lease, error) {
@@ -535,7 +540,14 @@ func (c *ControlClient) RenewLease(ctx context.Context, lease Lease, ttl time.Du
 	if err != nil {
 		return Lease{}, err
 	}
-	return c.leaseRequest(ctx, "/v1/config/leases/renew", operationID, body)
+	renewed, err := c.leaseRequest(ctx, "/v1/config/leases/renew", operationID, body)
+	if err == nil && (renewed.LeaseID != lease.LeaseID || renewed.RepositoryID != lease.RepositoryID ||
+		renewed.AssignmentID != lease.AssignmentID || renewed.EnvironmentID != lease.EnvironmentID ||
+		renewed.HelperID != lease.HelperID || renewed.FencingToken != lease.FencingToken ||
+		renewed.BaseRevision != lease.BaseRevision) {
+		return Lease{}, ErrControlClientInvalid
+	}
+	return renewed, err
 }
 
 func (c *ControlClient) ReleaseLease(ctx context.Context, lease Lease) error {
@@ -676,6 +688,8 @@ func (c *ControlClient) leaseRequest(ctx context.Context, path, operationID stri
 	}
 	if decodeBoundedJSON(response.Body, &envelope) != nil || envelope.Data.LeaseID == "" ||
 		envelope.Data.RepositoryID == "" || envelope.Data.FencingToken < 1 ||
+		envelope.Data.AssignmentID != credential.AssignmentID ||
+		envelope.Data.EnvironmentID != credential.EnvironmentID || envelope.Data.HelperID != credential.HelperID ||
 		!envelope.Data.ExpiresAt.After(c.clock().UTC()) {
 		return Lease{}, ErrControlClientInvalid
 	}

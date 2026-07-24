@@ -251,6 +251,83 @@ func TestControlClientMapsLeaseFailuresAndInvalidatesAuthorization(t *testing.T)
 	}
 }
 
+func TestControlClientRejectsMismatchedLeaseBindings(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	for name, mutate := range map[string]func(*Lease){
+		"assignment":  func(lease *Lease) { lease.AssignmentID = "other" },
+		"environment": func(lease *Lease) { lease.EnvironmentID = "other" },
+		"helper":      func(lease *Lease) { lease.HelperID = "other" },
+		"base":        func(lease *Lease) { lease.BaseRevision = "other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/config/credentials" {
+					writeTestJSON(t, w, map[string]any{"data": map[string]any{
+						"credential": "credential", "environment_id": "environment", "helper_id": "helper",
+						"assignment_id": "assignment", "warning_revision": "warning", "expires_at": now.Add(5 * time.Minute),
+					}})
+					return
+				}
+				lease := Lease{
+					LeaseID: "lease", RepositoryID: "repository", AssignmentID: "assignment",
+					EnvironmentID: "environment", HelperID: "helper", FencingToken: 1,
+					BaseRevision: "head", ExpiresAt: now.Add(time.Minute),
+				}
+				mutate(&lease)
+				writeTestJSON(t, w, map[string]any{"data": lease})
+			}))
+			defer server.Close()
+			client, err := NewControlClient(ControlClientConfig{
+				BaseURL: server.URL, AllowedHosts: []string{"127.0.0.1"},
+				Identities: tokenSourceFunc(func(context.Context) (string, error) { return "identity", nil }),
+				Proofs:     &recordingProofSource{}, OperationID: func() (string, error) { return "operation", nil },
+				Transport: server.Client().Transport, Clock: func() time.Time { return now },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.AcquireLease(context.Background(), "head", 30*time.Second); !errors.Is(err, ErrControlClientInvalid) {
+				t.Fatalf("mismatched lease error = %v", err)
+			}
+		})
+	}
+}
+
+func TestControlClientRejectsChangedLeaseIdentityOnRenewal(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	lease := Lease{
+		LeaseID: "lease", RepositoryID: "repository", AssignmentID: "assignment",
+		EnvironmentID: "environment", HelperID: "helper", FencingToken: 1,
+		BaseRevision: "head", ExpiresAt: now.Add(time.Minute),
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/config/credentials" {
+			writeTestJSON(t, w, map[string]any{"data": map[string]any{
+				"credential": "credential", "environment_id": "environment", "helper_id": "helper",
+				"assignment_id": "assignment", "warning_revision": "warning", "expires_at": now.Add(5 * time.Minute),
+			}})
+			return
+		}
+		changed := lease
+		changed.LeaseID = "other"
+		changed.ExpiresAt = now.Add(2 * time.Minute)
+		writeTestJSON(t, w, map[string]any{"data": changed})
+	}))
+	defer server.Close()
+	client, err := NewControlClient(ControlClientConfig{
+		BaseURL: server.URL, AllowedHosts: []string{"127.0.0.1"},
+		Identities: tokenSourceFunc(func(context.Context) (string, error) { return "identity", nil }),
+		Proofs:     &recordingProofSource{}, OperationID: func() (string, error) { return "operation", nil },
+		Transport: server.Client().Transport, Clock: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RenewLease(context.Background(), lease, 30*time.Second); !errors.Is(err, ErrControlClientInvalid) {
+		t.Fatalf("changed renewal error = %v", err)
+	}
+}
+
 func TestControlClientClassificationSendsOnlyApprovedMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
