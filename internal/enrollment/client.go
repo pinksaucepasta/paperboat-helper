@@ -3,13 +3,16 @@ package enrollment
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,7 +24,11 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/identity"
 )
 
-var ErrInvalid = errors.New("invalid helper enrollment")
+var (
+	ErrInvalid                        = errors.New("invalid helper enrollment")
+	ErrFlyWorkloadIdentityUnavailable = errors.New("Fly workload identity is unavailable")
+	ErrEnrollmentExchangeRejected     = errors.New("helper enrollment exchange was rejected")
+)
 
 type Config struct {
 	ControlURL           string `json:"control_url"`
@@ -37,6 +44,15 @@ type RuntimeIdentity struct {
 	Credential    string    `json:"credential"`
 	ExpiresAt     time.Time `json:"expires_at"`
 	KeyID         string    `json:"key_id"`
+}
+
+type HostedBootstrap struct {
+	SetupScriptRef    string     `json:"setup_script_ref"`
+	SetupScript       string     `json:"setup_script"`
+	SetupScriptSHA256 string     `json:"setup_script_sha256"`
+	SourceUsername    string     `json:"source_username,omitempty"`
+	SourcePassword    string     `json:"source_password,omitempty"`
+	SourceExpiresAt   *time.Time `json:"source_expires_at,omitempty"`
 }
 
 type Client struct {
@@ -129,20 +145,142 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func (c *Client) Enroll(ctx context.Context, config Config) (RuntimeIdentity, error) {
+	if len(config.EnrollmentCredential) < 32 || len(config.EnrollmentCredential) > 16<<10 {
+		return RuntimeIdentity{}, ErrInvalid
+	}
+	return c.enroll(ctx, config, "/v1/helpers/enroll", struct {
+		Credential string `json:"credential"`
+		PublicKey  string `json:"public_key"`
+	}{Credential: config.EnrollmentCredential})
+}
+
+func (c *Client) EnrollHosted(ctx context.Context, config Config) (RuntimeIdentity, error) {
+	base, err := validControlURL(config.ControlURL)
+	if err != nil {
+		return RuntimeIdentity{}, err
+	}
+	audience := strings.TrimRight(base.String(), "/") + "/v1/helpers/enroll/hosted"
+	workloadIdentity, err := requestFlyWorkloadIdentity(ctx, audience, c.timeout)
+	if err != nil {
+		return RuntimeIdentity{}, err
+	}
+	return c.enroll(ctx, config, "/v1/helpers/enroll/hosted", struct {
+		WorkloadIdentity string `json:"workload_identity"`
+		PublicKey        string `json:"public_key"`
+	}{WorkloadIdentity: workloadIdentity})
+}
+
+func (c *Client) HostedBootstrap(ctx context.Context, config Config) (HostedBootstrap, error) {
+	base, err := validControlURL(config.ControlURL)
+	if err != nil {
+		return HostedBootstrap{}, err
+	}
+	identity, err := LoadRuntimeIdentity(config.StateRoot, time.Now().UTC())
+	if err != nil {
+		return HostedBootstrap{}, err
+	}
+	body := []byte("{}")
+	var operationBytes [16]byte
+	if _, err = rand.Read(operationBytes[:]); err != nil {
+		return HostedBootstrap{}, err
+	}
+	path := "/v1/helpers/hosted-bootstrap"
+	proof, err := (ProofSource{StateRoot: config.StateRoot}).Proof(
+		ctx, "hosted-bootstrap-"+base64.RawURLEncoding.EncodeToString(operationBytes[:]),
+		http.MethodPost, path, body,
+	)
+	if err != nil {
+		return HostedBootstrap{}, err
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + path
+	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, base.String(), bytes.NewReader(body))
+	if err != nil {
+		return HostedBootstrap{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+identity.Credential)
+	request.Header.Set("X-Paperboat-Helper-Proof", base64.RawURLEncoding.EncodeToString(proof))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	transport := c.transport
+	if transport == nil {
+		transport, err = controlTransport(config.ControlCAFile)
+		if err != nil {
+			return HostedBootstrap{}, err
+		}
+	}
+	client := &http.Client{
+		Transport: transport, Timeout: c.timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return ErrInvalid },
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return HostedBootstrap{}, ErrInvalid
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 96<<10+1))
+	if err != nil || response.StatusCode != http.StatusOK || len(responseBody) > 96<<10 {
+		return HostedBootstrap{}, ErrInvalid
+	}
+	var envelope struct {
+		Data HostedBootstrap `json:"data"`
+	}
+	if strictJSON(responseBody, &envelope) != nil {
+		return HostedBootstrap{}, ErrInvalid
+	}
+	result := envelope.Data
+	if result.SourcePassword == "" {
+		if result.SourceUsername != "" || result.SourceExpiresAt != nil {
+			return HostedBootstrap{}, ErrInvalid
+		}
+	} else if result.SourceUsername != "x-access-token" || result.SourceExpiresAt == nil ||
+		!result.SourceExpiresAt.After(time.Now().UTC().Add(30*time.Second)) {
+		return HostedBootstrap{}, ErrInvalid
+	}
+	if result.SetupScriptRef == "" {
+		if result.SetupScript != "" || result.SetupScriptSHA256 != "" {
+			return HostedBootstrap{}, ErrInvalid
+		}
+		return result, nil
+	}
+	if len(result.SetupScript) > 64<<10 || len(result.SetupScriptSHA256) != 64 {
+		return HostedBootstrap{}, ErrInvalid
+	}
+	digest := sha256.Sum256([]byte(result.SetupScript))
+	if result.SetupScriptSHA256 != hex.EncodeToString(digest[:]) {
+		return HostedBootstrap{}, ErrInvalid
+	}
+	return result, nil
+}
+
+func (c *Client) enroll(ctx context.Context, config Config, endpointPath string, payload any) (RuntimeIdentity, error) {
 	base, err := url.Parse(config.ControlURL)
 	if err != nil || base.Scheme != "https" || base.User != nil || base.Hostname() == "" || base.RawQuery != "" || base.Fragment != "" {
 		return RuntimeIdentity{}, ErrInvalid
 	}
-	base.Path = strings.TrimRight(base.Path, "/") + "/v1/helpers/enroll"
+	base.Path = strings.TrimRight(base.Path, "/") + endpointPath
 	store, err := identity.Open(identity.Config{StateRoot: config.StateRoot})
 	if err != nil {
 		return RuntimeIdentity{}, err
 	}
 	key := store.Current()
-	payload := struct {
+	switch value := payload.(type) {
+	case struct {
 		Credential string `json:"credential"`
 		PublicKey  string `json:"public_key"`
-	}{config.EnrollmentCredential, base64.RawURLEncoding.EncodeToString(key.Public())}
+	}:
+		value.PublicKey = base64.RawURLEncoding.EncodeToString(key.Public())
+		payload = value
+	case struct {
+		WorkloadIdentity string `json:"workload_identity"`
+		PublicKey        string `json:"public_key"`
+	}:
+		value.PublicKey = base64.RawURLEncoding.EncodeToString(key.Public())
+		payload = value
+	default:
+		return RuntimeIdentity{}, ErrInvalid
+	}
 	body, _ := json.Marshal(payload)
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -162,7 +300,7 @@ func (c *Client) Enroll(ctx context.Context, config Config) (RuntimeIdentity, er
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrInvalid }}
 	response, err := client.Do(request)
 	if err != nil {
-		return RuntimeIdentity{}, err
+		return RuntimeIdentity{}, errors.Join(ErrInvalid, ErrEnrollmentExchangeRejected)
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, 64<<10+1)
@@ -171,7 +309,7 @@ func (c *Client) Enroll(ctx context.Context, config Config) (RuntimeIdentity, er
 		return RuntimeIdentity{}, readErr
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || len(responseBody) > 64<<10 {
-		return RuntimeIdentity{}, ErrInvalid
+		return RuntimeIdentity{}, errors.Join(ErrInvalid, ErrEnrollmentExchangeRejected)
 	}
 	var envelope struct {
 		Data RuntimeIdentity `json:"data"`
@@ -189,6 +327,62 @@ func (c *Client) Enroll(ctx context.Context, config Config) (RuntimeIdentity, er
 		return RuntimeIdentity{}, err
 	}
 	return result, nil
+}
+
+func validControlURL(raw string) (*url.URL, error) {
+	base, err := url.Parse(raw)
+	if err != nil || base.Scheme != "https" || base.User != nil || base.Hostname() == "" ||
+		base.RawQuery != "" || base.Fragment != "" {
+		return nil, ErrInvalid
+	}
+	return base, nil
+}
+
+func requestFlyWorkloadIdentity(ctx context.Context, audience string, timeout time.Duration) (string, error) {
+	return requestFlyWorkloadIdentityAt(ctx, audience, timeout, "/.fly/api")
+}
+
+func requestFlyWorkloadIdentityAt(ctx context.Context, audience string, timeout time.Duration, socketPath string) (string, error) {
+	if audience == "" || timeout <= 0 {
+		return "", ErrInvalid
+	}
+	if !filepath.IsAbs(socketPath) {
+		return "", ErrInvalid
+	}
+	body, err := json.Marshal(struct {
+		Audience string `json:"aud"`
+	}{Audience: audience})
+	if err != nil {
+		return "", err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "http://localhost/v1/tokens/oidc", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return ErrInvalid },
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", errors.Join(ErrInvalid, ErrFlyWorkloadIdentityUnavailable)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 32<<10+1))
+	token := strings.TrimSpace(string(responseBody))
+	if err != nil || response.StatusCode != http.StatusOK || len(token) < 32 || len(token) > 32<<10 {
+		return "", errors.Join(ErrInvalid, ErrFlyWorkloadIdentityUnavailable)
+	}
+	return token, nil
 }
 
 func controlTransport(caPath string) (http.RoundTripper, error) {

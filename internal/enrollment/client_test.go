@@ -3,12 +3,15 @@ package enrollment
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +85,51 @@ func TestEnrollBindsKeyAndPersistsPrivateIdentity(t *testing.T) {
 	public, publicErr := base64.RawURLEncoding.DecodeString(publicKey)
 	if payloadErr != nil || signatureErr != nil || publicErr != nil || !ed25519.Verify(ed25519.PublicKey(public), payload, signature) {
 		t.Fatal("helper proof signature is invalid")
+	}
+}
+
+func TestHostedBootstrapUsesHelperProofAndValidatesMemoryOnlyMaterial(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	script := "echo setup\n"
+	digest := sha256.Sum256([]byte(script))
+	expiresAt := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339Nano)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/helpers/enroll":
+			_, _ = w.Write([]byte(`{"data":{"helper_id":"helper_1","environment_id":"env_1","credential":"identity-credential-0123456789012345","expires_at":"2099-01-01T00:00:00Z"}}`))
+		case "/v1/helpers/hosted-bootstrap":
+			if r.Header.Get("Authorization") != "Bearer identity-credential-0123456789012345" ||
+				r.Header.Get("X-Paperboat-Helper-Proof") == "" {
+				t.Error("hosted bootstrap proof headers are missing")
+			}
+			_, _ = w.Write([]byte(`{"data":{"setup_script_ref":"setup_1","setup_script":` +
+				strconv.Quote(script) + `,"setup_script_sha256":"` + hex.EncodeToString(digest[:]) +
+				`","source_username":"x-access-token","source_password":"short-lived-token","source_expires_at":"` +
+				expiresAt + `"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.Client().Transport, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := Config{
+		ControlURL: server.URL, StateRoot: stateRoot,
+		EnrollmentCredential: strings.Repeat("g", 32),
+	}
+	if _, err = client.Enroll(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := client.HostedBootstrap(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.SetupScript != script || bootstrap.SourceUsername != "x-access-token" ||
+		bootstrap.SourcePassword != "short-lived-token" || bootstrap.SourceExpiresAt == nil {
+		t.Fatalf("bootstrap = %#v", bootstrap)
 	}
 }
 

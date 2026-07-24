@@ -41,27 +41,12 @@ func FromEnv(environ func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	setup := ""
-	if name := environ("PAPERBOAT_SETUP_SCRIPT_ENV"); name != "" {
-		if !safeEnvironmentName(name) {
-			return Config{}, ErrInvalid
-		}
-		setup = environ(name)
-	}
-	gitToken := ""
-	if name := environ("PAPERBOAT_GITHUB_TOKEN_ENV"); name != "" {
-		if !safeEnvironmentName(name) {
-			return Config{}, ErrInvalid
-		}
-		gitToken = environ(name)
-	}
 	config := Config{
 		VolumeRoot: volume, CheckoutRoot: filepath.Join(volume, projectDir), ProjectID: environ("PAPERBOAT_PROJECT_ID"),
-		GitToken:      gitToken,
 		RepositoryURL: repositoryURL, Branch: valueOr(environ("PAPERBOAT_DEFAULT_BRANCH"), "main"),
 		AllowedRepositoryHosts: splitValues(valueOr(environ("PAPERBOAT_REPOSITORY_HOSTS"), "github.com")),
 		GitPath:                valueOr(environ("PAPERBOAT_GIT_PATH"), "/usr/bin/git"), ShellPath: valueOr(environ("PAPERBOAT_SHELL_PATH"), "/bin/sh"),
-		Presets: presets, SetupScript: setup, OperationTimeout: operationTimeout, FlushTimeout: flushTimeout,
+		Presets: presets, OperationTimeout: operationTimeout, FlushTimeout: flushTimeout,
 		MaxScriptBytes: maxScriptBytes, MaxOutputBytes: maxOutputBytes,
 	}
 	if err := validate(config); err != nil {

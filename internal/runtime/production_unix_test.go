@@ -118,3 +118,31 @@ func TestValidateBYODWorkspaceRejectsNonCanonicalAndSymlinkRoots(t *testing.T) {
 		t.Fatalf("relative error=%v", err)
 	}
 }
+
+func TestRetryHostedControlWaitsForTransientFailure(t *testing.T) {
+	attempts := 0
+	started := time.Now()
+	result, err := retryHostedControl(context.Background(), func(context.Context) (string, error) {
+		attempts++
+		if attempts == 1 {
+			return "", errors.New("control plane is not ready")
+		}
+		return "ready", nil
+	})
+	if err != nil || result != "ready" || attempts != 2 || time.Since(started) < time.Second {
+		t.Fatalf("result=%q err=%v attempts=%d elapsed=%s", result, err, attempts, time.Since(started))
+	}
+}
+
+func TestRetryHostedControlStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	_, err := retryHostedControl(ctx, func(context.Context) (string, error) {
+		attempts++
+		cancel()
+		return "", errors.New("unavailable")
+	})
+	if !errors.Is(err, context.Canceled) || attempts != 1 {
+		t.Fatalf("err=%v attempts=%d", err, attempts)
+	}
+}

@@ -4,6 +4,16 @@ These runbooks use product-role vocabulary in user-facing diagnostics. Provider,
 and service-manager details belong only in operator evidence. Never attach tokens, claims,
 terminal/config content, signed URLs, private paths, or raw state databases to a ticket.
 
+Configuration-sync writer disablement, conflict resolution, encrypted apply journals,
+migration quarantine, and key rotation are covered by
+`paperboat-server/docs/runbooks/config-sync-operations.md`.
+
+For an eligible environment without an operator-provided `PAPERBOAT_CHEZMOI_PATH`, the
+helper downloads chezmoi 2.71.0 from its upstream GitHub release, verifies the pinned
+platform SHA-256 digest, and caches the archive and executable in private assignment
+state. A configured path must already be a non-writable regular executable and is never
+replaced.
+
 ## Version or capability skew
 
 - Detect: `protocol_incompatible`, required capability unavailable, or repeated negotiation

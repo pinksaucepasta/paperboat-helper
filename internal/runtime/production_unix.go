@@ -57,9 +57,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		if setupName := environ("PAPERBOAT_SETUP_SCRIPT_ENV"); setupName != "" && safeProductionEnvironmentName(setupName) {
 			_ = os.Unsetenv(setupName)
 		}
-		if err := materializeConfigIdentity(environ); err != nil {
-			return nil, err
-		}
+		_ = os.Unsetenv("PAPERBOAT_CONFIG_AGE_IDENTITY")
 	}
 	controlURL, err := validatedControlURL(environ("PAPERBOAT_CONTROL_URL"))
 	if err != nil {
@@ -70,28 +68,62 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
+	var enrollmentClient *enrollment.Client
 	if _, loadErr := enrollment.LoadRuntimeIdentity(runtimeConfig.StateRoot, time.Now().UTC()); loadErr != nil {
-		grantName := valueOrRuntime(environ("PAPERBOAT_ENROLLMENT_CREDENTIAL_ENV"), "PAPERBOAT_ENROLLMENT_CREDENTIAL")
-		if !safeProductionEnvironmentName(grantName) {
-			return nil, ErrProductionInvalid
-		}
-		grant := environ(grantName)
-		if grant == "" {
-			return nil, loadErr
-		}
-		client, clientErr := enrollment.NewClient(transport, 15*time.Second)
+		var clientErr error
+		enrollmentClient, clientErr = enrollment.NewClient(transport, 15*time.Second)
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		_, err = client.Enroll(ctx, enrollment.Config{ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"), StateRoot: runtimeConfig.StateRoot, EnrollmentCredential: grant})
-		_ = os.Unsetenv(grantName)
+		enrollmentConfig := enrollment.Config{
+			ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"),
+			StateRoot: runtimeConfig.StateRoot,
+		}
+		if runtimeConfig.Profile == helperconfig.Hosted {
+			_, err = retryHostedControl(ctx, func(attemptCtx context.Context) (enrollment.RuntimeIdentity, error) {
+				return enrollmentClient.EnrollHosted(attemptCtx, enrollmentConfig)
+			})
+		} else {
+			grantName := valueOrRuntime(environ("PAPERBOAT_ENROLLMENT_CREDENTIAL_ENV"), "PAPERBOAT_ENROLLMENT_CREDENTIAL")
+			if !safeProductionEnvironmentName(grantName) {
+				return nil, ErrProductionInvalid
+			}
+			enrollmentConfig.EnrollmentCredential = environ(grantName)
+			if enrollmentConfig.EnrollmentCredential == "" {
+				return nil, loadErr
+			}
+			_, err = enrollmentClient.Enroll(ctx, enrollmentConfig)
+			_ = os.Unsetenv(grantName)
+		}
 		if err != nil {
+			if runtimeConfig.Profile == helperconfig.Hosted {
+				return nil, fmt.Errorf("hosted identity bootstrap: %w", err)
+			}
 			return nil, err
 		}
 	}
 	identity, err := enrollment.LoadRuntimeIdentity(runtimeConfig.StateRoot, time.Now().UTC())
 	if err != nil {
 		return nil, err
+	}
+	if runtimeConfig.Profile == helperconfig.Hosted {
+		if enrollmentClient == nil {
+			enrollmentClient, err = enrollment.NewClient(transport, 15*time.Second)
+			if err != nil {
+				return nil, err
+			}
+		}
+		bootstrap, bootstrapErr := retryHostedControl(ctx, func(attemptCtx context.Context) (enrollment.HostedBootstrap, error) {
+			return enrollmentClient.HostedBootstrap(attemptCtx, enrollment.Config{
+				ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"),
+				StateRoot: runtimeConfig.StateRoot,
+			})
+		})
+		if bootstrapErr != nil {
+			return nil, fmt.Errorf("hosted bootstrap: %w", bootstrapErr)
+		}
+		hostedConfig.SetupScript = bootstrap.SetupScript
+		hostedConfig.GitToken = bootstrap.SourcePassword
 	}
 	fetcher, err := auth.NewHTTPJWKSFetcher(controlURL.ResolveReference(&url.URL{Path: "/.well-known/jwks.json"}).String(), []string{controlURL.Hostname()}, transport)
 	if err != nil {
@@ -189,7 +221,6 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		}
 	}
 	var hostedLifecycle *hosted.Lifecycle
-	var configSyncHooks hosted.Hooks
 	workspaceRoot := environ("PAPERBOAT_WORKSPACE_ROOT")
 	agentShell := "/bin/bash"
 	if runtimeConfig.Profile == helperconfig.BYOD {
@@ -204,8 +235,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	}
 	shutdownTimeout := 30 * time.Second
 	if runtimeConfig.Profile == helperconfig.Hosted {
-		configSyncHooks = hosted.ConfigSyncHooks(hostedConfig, environ)
-		hostedLifecycle, err = hosted.New(hostedConfig, configSyncHooks, nil)
+		hostedLifecycle, err = hosted.New(hostedConfig, hosted.Hooks{}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -224,16 +254,61 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 			return nil, err
 		}
 	}
+	configHome, err := productionConfigHome(runtimeConfig.Profile == helperconfig.Hosted, hostedConfig.VolumeRoot)
+	if err != nil {
+		return nil, err
+	}
+	repositoryHosts, err := productionRepositoryHosts(environ("PAPERBOAT_CONFIG_REPOSITORY_HOSTS"))
+	if err != nil {
+		return nil, err
+	}
+	configSyncService, err := newProductionConfigSync(productionConfigSyncConfig{
+		ControlURL: controlURL.String(), ControlHost: controlURL.Hostname(),
+		RepositoryHosts: repositoryHosts, HomeRoot: configHome, StateRoot: runtimeConfig.StateRoot,
+		ChezmoiBinary: valueOrRuntime(environ("PAPERBOAT_CHEZMOI_PATH"), "/usr/local/bin/chezmoi"),
+		Identities:    renewingTokens, Proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot},
+		OperationID: operationID, Transport: transport,
+	})
+	if err != nil {
+		return nil, err
+	}
 	listen := valueOrRuntime(environ("PAPERBOAT_HELPER_LISTEN_ADDRESS"), "127.0.0.1:8080")
 	herdrPath := valueOrRuntime(environ("PAPERBOAT_HERDR_PATH"), "/usr/local/bin/herdr")
 	herdrVersion := valueOrRuntime(environ("PAPERBOAT_HERDR_VERSION"), "0.7.4")
-	dependencies := HelperDependencies{Authorizer: authorizer, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, Activity: collector, ActivityService: activityDelivery}
+	dependencies := HelperDependencies{Authorizer: authorizer, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, Activity: collector, ActivityService: activityDelivery, ConfigSync: configSyncService}
 	if runtimeConfig.Profile == helperconfig.Hosted {
 		dependencies.HostedLifecycle = hostedLifecycle
-		dependencies.ConfigApply = configapply.SyncHandler{Apply: func(ctx context.Context) error { return configSyncHooks.Restore(ctx, hostedConfig.CheckoutRoot) }}
+		dependencies.ConfigApply = configapply.SyncHandler{Apply: configSyncService.Apply}
 		dependencies.ConfigApplyProof = true
 	}
 	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout}, dependencies)
+}
+
+func retryHostedControl[T any](ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if operation == nil {
+		return zero, ErrProductionInvalid
+	}
+	backoff := time.Second
+	for {
+		result, err := operation(ctx)
+		if err == nil {
+			return result, nil
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return zero, ctx.Err()
+		case <-timer.C:
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
+		}
+	}
 }
 
 func validatedBYODShell(path string) (string, error) {
@@ -452,39 +527,4 @@ func safeProductionEnvironmentName(value string) bool {
 		}
 	}
 	return true
-}
-
-func materializeConfigIdentity(environ func(string) string) error {
-	identity := environ("PAPERBOAT_CONFIG_AGE_IDENTITY")
-	if identity == "" {
-		return nil
-	}
-	path := valueOrRuntime(environ("PAPERBOAT_CONFIG_AGE_IDENTITY_FILE"), "/var/lib/paperboat/config-age-identity.txt")
-	if !filepath.IsAbs(path) {
-		return ErrProductionInvalid
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".config-identity-*")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err = file.Chmod(0o600); err == nil {
-		_, err = file.WriteString(identity + "\n")
-	}
-	if err == nil {
-		err = file.Sync()
-	}
-	err = errors.Join(err, file.Close())
-	if err != nil {
-		return err
-	}
-	if err = os.Rename(temporary, path); err != nil {
-		return err
-	}
-	_ = os.Unsetenv("PAPERBOAT_CONFIG_AGE_IDENTITY")
-	return nil
 }

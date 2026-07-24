@@ -58,6 +58,7 @@ type HelperDependencies struct {
 	SignalVerifier         *activity.SignalVerifier
 	ConfigApply            configapply.Handler
 	ConfigApplyProof       bool
+	ConfigSync             Service
 	Random                 io.Reader
 	HostedLifecycle        HostedLifecycle
 	SessionLauncherFactory func(*session.Manager) (server.SessionLauncher, error)
@@ -245,8 +246,14 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	components = append(components,
 		Component{Capability: "storage", Required: true, Service: shutdownService{shutdown: func(context.Context) error { return durable.Close() }}},
 		Component{Capability: "sessions", Required: true, Service: shutdownService{shutdown: sessions.Shutdown}},
-		Component{Capability: "protocol", Required: true, Service: protocolServer},
 	)
+	if dependencies.ConfigSync != nil {
+		components = append(components, Component{
+			Capability: "config_sync", Required: config.Runtime.Profile == helperconfig.BYOD,
+			Service: dependencies.ConfigSync,
+		})
+	}
+	components = append(components, Component{Capability: "protocol", Required: true, Service: protocolServer})
 	if dependencies.PreviewService != nil {
 		components = append(components, Component{Capability: "target", Required: false, Service: dependencies.PreviewService})
 	}
