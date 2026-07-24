@@ -9,11 +9,13 @@ import (
 )
 
 type supervisorCredentials struct {
-	mu         sync.Mutex
-	credential Credential
-	err        error
-	calls      chan struct{}
-	invalid    int
+	mu                 sync.Mutex
+	credential         Credential
+	err                error
+	calls              chan struct{}
+	invalid            int
+	revalidated        int
+	revokeOnRevalidate bool
 }
 
 func (s *supervisorCredentials) Credential(context.Context) (Credential, error) {
@@ -30,6 +32,16 @@ func (s *supervisorCredentials) InvalidateCredential() {
 	s.mu.Lock()
 	s.invalid++
 	s.mu.Unlock()
+}
+
+func (s *supervisorCredentials) RevalidateCredential() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revalidated++
+	if s.revokeOnRevalidate {
+		s.err = ErrAuthorization
+		s.credential = Credential{}
+	}
 }
 
 type supervisorRuntime struct {
@@ -111,6 +123,55 @@ func TestSupervisorDoesNotConstructRuntimeBeforeEligibility(t *testing.T) {
 func TestSupervisorValidatesConfiguration(t *testing.T) {
 	if _, err := NewSupervisor(SupervisorConfig{}); !errors.Is(err, ErrSupervisorInvalid) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSupervisorStopsRuntimeAndClearsAuthorizationAfterRevocation(t *testing.T) {
+	credentials := &supervisorCredentials{
+		calls: make(chan struct{}, 8),
+		credential: Credential{
+			Value: "credential", EnvironmentID: "environment", HelperID: "helper",
+			AssignmentID: "assignment", WarningRevision: "warning", ExpiresAt: time.Now().Add(time.Minute),
+		},
+		revokeOnRevalidate: true,
+	}
+	runtime := &supervisorRuntime{started: make(chan struct{}), stopped: make(chan struct{})}
+	factoryCalls := 0
+	supervisor, err := NewSupervisor(SupervisorConfig{
+		Credentials: credentials, Retry: time.Second,
+		Factory: func(context.Context, Credential) (Runtime, error) {
+			factoryCalls++
+			return runtime, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := supervisor.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("eligible runtime did not start")
+	}
+	select {
+	case <-runtime.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime did not stop after authorization revocation")
+	}
+	credentials.mu.Lock()
+	revalidated, invalidated := credentials.revalidated, credentials.invalid
+	credentials.mu.Unlock()
+	if revalidated != 1 || invalidated == 0 || factoryCalls != 1 {
+		t.Fatalf("revalidated=%d invalidated=%d factory_calls=%d", revalidated, invalidated, factoryCalls)
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if err := supervisor.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
 	}
 }
 
