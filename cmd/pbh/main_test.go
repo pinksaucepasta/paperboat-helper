@@ -12,12 +12,14 @@ import (
 )
 
 func TestRunVersion(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"version"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("run version exit code = %d, want 0; stderr = %q", code, stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "pbh ") {
-		t.Fatalf("version output = %q", stdout.String())
+	for _, argument := range []string{"version", "--version", "-v"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{argument}, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %s exit code = %d, want 0; stderr = %q", argument, code, stderr.String())
+		}
+		if !strings.HasPrefix(stdout.String(), "pbh ") {
+			t.Fatalf("%s version output = %q", argument, stdout.String())
+		}
 	}
 }
 

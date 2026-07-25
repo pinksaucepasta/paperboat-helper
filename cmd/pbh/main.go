@@ -37,7 +37,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 0
 	}
 
-	if args[0] == "version" || args[0] == "--version" {
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
 		fmt.Fprintf(stdout, "pbh %s (%s)\n", buildinfo.Version, buildinfo.Commit)
 		return 0
 	}
