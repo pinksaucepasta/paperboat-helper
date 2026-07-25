@@ -1,7 +1,7 @@
 # AGENTS.md - paperboat-helper
 
 Inherit [`../AGENTS.md`](../AGENTS.md). Helper, remote runtime, and environment runtime
-mean this repo.
+mean this repo. `pbh` is the user-facing helper command.
 
 ## Ownership
 

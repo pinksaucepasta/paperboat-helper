@@ -38,19 +38,19 @@ type Pairing struct {
 }
 
 type Material struct {
-	Schema               string            `json:"schema"`
-	MachineID            string            `json:"machine_id"`
-	MachineEnrollmentID  string            `json:"machine_enrollment_id"`
-	EnvironmentID        string            `json:"environment_id"`
-	ControlURL           string            `json:"control_url"`
-	HelperID             string            `json:"helper_id"`
-	EnrollmentID         string            `json:"enrollment_id"`
-	EnrollmentCredential string            `json:"enrollment_credential"`
-	ReuseIdentity        bool              `json:"reuse_identity,omitempty"`
-	ExpiresAt            time.Time         `json:"expires_at"`
-	Artifact             *ArtifactManifest `json:"artifact,omitempty"`
-	ArtifactPublicKey    string            `json:"artifact_public_key,omitempty"`
-	HelperListenAddress  string            `json:"helper_listen_address"`
+	Schema                  string            `json:"schema"`
+	UserMachineID           string            `json:"user_machine_id"`
+	UserMachineEnrollmentID string            `json:"user_machine_enrollment_id"`
+	EnvironmentID           string            `json:"environment_id"`
+	ControlURL              string            `json:"control_url"`
+	HelperID                string            `json:"helper_id"`
+	EnrollmentID            string            `json:"enrollment_id"`
+	EnrollmentCredential    string            `json:"enrollment_credential"`
+	ReuseIdentity           bool              `json:"reuse_identity,omitempty"`
+	ExpiresAt               time.Time         `json:"expires_at"`
+	Artifact                *ArtifactManifest `json:"artifact,omitempty"`
+	ArtifactPublicKey       string            `json:"artifact_public_key,omitempty"`
+	HelperListenAddress     string            `json:"helper_listen_address"`
 }
 
 func CreatePairing(ctx context.Context, config Config) (Pairing, error) {
@@ -67,7 +67,7 @@ func CreatePairing(ctx context.Context, config Config) (Pairing, error) {
 		return Pairing{}, err
 	}
 	var pairing Pairing
-	if err := request(ctx, client(config), http.MethodPost, base+"/api/connected-machines/pairings", body, &pairing); err != nil {
+	if err := request(ctx, client(config), http.MethodPost, base+"/v1/user-machines/pairings", body, &pairing); err != nil {
 		return Pairing{}, err
 	}
 	if pairing.ID == "" || pairing.UserCode == "" || !time.Now().UTC().Before(pairing.ExpiresAt) {
@@ -87,10 +87,10 @@ func WaitForMaterial(ctx context.Context, config Config, expiresAt time.Time, in
 	body, _ := json.Marshal(map[string]string{"verifier": config.Verifier})
 	for time.Now().UTC().Before(expiresAt) {
 		var material Material
-		err := request(ctx, client(config), http.MethodPost, base+"/api/connected-machines/pairings/installation", body, &material)
+		err := request(ctx, client(config), http.MethodPost, base+"/v1/user-machines/pairings/installation", body, &material)
 		if err == nil {
 			validEnrollment := material.ReuseIdentity && material.EnrollmentID == "" && material.EnrollmentCredential == "" || !material.ReuseIdentity && material.EnrollmentID != "" && len(material.EnrollmentCredential) >= 32
-			if material.Schema != "paperboat.byod-installation/v1" || material.MachineID == "" || material.MachineEnrollmentID == "" || material.EnvironmentID == "" || material.HelperID == "" || !validEnrollment || !validLoopbackAddress(material.HelperListenAddress) || !time.Now().UTC().Before(material.ExpiresAt) || material.Artifact == nil || VerifyArtifactManifest(*material.Artifact, material.ArtifactPublicKey) != nil {
+			if material.Schema != "paperboat.byod-installation/v1" || material.UserMachineID == "" || material.UserMachineEnrollmentID == "" || material.EnvironmentID == "" || material.HelperID == "" || !validEnrollment || !validLoopbackAddress(material.HelperListenAddress) || !time.Now().UTC().Before(material.ExpiresAt) || material.Artifact == nil || VerifyArtifactManifest(*material.Artifact, material.ArtifactPublicKey) != nil {
 				return Material{}, ErrInvalid
 			}
 			return material, nil
@@ -173,13 +173,13 @@ func request(ctx context.Context, client *http.Client, method, target string, bo
 			return fmt.Errorf("%w: server status %d", ErrInvalid, response.StatusCode)
 		}
 		switch envelope.Error.Code {
-		case "connected_machine_approval_pending":
+		case "user_machine_approval_pending":
 			return ErrApprovalPending
-		case "connected_machine_pairing_denied":
+		case "user_machine_pairing_denied":
 			return ErrPairingDenied
-		case "connected_machine_pairing_expired":
+		case "user_machine_pairing_expired":
 			return ErrPairingExpired
-		case "connected_machine_installation_unavailable":
+		case "user_machine_installation_unavailable":
 			return ErrInstallationUnavailable
 		default:
 			return fmt.Errorf("%w: server status %d", ErrInvalid, response.StatusCode)

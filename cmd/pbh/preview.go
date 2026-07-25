@@ -127,10 +127,10 @@ func callAgentPreview(ctx context.Context, payload map[string]any) (json.RawMess
 }
 
 func agentPreviewConfiguration() (string, string, error) {
-	endpoint := os.Getenv("PAPERBOAT_HELPER_AGENT_ENDPOINT")
+	endpoint := os.Getenv("PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT")
 	tokenFile := os.Getenv("PAPERBOAT_HELPER_AGENT_TOKEN_FILE")
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" || u.User != nil || u.Path != "/v1/agent/previews" || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Path != "/v1/preview-registrations" || u.RawQuery != "" || u.Fragment != "" {
 		return "", "", errors.New("local helper preview endpoint is unavailable")
 	}
 	host, port, err := net.SplitHostPort(u.Host)

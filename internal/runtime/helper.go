@@ -96,7 +96,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		return nil, ErrHelperInvalid
 	}
 	config.AgentEnvironment = append(config.AgentEnvironment,
-		"PAPERBOAT_HELPER_AGENT_ENDPOINT=http://"+config.ListenAddress+"/v1/agent/previews",
+		"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT=http://"+config.ListenAddress+"/v1/preview-registrations",
 		"PAPERBOAT_HELPER_AGENT_TOKEN_FILE="+config.AgentTokenFile,
 	)
 	invalidActivity := dependencies.Activity != nil && config.EnvironmentID == "" ||
@@ -231,7 +231,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		if agentErr != nil {
 			return nil, agentErr
 		}
-		mux.Handle("/v1/agent/previews", agentHandler)
+		mux.Handle("/v1/preview-registrations", agentHandler)
 	}
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -329,9 +329,6 @@ func writeAgentToken(path string, random io.Reader) (string, error) {
 func (h *Helper) Start(ctx context.Context) error    { return h.runtime.Start(ctx) }
 func (h *Helper) Shutdown(ctx context.Context) error { return h.runtime.Shutdown(ctx) }
 func (h *Helper) State() State                       { return h.runtime.State() }
-func (h *Helper) Handler() http.Handler              { return h.handler }
-func (h *Helper) HTTP() *HTTPService                 { return h.http }
-func (h *Helper) Sessions() *session.Manager         { return h.sessions }
 
 type shutdownService struct{ shutdown func(context.Context) error }
 

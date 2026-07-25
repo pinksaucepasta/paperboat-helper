@@ -47,7 +47,7 @@ func NewRenewingTokenSource(config RenewingTokenConfig) (*RenewingTokenSource, e
 	if config.RenewBefore <= 0 || config.RenewBefore >= time.Hour || config.Timeout <= 0 || config.Timeout > 30*time.Second {
 		return nil, ErrInvalid
 	}
-	base.Path = strings.TrimRight(base.Path, "/") + "/v1/helpers/renew"
+	base.Path = strings.TrimRight(base.Path, "/") + "/v1/helper-identity-renewals"
 	return &RenewingTokenSource{config: config, endpoint: base, client: &http.Client{Transport: config.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrInvalid }}}, nil
 }
 

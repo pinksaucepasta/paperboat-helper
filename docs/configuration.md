@@ -48,7 +48,7 @@ key ID and atomic file replacement; private seed bytes never enter diagnostics o
 
 ## Control-Plane Enrollment
 
-`paperboat-helper enroll <absolute-config-path>` exchanges a short-lived, single-use
+`pbh enroll <absolute-config-path>` exchanges a short-lived, single-use
 server grant for a helper identity bound to the persisted Ed25519 public key. The private
 configuration file must be a regular, non-symlink file with no group or world permissions
 and contains `control_url`, absolute `state_root`, and `enrollment_credential`. An optional
@@ -62,7 +62,7 @@ credential reads require an unexpired identity whose `key_id` still matches
 `helper-identity.json`; key rotation therefore requires a new enrollment. Neither the
 grant nor the resulting bearer credential is printed by the command.
 
-`paperboat-helper run` is the production hosted daemon. On first boot it may consume the
+`pbh run` is the production hosted daemon. On first boot it may consume the
 one-time `PAPERBOAT_ENROLLMENT_CREDENTIAL`; subsequent boots load the volume-backed runtime
 identity. It requires an HTTPS `PAPERBOAT_CONTROL_URL`, refreshes the control-plane JWKS,
 verifies operation and connector credentials, waits for an admitted frp route before
@@ -100,21 +100,3 @@ these required request headers:
 Multipart filename and MIME must exactly match the headers, and the streamed byte count,
 detected MIME, and SHA-256 must all match before publication. An idempotent replay returns
 the recorded result with `X-Paperboat-Replayed: true` without reading the request body.
-
-## Phase 2 Fake-Peer Harness
-
-`paperboat-helper phase2-harness <absolute-config-path>` is an evidence-only composition
-command. It is not production enrollment or endpoint discovery. The JSON file is bounded
-to 64 KiB and must be a single-link, regular, non-symlink file that is not group/world
-writable. Unknown, duplicate, or trailing JSON fields fail closed.
-
-Required fields are `profile`, absolute `state_root` and `workspace_root`, numeric-loopback
-`listen_address`, static `shell_path`, `shell_args`, `shell_environment`, HTTPS `issuer`,
-`environment_id`, `helper_id`, and one or more Ed25519 `public_keys` encoded with unpadded
-base64url. Optional `origin_patterns`, `revoked_jtis`, and `config_apply_proof` remain local
-fake-peer inputs. No private key or reusable bearer credential belongs in this file.
-
-The harness verifies operation credentials against exact frozen policies and starts the
-real durable store, PTY/session manager, protocol server, upload handler, preview registry
-and monitor, activity collector, health endpoint, and bounded shutdown path. It remains
-separate from the production `enroll` command and does not consume its runtime identity.

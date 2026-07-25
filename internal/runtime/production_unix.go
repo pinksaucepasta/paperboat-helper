@@ -205,15 +205,15 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		return nil, err
 	}
 	var activityDelivery *activity.Delivery
-	machineID := environ("PAPERBOAT_MACHINE_ID")
+	machineID := environ("PAPERBOAT_USER_MACHINE_ID")
 	if runtimeConfig.Profile == helperconfig.Hosted {
-		machineID = valueOrRuntime(environ("FLY_MACHINE_ID"), machineID)
+		machineID = valueOrRuntime(environ("FLY_MACHINE_ID"), environ("PAPERBOAT_MACHINE_ID"))
 	}
 	if machineID == "" {
 		return nil, ErrProductionInvalid
 	}
 	{
-		activityEndpoint := controlURL.ResolveReference(&url.URL{Path: "/api/machine/activity-heartbeat"}).String()
+		activityEndpoint := controlURL.ResolveReference(&url.URL{Path: "/v1/environment-activity-observations"}).String()
 		sender := &heartbeatSender{endpoint: activityEndpoint, tokens: renewingTokens, proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID: operationID, projectID: identity.EnvironmentID, machineID: machineID, reporterVersion: version, client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, lastActivity: time.Now().UTC()}
 		activityDelivery, err = activity.NewDelivery(activity.DeliveryConfig{Collector: collector, Sender: sender, Interval: runtimeConfig.Limits.HeartbeatInterval, Timeout: 10 * time.Second})
 		if err != nil {
@@ -381,8 +381,8 @@ func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) err
 	last := s.lastActivity
 	s.mu.Unlock()
 	body, err := json.Marshal(struct {
-		ProjectID       string            `json:"project_id"`
-		MachineID       string            `json:"machine_id"`
+		EnvironmentID   string            `json:"environment_id"`
+		ResourceID      string            `json:"resource_id"`
 		LastActivityAt  time.Time         `json:"last_activity_at"`
 		Signals         map[string]string `json:"signals"`
 		ReporterVersion string            `json:"reporter_version"`
@@ -403,7 +403,7 @@ func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) err
 	if err != nil {
 		return err
 	}
-	proof, err := s.proofs.Proof(ctx, operationID, http.MethodPost, "/api/machine/activity-heartbeat", body)
+	proof, err := s.proofs.Proof(ctx, operationID, http.MethodPost, "/v1/environment-activity-observations", body)
 	if err != nil {
 		return err
 	}

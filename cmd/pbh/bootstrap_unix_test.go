@@ -104,7 +104,7 @@ func TestPrepareInstallationVerifiesArtifactBeforeEnrollment(t *testing.T) {
 		_, _ = w.Write([]byte("tampered helper"))
 	}))
 	defer server.Close()
-	manifest, publicKey := signedBootstrapArtifact(t, server.URL+"/paperboat-helper", expected)
+	manifest, publicKey := signedBootstrapArtifact(t, server.URL+"/pbh", expected)
 	material := bootstrap.Material{Artifact: &manifest, ArtifactPublicKey: publicKey, EnrollmentCredential: "credential-that-must-not-be-consumed", ControlURL: "https://control.example.test"}
 	root := t.TempDir()
 	client := &recordingEnrollmentClient{}
@@ -125,8 +125,8 @@ func TestPrepareInstallationReusesMatchingPersistedIdentity(t *testing.T) {
 	body := []byte("verified helper")
 	artifactServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
 	defer artifactServer.Close()
-	manifest, publicKey := signedBootstrapArtifact(t, artifactServer.URL+"/paperboat-helper", body)
-	material := bootstrap.Material{MachineID: "cm_reuse", MachineEnrollmentID: "cme_reuse", EnvironmentID: "env_reuse", HelperID: "helper_reuse", ReuseIdentity: true, Artifact: &manifest, ArtifactPublicKey: publicKey}
+	manifest, publicKey := signedBootstrapArtifact(t, artifactServer.URL+"/pbh", body)
+	material := bootstrap.Material{UserMachineID: "um_reuse", UserMachineEnrollmentID: "ume_reuse", EnvironmentID: "env_reuse", HelperID: "helper_reuse", ReuseIdentity: true, Artifact: &manifest, ArtifactPublicKey: publicKey}
 	client := &recordingEnrollmentClient{}
 	path, err := prepareInstallation(context.Background(), &material, stateRoot, artifactServer.Client(), client)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestReportInstallationFailureUsesSignedPersistedIdentity(t *testing.T) {
 	stateRoot := enrolledStateRoot(t, "helper_failure", "env_failure")
 	var received bool
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/connected-machines/installations/failure" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer identity-") || r.Header.Get("X-Paperboat-Helper-Proof") == "" {
+		if r.URL.Path != "/v1/user-machine-installation-failures" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer identity-") || r.Header.Get("X-Paperboat-Helper-Proof") == "" {
 			t.Errorf("request path=%q auth=%q proof=%q", r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Paperboat-Helper-Proof"))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -154,7 +154,7 @@ func TestReportInstallationFailureUsesSignedPersistedIdentity(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
-	material := bootstrap.Material{MachineEnrollmentID: "cme_failure", EnvironmentID: "env_failure", HelperID: "helper_failure", ControlURL: server.URL}
+	material := bootstrap.Material{UserMachineEnrollmentID: "ume_failure", EnvironmentID: "env_failure", HelperID: "helper_failure", ControlURL: server.URL}
 	if err := reportInstallationFailureWithClient(context.Background(), material, stateRoot, "service_install", server.Client()); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestReportInstallationFailureUsesSignedPersistedIdentity(t *testing.T) {
 func TestReportArtifactFailureUsesOneTimeEnrollmentCredential(t *testing.T) {
 	var received bool
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/connected-machines/installations/failure" || r.Header.Get("Authorization") != "Bearer one-time-enrollment" || r.Header.Get("X-Paperboat-Helper-Proof") != "" {
+		if r.URL.Path != "/v1/user-machine-installation-failures" || r.Header.Get("Authorization") != "Bearer one-time-enrollment" || r.Header.Get("X-Paperboat-Helper-Proof") != "" {
 			t.Errorf("request path=%q auth=%q proof=%q", r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Paperboat-Helper-Proof"))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -175,7 +175,7 @@ func TestReportArtifactFailureUsesOneTimeEnrollmentCredential(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
-	material := bootstrap.Material{MachineEnrollmentID: "cme_artifact", EnvironmentID: "env_artifact", HelperID: "helper_artifact", EnrollmentID: "henr_artifact", EnrollmentCredential: "one-time-enrollment", ControlURL: server.URL}
+	material := bootstrap.Material{UserMachineEnrollmentID: "ume_artifact", EnvironmentID: "env_artifact", HelperID: "helper_artifact", EnrollmentID: "henr_artifact", EnrollmentCredential: "one-time-enrollment", ControlURL: server.URL}
 	if err := reportInstallationFailureWithEnrollmentCredentialClient(context.Background(), material, "artifact_verification", server.Client()); err != nil {
 		t.Fatal(err)
 	}

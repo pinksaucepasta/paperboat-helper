@@ -26,7 +26,7 @@ func (c *controller) Remove(context.Context, string) error { c.removed++; return
 
 func executable(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "paperboat-helper")
+	path := filepath.Join(t.TempDir(), "pbh")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestDefinitionQuotesExecutablePathWithSpaces(t *testing.T) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(directory, "paperboat-helper")
+	path := filepath.Join(directory, "pbh")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}

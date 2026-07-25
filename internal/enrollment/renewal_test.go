@@ -15,9 +15,9 @@ func TestRenewingTokenSourceRenewsAndPersistsIdentity(t *testing.T) {
 	renewedCredential := "renewed-helper-credential-012345678901234567890"
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/helpers/enroll":
+		case "/v1/helper-enrollments":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"helper_id": "hlp_1", "environment_id": "env_1", "credential": "initial-helper-credential-012345678901234567890", "expires_at": now.Add(5 * time.Minute)}})
-		case "/v1/helpers/renew":
+		case "/v1/helper-identity-renewals":
 			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer initial-helper") || r.Header.Get("X-Paperboat-Helper-Proof") == "" {
 				t.Errorf("renew headers=%v", r.Header)
 			}

@@ -148,7 +148,7 @@ func (c *Client) Enroll(ctx context.Context, config Config) (RuntimeIdentity, er
 	if len(config.EnrollmentCredential) < 32 || len(config.EnrollmentCredential) > 16<<10 {
 		return RuntimeIdentity{}, ErrInvalid
 	}
-	return c.enroll(ctx, config, "/v1/helpers/enroll", struct {
+	return c.enroll(ctx, config, "/v1/helper-enrollments", struct {
 		Credential string `json:"credential"`
 		PublicKey  string `json:"public_key"`
 	}{Credential: config.EnrollmentCredential})
@@ -159,12 +159,12 @@ func (c *Client) EnrollHosted(ctx context.Context, config Config) (RuntimeIdenti
 	if err != nil {
 		return RuntimeIdentity{}, err
 	}
-	audience := strings.TrimRight(base.String(), "/") + "/v1/helpers/enroll/hosted"
+	audience := strings.TrimRight(base.String(), "/") + "/v1/hosted-helper-enrollments"
 	workloadIdentity, err := requestFlyWorkloadIdentity(ctx, audience, c.timeout)
 	if err != nil {
 		return RuntimeIdentity{}, err
 	}
-	return c.enroll(ctx, config, "/v1/helpers/enroll/hosted", struct {
+	return c.enroll(ctx, config, "/v1/hosted-helper-enrollments", struct {
 		WorkloadIdentity string `json:"workload_identity"`
 		PublicKey        string `json:"public_key"`
 	}{WorkloadIdentity: workloadIdentity})
@@ -184,7 +184,7 @@ func (c *Client) HostedBootstrap(ctx context.Context, config Config) (HostedBoot
 	if _, err = rand.Read(operationBytes[:]); err != nil {
 		return HostedBootstrap{}, err
 	}
-	path := "/v1/helpers/hosted-bootstrap"
+	path := "/v1/hosted-helper-bootstrap"
 	proof, err := (ProofSource{StateRoot: config.StateRoot}).Proof(
 		ctx, "hosted-bootstrap-"+base64.RawURLEncoding.EncodeToString(operationBytes[:]),
 		http.MethodPost, path, body,

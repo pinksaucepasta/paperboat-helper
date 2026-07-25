@@ -87,12 +87,6 @@ type Attachment struct {
 
 func NewAttachment() *Attachment { return &Attachment{state: Attaching} }
 
-func (a *Attachment) State() AttachmentState {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.state
-}
-
 func (a *Attachment) Transition(to AttachmentState) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

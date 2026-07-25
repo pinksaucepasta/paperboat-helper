@@ -20,7 +20,7 @@ type resolverFunc func(protocol.Frame) (auth.Policy, error)
 func (f resolverFunc) Policy(frame protocol.Frame) (auth.Policy, error) { return f(frame) }
 
 func TestCredentialAuthorizerReturnsStableBoundIdentity(t *testing.T) {
-	claims := auth.Claims{Issuer: "https://api.test", Subject: "usr_1", JTI: "jti_1", IssuedAt: 1, ExpiresAt: 100, Scope: []string{"terminal:operate"}, CredentialClass: "terminal_operation", EnvironmentID: "env_1", UserID: "usr_1", ClientSessionID: "cli_1", SessionID: "ses_1", AssignmentID: "asn_1"}
+	claims := auth.Claims{Issuer: "https://api.test", Subject: "usr_1", JTI: "jti_1", IssuedAt: 1, ExpiresAt: 100, Scope: []string{"terminal:operate"}, CredentialClass: "terminal_operation", EnvironmentID: "env_1", UserID: "usr_1", CLIClientSessionID: "cli_1", SessionID: "ses_1", AssignmentID: "asn_1"}
 	authorizer := CredentialAuthorizer{
 		Token: "signed-token",
 		Resolver: resolverFunc(func(frame protocol.Frame) (auth.Policy, error) {

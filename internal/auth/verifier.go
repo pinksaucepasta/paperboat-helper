@@ -52,7 +52,7 @@ type Claims struct {
 	CredentialClass     string   `json:"credential_class"`
 	EnvironmentID       string   `json:"environment_id,omitempty"`
 	UserID              string   `json:"user_id,omitempty"`
-	ClientSessionID     string   `json:"client_session_id,omitempty"`
+	CLIClientSessionID  string   `json:"cli_client_session_id,omitempty"`
 	HelperID            string   `json:"helper_id,omitempty"`
 	SessionID           string   `json:"session_id,omitempty"`
 	AssignmentID        string   `json:"assignment_id,omitempty"`
@@ -73,7 +73,7 @@ type Policy struct {
 	Scopes              []string
 	EnvironmentID       string
 	UserID              string
-	ClientSessionID     string
+	CLIClientSessionID  string
 	HelperID            string
 	SessionID           string
 	AssignmentID        string
@@ -270,7 +270,7 @@ func rejectDuplicateKeys(data []byte) error {
 }
 
 func bindingsMatch(c Claims, p Policy) bool {
-	return match(p.EnvironmentID, c.EnvironmentID) && match(p.UserID, c.UserID) && match(p.ClientSessionID, c.ClientSessionID) && match(p.HelperID, c.HelperID) && match(p.SessionID, c.SessionID) && match(p.AssignmentID, c.AssignmentID) && match(p.WarningRevision, c.WarningRevision) && matchUint(p.ConnectorGeneration, c.ConnectorGeneration) && match(p.EdgePool, c.EdgePool) && match(p.EdgeNodeID, c.EdgeNodeID) && match(p.CounterEpoch, c.CounterEpoch)
+	return match(p.EnvironmentID, c.EnvironmentID) && match(p.UserID, c.UserID) && match(p.CLIClientSessionID, c.CLIClientSessionID) && match(p.HelperID, c.HelperID) && match(p.SessionID, c.SessionID) && match(p.AssignmentID, c.AssignmentID) && match(p.WarningRevision, c.WarningRevision) && matchUint(p.ConnectorGeneration, c.ConnectorGeneration) && match(p.EdgePool, c.EdgePool) && match(p.EdgeNodeID, c.EdgeNodeID) && match(p.CounterEpoch, c.CounterEpoch)
 }
 func match(expected, actual string) bool     { return expected == "" || expected == actual }
 func matchUint(expected, actual uint64) bool { return expected == 0 || expected == actual }

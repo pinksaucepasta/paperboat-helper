@@ -36,7 +36,7 @@ func TestRequestFlyWorkloadIdentityUsesLocalSocketAndExactAudience(t *testing.T)
 				Audience string `json:"aud"`
 			}
 			if json.NewDecoder(r.Body).Decode(&input) != nil ||
-				input.Audience != "https://control.example/v1/helpers/enroll/hosted" {
+				input.Audience != "https://control.example/v1/hosted-helper-enrollments" {
 				http.Error(w, "unexpected audience", http.StatusBadRequest)
 				return
 			}
@@ -48,7 +48,7 @@ func TestRequestFlyWorkloadIdentityUsesLocalSocketAndExactAudience(t *testing.T)
 
 	token, err := requestFlyWorkloadIdentityAt(
 		context.Background(),
-		"https://control.example/v1/helpers/enroll/hosted",
+		"https://control.example/v1/hosted-helper-enrollments",
 		time.Second,
 		socketPath,
 	)

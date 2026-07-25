@@ -38,7 +38,7 @@ type checker struct {
 
 func (c *checker) Check(_ context.Context, path, _ string) error {
 	c.calls = append(c.calls, path)
-	if c.failCurrent && filepath.Base(path) == "paperboat-helper" {
+	if c.failCurrent && filepath.Base(path) == "pbh" {
 		return errors.New("unhealthy")
 	}
 	return nil
@@ -51,7 +51,7 @@ func setup(t *testing.T, artifact []byte, health *checker) (Config, ed25519.Priv
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	install := filepath.Join(root, "bin", "paperboat-helper")
+	install := filepath.Join(root, "bin", "pbh")
 	if err := os.MkdirAll(filepath.Dir(install), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRecoveryDistinguishesPreBackupAndPostBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staged := filepath.Join(filepath.Dir(install), ".paperboat-helper-update-test")
+	staged := filepath.Join(filepath.Dir(install), ".pbh-update-test")
 	if err := os.WriteFile(staged, artifact, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestRecoveryMatrixPreservesOrRestoresVerifiedArtifact(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			staged := filepath.Join(filepath.Dir(install), ".paperboat-helper-update-recovery")
+			staged := filepath.Join(filepath.Dir(install), ".pbh-update-recovery")
 			if err := os.WriteFile(staged, artifact, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -285,9 +285,9 @@ func TestRecoveryMatrixPreservesOrRestoresVerifiedArtifact(t *testing.T) {
 
 func TestRecoveryRejectsInvalidJournalWithoutDeletingUnexplainedState(t *testing.T) {
 	for _, entry := range []journal{
-		{State: "staged", Version: "invalid", PreviousVersion: "1.0.0", StagedPath: "/tmp/.paperboat-helper-update-outside"},
-		{State: "staged", Version: "1.1.0", PreviousVersion: "0.9.0", StagedPath: "/tmp/.paperboat-helper-update-outside"},
-		{State: "checking", Version: "1.1.0", PreviousVersion: "1.0.0", StagedPath: "/tmp/.paperboat-helper-update-outside"},
+		{State: "staged", Version: "invalid", PreviousVersion: "1.0.0", StagedPath: "/tmp/.pbh-update-outside"},
+		{State: "staged", Version: "1.1.0", PreviousVersion: "0.9.0", StagedPath: "/tmp/.pbh-update-outside"},
+		{State: "checking", Version: "1.1.0", PreviousVersion: "1.0.0", StagedPath: "/tmp/.pbh-update-outside"},
 	} {
 		t.Run(entry.State+"_"+entry.Version+"_"+entry.PreviousVersion, func(t *testing.T) {
 			config, _, install := setup(t, []byte("new"), &checker{})

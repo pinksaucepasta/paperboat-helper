@@ -25,7 +25,7 @@ func runProduction(output io.Writer) error {
 	if err := helper.Start(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "paperboat-helper ready")
+	fmt.Fprintln(output, "pbh ready")
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

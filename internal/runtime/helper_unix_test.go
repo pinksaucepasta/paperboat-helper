@@ -20,15 +20,18 @@ import (
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
+	"github.com/pinksaucepasta/paperboat-helper/internal/process"
 	"github.com/pinksaucepasta/paperboat-helper/internal/protocol"
+	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
 	"github.com/pinksaucepasta/paperboat-helper/internal/server"
+	"github.com/pinksaucepasta/paperboat-helper/internal/session"
 	"github.com/pinksaucepasta/paperboat-helper/internal/store"
 )
 
 type helperAuthorizer struct{}
 
 func (helperAuthorizer) Authorize(context.Context, protocol.Frame) (server.Authorization, error) {
-	return server.Authorization{JournalBinding: "phase2:user:client", EnvironmentID: "env_test", UserID: "user_test", ClientID: "client_test"}, nil
+	return server.Authorization{JournalBinding: "test:user:client", EnvironmentID: "env_test", UserID: "user_test", ClientID: "client_test"}, nil
 }
 
 type helperProber struct{}
@@ -40,6 +43,27 @@ type hostedLifecycleStub struct{}
 func (hostedLifecycleStub) Start(context.Context) error    { return nil }
 func (hostedLifecycleStub) Shutdown(context.Context) error { return nil }
 func (hostedLifecycleStub) Capabilities() []string         { return []string{"hosted.lifecycle.v1"} }
+
+type testSessionLauncher struct {
+	sessions *session.Manager
+	path     string
+	args     []string
+	env      []string
+}
+
+func (l testSessionLauncher) Launch(ctx context.Context, request process.LaunchRequest) (session.Snapshot, error) {
+	return l.sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: pty.Command{Path: l.path, Args: l.args, Env: l.env, CWD: request.CWD, Dimensions: request.Dimensions}})
+}
+
+func testSessionLauncherFactory(path string, args, env []string) func(*session.Manager) (server.SessionLauncher, error) {
+	return func(sessions *session.Manager) (server.SessionLauncher, error) {
+		resolved, err := pty.ValidateProcessPolicy(path, args, env)
+		if err != nil {
+			return nil, err
+		}
+		return testSessionLauncher{sessions: sessions, path: resolved, args: args, env: env}, nil
+	}
+}
 
 type helperListener struct {
 	mu     sync.Mutex
@@ -102,7 +126,7 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 		Listener: func() (net.Listener, error) { return listener, nil },
 		Previews: previews, Activity: activityCollector,
 		ConfigApply: configapply.ConformanceHandler{}, ConfigApplyProof: true,
-		SessionLauncherFactory: commandSessionLauncherFactory("/bin/sh", []string{"-l"}, []string{"PATH=/usr/bin:/bin"}),
+		SessionLauncherFactory: testSessionLauncherFactory("/bin/sh", []string{"-l"}, []string{"PATH=/usr/bin:/bin"}),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -48,14 +48,14 @@ func TestAgentHandlerRequiresTokenAndForcesEnvironmentLocalTarget(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/agent/previews", bytes.NewBufferString(`{"action":"create","logical_name":"web","target_port":3000,"public_acknowledgement":true}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/preview-registrations", bytes.NewBufferString(`{"action":"create","logical_name":"web","target_port":3000,"public_acknowledgement":true}`))
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, request)
 	if unauthorized.Code != http.StatusNotFound || len(control.records) != 0 {
 		t.Fatalf("unauthorized status=%d records=%v", unauthorized.Code, control.records)
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "/v1/agent/previews", bytes.NewBufferString(`{"action":"create","logical_name":"web","target_port":3000,"public_acknowledgement":true}`))
+	request = httptest.NewRequest(http.MethodPost, "/v1/preview-registrations", bytes.NewBufferString(`{"action":"create","logical_name":"web","target_port":3000,"public_acknowledgement":true}`))
 	request.Header.Set("Authorization", "Bearer 01234567890123456789012345678901")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -78,7 +78,7 @@ func TestAgentHandlerRejectsMissingPublicAcknowledgementAndCrossEnvironmentList(
 		`{"action":"create","logical_name":"web","target_port":3000}`,
 		`{"action":"list"}`,
 	} {
-		request := httptest.NewRequest(http.MethodPost, "/v1/agent/previews", bytes.NewBufferString(body))
+		request := httptest.NewRequest(http.MethodPost, "/v1/preview-registrations", bytes.NewBufferString(body))
 		request.Header.Set("Authorization", "Bearer 01234567890123456789012345678901")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)

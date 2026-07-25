@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+health_url="${PAPERBOAT_HELPER_HEALTH_URL:-http://127.0.0.1:8080/healthz}"
+body="$(curl --fail --silent --show-error --max-time 2 "$health_url")"
+grep -q '"live":true' <<<"$body"
+grep -Eq '"hosted_lifecycle":\{"state":"ready"' <<<"$body"
+grep -Eq '"edge":\{"state":"ready"' <<<"$body"

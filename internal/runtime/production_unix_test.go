@@ -25,7 +25,7 @@ func (testTokenSource) Token(context.Context) (string, error) { return "helper-i
 type testProofSource struct{ body []byte }
 
 func (p *testProofSource) Proof(_ context.Context, _ string, method, path string, body []byte) ([]byte, error) {
-	if method != http.MethodPost || path != "/api/machine/activity-heartbeat" {
+	if method != http.MethodPost || path != "/v1/environment-activity-observations" {
 		return nil, errors.New("wrong proof target")
 	}
 	p.body = append([]byte(nil), body...)
@@ -38,21 +38,21 @@ func TestHeartbeatSenderUsesRenewableIdentityAndExactBodyProof(t *testing.T) {
 		body := new(bytes.Buffer)
 		_, _ = body.ReadFrom(r.Body)
 		gotAuth, gotProof = r.Header.Get("Authorization"), r.Header.Get("X-Paperboat-Helper-Proof")
-		if r.URL.Path != "/api/machine/activity-heartbeat" || !strings.Contains(body.String(), `"project_id":"prj_1"`) {
+		if r.URL.Path != "/v1/environment-activity-observations" || !strings.Contains(body.String(), `"environment_id":"prj_1"`) {
 			t.Errorf("request path/body = %s %s", r.URL.Path, body.String())
 		}
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
 	proofs := &testProofSource{}
-	sender := &heartbeatSender{endpoint: server.URL + "/api/machine/activity-heartbeat", tokens: testTokenSource{}, proofs: proofs, operationID: func() (string, error) { return "op-1", nil }, projectID: "prj_1", machineID: "mach_1", reporterVersion: "test", client: server.Client(), lastActivity: time.Unix(1, 0).UTC()}
+	sender := &heartbeatSender{endpoint: server.URL + "/v1/environment-activity-observations", tokens: testTokenSource{}, proofs: proofs, operationID: func() (string, error) { return "op-1", nil }, projectID: "prj_1", machineID: "mach_1", reporterVersion: "test", client: server.Client(), lastActivity: time.Unix(1, 0).UTC()}
 	if err := sender.Heartbeat(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer helper-identity" || gotProof != base64.RawURLEncoding.EncodeToString([]byte("proof")) {
 		t.Fatalf("headers auth=%q proof=%q", gotAuth, gotProof)
 	}
-	if len(proofs.body) == 0 || !bytes.Contains(proofs.body, []byte(`"machine_id":"mach_1"`)) {
+	if len(proofs.body) == 0 || !bytes.Contains(proofs.body, []byte(`"resource_id":"mach_1"`)) {
 		t.Fatalf("proof body=%s", proofs.body)
 	}
 	_ = activity.Batch{}
@@ -63,7 +63,7 @@ func TestProductionHelperRequiresHTTPSControl(t *testing.T) {
 	base["PAPERBOAT_HELPER_PROFILE"] = "byod"
 	base["PAPERBOAT_WORKSPACE_ROOT"] = t.TempDir()
 	base["PAPERBOAT_CONTROL_URL"] = "http://control.example.test"
-	base["PAPERBOAT_MACHINE_ID"] = "cm_1"
+	base["PAPERBOAT_USER_MACHINE_ID"] = "um_1"
 	if _, err := NewProductionHelper(context.Background(), "test", func(name string) string { return base[name] }); !errors.Is(err, ErrProductionInvalid) {
 		t.Fatalf("byod control error=%v", err)
 	}

@@ -48,7 +48,7 @@ func (a CredentialAuthorizer) Authorize(ctx context.Context, frame protocol.Fram
 		JournalBinding: binding,
 		EnvironmentID:  claims.EnvironmentID,
 		UserID:         claims.UserID,
-		ClientID:       claims.ClientSessionID,
+		ClientID:       claims.CLIClientSessionID,
 		SessionID:      claims.SessionID,
 		ResourceID:     claims.AssignmentID,
 		ExpiresAt:      time.Unix(claims.ExpiresAt, 0).UTC(),
@@ -61,17 +61,17 @@ func stableClaimsBinding(claims auth.Claims) (string, error) {
 	// can retrieve the same durable operation result without crossing identity,
 	// resource, class, or exact-scope boundaries.
 	encoded, err := json.Marshal(struct {
-		Issuer          string   `json:"issuer"`
-		Subject         string   `json:"subject"`
-		Class           string   `json:"class"`
-		Scopes          []string `json:"scopes"`
-		EnvironmentID   string   `json:"environment_id"`
-		UserID          string   `json:"user_id"`
-		ClientSessionID string   `json:"client_session_id"`
-		HelperID        string   `json:"helper_id"`
-		SessionID       string   `json:"session_id"`
-		AssignmentID    string   `json:"assignment_id"`
-	}{claims.Issuer, claims.Subject, claims.CredentialClass, claims.Scope, claims.EnvironmentID, claims.UserID, claims.ClientSessionID, claims.HelperID, claims.SessionID, claims.AssignmentID})
+		Issuer             string   `json:"issuer"`
+		Subject            string   `json:"subject"`
+		Class              string   `json:"class"`
+		Scopes             []string `json:"scopes"`
+		EnvironmentID      string   `json:"environment_id"`
+		UserID             string   `json:"user_id"`
+		CLIClientSessionID string   `json:"cli_client_session_id"`
+		HelperID           string   `json:"helper_id"`
+		SessionID          string   `json:"session_id"`
+		AssignmentID       string   `json:"assignment_id"`
+	}{claims.Issuer, claims.Subject, claims.CredentialClass, claims.Scope, claims.EnvironmentID, claims.UserID, claims.CLIClientSessionID, claims.HelperID, claims.SessionID, claims.AssignmentID})
 	if err != nil {
 		return "", err
 	}

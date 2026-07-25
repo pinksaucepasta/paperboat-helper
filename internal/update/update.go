@@ -277,7 +277,7 @@ func (m *Manager) stage(ctx context.Context, artifact Artifact) (string, error) 
 		return "", err
 	}
 	defer body.Close()
-	file, err := os.CreateTemp(filepath.Dir(m.config.InstallPath), ".paperboat-helper-update-*")
+	file, err := os.CreateTemp(filepath.Dir(m.config.InstallPath), ".pbh-update-*")
 	if err != nil {
 		return "", err
 	}
@@ -436,33 +436,6 @@ type HTTPFetcher struct {
 	AllowedHosts map[string]bool
 }
 
-func (f HTTPFetcher) Fetch(ctx context.Context, rawURL string) (io.ReadCloser, error) {
-	if f.Client == nil {
-		return nil, ErrArtifactInvalid
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Scheme != "https" || !f.AllowedHosts[parsed.Hostname()] {
-		return nil, ErrArtifactInvalid
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	response, err := f.Client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode != http.StatusOK {
-		response.Body.Close()
-		return nil, ErrArtifactInvalid
-	}
-	if response.Request == nil || response.Request.URL.Scheme != "https" || !f.AllowedHosts[response.Request.URL.Hostname()] {
-		response.Body.Close()
-		return nil, ErrArtifactInvalid
-	}
-	return response.Body, nil
-}
-
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
@@ -546,7 +519,7 @@ func rejectDuplicateKeys(data []byte) error {
 }
 func safeStagedPath(path, directory string) bool {
 	relative, err := filepath.Rel(directory, path)
-	return err == nil && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && relative != ".." && strings.HasPrefix(filepath.Base(path), ".paperboat-helper-update-")
+	return err == nil && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && relative != ".." && strings.HasPrefix(filepath.Base(path), ".pbh-update-")
 }
 
 func validateJournal(entry journal, currentVersion, installDirectory string) error {

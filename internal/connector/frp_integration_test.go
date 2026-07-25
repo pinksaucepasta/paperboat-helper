@@ -51,7 +51,7 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 				case <-serverDone:
 				case <-time.After(100 * time.Millisecond):
 					// v0.70.0 frps Run does not reliably return after Close. This
-					// opt-in test runs in an isolated process; Phase 2 asserts only
+					// opt-in test runs in an isolated process; The test asserts only
 					// the embedded client work path and bounded client drain.
 				}
 			})

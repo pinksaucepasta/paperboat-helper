@@ -33,14 +33,14 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	flags.SetOutput(stderr)
 	serverURL := flags.String("server", "", "Paperboat server URL")
 	token := flags.String("enrollment-token", "", "Dashboard enrollment token")
-	name := flags.String("name", "", "Machine name")
+	name := flags.String("name", "", "User machine name")
 	shell := flags.String("shell", "", "Absolute login shell (default: auto-detect)")
 	stateRoot := flags.String("state-root", "", "Helper state directory")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("bootstrap accepts flags only")
 	}
 	reader := bufio.NewReader(stdin)
-	if err := promptBootstrapValue(reader, stderr, "Machine name", name); err != nil {
+	if err := promptBootstrapValue(reader, stderr, "User machine name", name); err != nil {
 		return err
 	}
 	resolvedShell, err := resolveUserShell(*shell, os.Getenv)
@@ -118,7 +118,7 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	}
 	installer, err := service.New(service.Config{Platform: runtime.GOOS, ConfigRoot: configRoot, Executable: executable, Arguments: []string{"run"}, Environment: map[string]string{
 		"HOME": home, "PATH": servicePath, "PAPERBOAT_HELPER_PROFILE": "byod", "PAPERBOAT_HELPER_STATE_ROOT": *stateRoot,
-		"PAPERBOAT_WORKSPACE_ROOT": workspace, "PAPERBOAT_CONTROL_URL": material.ControlURL, "PAPERBOAT_MACHINE_ID": material.MachineID,
+		"PAPERBOAT_WORKSPACE_ROOT": workspace, "PAPERBOAT_CONTROL_URL": material.ControlURL, "PAPERBOAT_USER_MACHINE_ID": material.UserMachineID,
 		"PAPERBOAT_SHELL":                 resolvedShell,
 		"PAPERBOAT_HELPER_LISTEN_ADDRESS": material.HelperListenAddress, "PAPERBOAT_HERDR_PATH": herdrPath, "PAPERBOAT_HERDR_VERSION": herdrVersion,
 	}, Controller: controller})
@@ -241,12 +241,12 @@ func installHelperCommand(directory, artifact string) error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return bootstrap.ErrInvalid
 	}
-	temporary := filepath.Join(directory, fmt.Sprintf(".paperboat-helper-%d", time.Now().UnixNano()))
+	temporary := filepath.Join(directory, fmt.Sprintf(".pbh-%d", time.Now().UnixNano()))
 	if err := os.Symlink(artifact, temporary); err != nil {
 		return err
 	}
 	defer os.Remove(temporary)
-	return os.Rename(temporary, filepath.Join(directory, "paperboat-helper"))
+	return os.Rename(temporary, filepath.Join(directory, "pbh"))
 }
 
 func pathListContains(value, want string) bool {
@@ -275,16 +275,16 @@ func reportInstallationFailureWithClient(ctx context.Context, material bootstrap
 		HelperID           string `json:"helper_id"`
 		HelperEnrollmentID string `json:"helper_enrollment_id"`
 		Stage              string `json:"stage"`
-	}{material.MachineEnrollmentID, material.HelperID, material.EnrollmentID, stage})
+	}{material.UserMachineEnrollmentID, material.HelperID, material.EnrollmentID, stage})
 	if err != nil {
 		return err
 	}
-	operationID := "install-failure-" + material.MachineEnrollmentID + "-" + stage
-	proof, err := (enrollment.ProofSource{StateRoot: stateRoot}).Proof(ctx, operationID, http.MethodPost, "/v1/connected-machines/installations/failure", body)
+	operationID := "install-failure-" + material.UserMachineEnrollmentID + "-" + stage
+	proof, err := (enrollment.ProofSource{StateRoot: stateRoot}).Proof(ctx, operationID, http.MethodPost, "/v1/user-machine-installation-failures", body)
 	if err != nil {
 		return err
 	}
-	base := strings.TrimRight(material.ControlURL, "/") + "/v1/connected-machines/installations/failure"
+	base := strings.TrimRight(material.ControlURL, "/") + "/v1/user-machine-installation-failures"
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, base, bytes.NewReader(body))
@@ -315,11 +315,11 @@ func reportInstallationFailureWithEnrollmentCredentialClient(ctx context.Context
 		HelperID           string `json:"helper_id"`
 		HelperEnrollmentID string `json:"helper_enrollment_id"`
 		Stage              string `json:"stage"`
-	}{material.MachineEnrollmentID, material.HelperID, material.EnrollmentID, stage})
+	}{material.UserMachineEnrollmentID, material.HelperID, material.EnrollmentID, stage})
 	if err != nil {
 		return err
 	}
-	base := strings.TrimRight(material.ControlURL, "/") + "/v1/connected-machines/installations/failure"
+	base := strings.TrimRight(material.ControlURL, "/") + "/v1/user-machine-installation-failures"
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, base, bytes.NewReader(body))

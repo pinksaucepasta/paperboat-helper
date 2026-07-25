@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate release version
+        run: ./tools/release-version.sh validate "${GITHUB_REF_NAME}"
+      - name: Test
+        run: make check
+      - name: Build helper binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          version="${VERSION}"
+          commit="${GITHUB_SHA}"
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$version -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$commit" \
+              -o "dist/pbh_${VERSION}_${os}_${arch}" ./cmd/pbh
+          done
+      - name: Sign helper manifest
+        env:
+          VERSION: ${{ github.ref_name }}
+          SIGNING_KEY: ${{ secrets.HELPER_ARTIFACT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$SIGNING_KEY" ] || { echo "HELPER_ARTIFACT_SIGNING_KEY is required" >&2; exit 1; }
+          key_file="${RUNNER_TEMP}/helper-signing-key"
+          printf '%s' "$SIGNING_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          trap 'rm -f "$key_file"' EXIT
+          version="${VERSION}"
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            artifact="${GITHUB_WORKSPACE}/dist/pbh_${VERSION}_${os}_${arch}"
+            go run ./tools/artifact \
+              -artifact "$artifact" -private-key "$key_file" -version "$version" \
+              -platform "$os" -architecture "$arch" \
+              -url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/pbh_${VERSION}_${os}_${arch}" \
+              -manifest-output "${GITHUB_WORKSPACE}/dist/manifest-${os}-${arch}.json" \
+              -public-key-output "${GITHUB_WORKSPACE}/dist/paperboat-helper-artifact-public-key"
+          done
+          jq -s 'add' dist/manifest-*.json > dist/paperboat-helper-artifacts.json
+          rm dist/manifest-*.json
+          (cd dist && sha256sum pbh_* > SHA256SUMS)
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist
+          format: spdx-json
+          output-file: dist/paperboat-helper.spdx.json
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/pbh_*
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes

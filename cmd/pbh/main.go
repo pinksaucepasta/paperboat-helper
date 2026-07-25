@@ -9,16 +9,16 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/buildinfo"
 )
 
-const usage = `paperboat-helper is the Paperboat remote environment runtime.
+const usage = `pbh is the Paperboat remote environment runtime.
 
 Usage:
-  paperboat-helper version
-  paperboat-helper help
-  paperboat-helper bootstrap --server <url> --enrollment-token <token> --name <name> [--shell <absolute-path>]
-  paperboat-helper preview create --name <name> --port <port> --public
-  paperboat-helper preview list
-  paperboat-helper preview remove <name>
-  paperboat-helper run
+  pbh version
+  pbh help
+  pbh bootstrap --server <url> --enrollment-token <token> --name <name> [--shell <absolute-path>]
+  pbh preview create --name <name> --port <port> --public
+  pbh preview list
+  pbh preview remove <name>
+  pbh run
 
 The bootstrap command performs dashboard-started enrollment, verifies the signed helper
 artifact, installs the user service, and waits for readiness.`
@@ -38,7 +38,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	}
 
 	if args[0] == "version" || args[0] == "--version" {
-		fmt.Fprintf(stdout, "paperboat-helper %s (%s)\n", buildinfo.Version, buildinfo.Commit)
+		fmt.Fprintf(stdout, "pbh %s (%s)\n", buildinfo.Version, buildinfo.Commit)
 		return 0
 	}
 	if args[0] == "bootstrap" {
@@ -76,5 +76,5 @@ func writeError(w io.Writer, err error) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintf(w, "paperboat-helper: %v\n", err)
+	fmt.Fprintf(w, "pbh: %v\n", err)
 }

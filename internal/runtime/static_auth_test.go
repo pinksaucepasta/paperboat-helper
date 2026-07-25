@@ -42,7 +42,7 @@ func TestStaticAuthorizerVerifiesExactFakePeerCredentialPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims := auth.Claims{Issuer: "https://control.test", Audience: "paperboat-helper", Subject: "usr_test", JTI: "jti_valid", IssuedAt: now.Add(-time.Minute).Unix(), ExpiresAt: now.Add(time.Minute).Unix(), Scope: []string{"terminal:operate"}, CredentialClass: "terminal_operation", EnvironmentID: "env_test", UserID: "usr_test", ClientSessionID: "cli_test", SessionID: "ses_test"}
+	claims := auth.Claims{Issuer: "https://control.test", Audience: "paperboat-helper", Subject: "usr_test", JTI: "jti_valid", IssuedAt: now.Add(-time.Minute).Unix(), ExpiresAt: now.Add(time.Minute).Unix(), Scope: []string{"terminal:operate"}, CredentialClass: "terminal_operation", EnvironmentID: "env_test", UserID: "usr_test", CLIClientSessionID: "cli_test", SessionID: "ses_test"}
 	authorizer, err := factory(signStaticCredential(t, private, "key-1", claims))
 	if err != nil {
 		t.Fatal(err)

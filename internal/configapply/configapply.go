@@ -1,4 +1,4 @@
-// Package configapply defines the Phase 2 configuration-application boundary.
+// Package configapply defines the configuration-application boundary.
 package configapply
 
 import (
@@ -24,7 +24,7 @@ type Result struct {
 	Applied      bool   `json:"applied"`
 }
 
-// Handler is implemented by the Phase 7 configuration subsystem. Phase 2 may
+// Handler is implemented by the configuration subsystem. Callers may
 // inject ConformanceHandler to exercise the protocol without writing files.
 type Handler interface {
 	Handle(context.Context, Request) (Result, error)

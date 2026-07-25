@@ -96,7 +96,7 @@ func loadFixture(t *testing.T) (signingFixture, ed25519.PrivateKey, ed25519.Publ
 }
 
 func terminalPolicy(c Claims) Policy {
-	return Policy{Issuer: c.Issuer, Audience: "paperboat-helper", CredentialClass: "terminal_operation", Scopes: []string{"terminal:operate"}, EnvironmentID: c.EnvironmentID, UserID: c.UserID, ClientSessionID: c.ClientSessionID, SessionID: c.SessionID, MaxLifetime: 5 * time.Minute}
+	return Policy{Issuer: c.Issuer, Audience: "paperboat-helper", CredentialClass: "terminal_operation", Scopes: []string{"terminal:operate"}, EnvironmentID: c.EnvironmentID, UserID: c.UserID, CLIClientSessionID: c.CLIClientSessionID, SessionID: c.SessionID, MaxLifetime: 5 * time.Minute}
 }
 
 func TestVerifierAcceptsSignedContractVector(t *testing.T) {
@@ -104,7 +104,7 @@ func TestVerifierAcceptsSignedContractVector(t *testing.T) {
 	keys := &keySource{keys: map[string]ed25519.PublicKey{"test-key-1": public}}
 	v := Verifier{Keys: keys, Clock: fixedClock{time.Unix(fixture.Claims.IssuedAt+1, 0)}, ClockSkew: time.Minute}
 	claims, err := v.Verify(context.Background(), fixture.Token, terminalPolicy(fixture.Claims))
-	if err != nil || claims.JTI != fixture.Claims.JTI || claims.ClientSessionID == "" {
+	if err != nil || claims.JTI != fixture.Claims.JTI || claims.CLIClientSessionID == "" {
 		t.Fatalf("claims=%#v err=%v", claims, err)
 	}
 }

@@ -136,7 +136,7 @@ func TestSupervisorAllowsOnlyExplicitAgentIntegrationEnvironment(t *testing.T) {
 	_, err := NewSupervisor(context.Background(), Config{
 		Executable: testExecutable(t), ExpectedVersion: "0.7.4", Sessions: &sessions{},
 		Environment: []string{
-			"PAPERBOAT_HELPER_AGENT_ENDPOINT=http://127.0.0.1:8080/v1/agent/previews",
+			"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT=http://127.0.0.1:8080/v1/preview-registrations",
 			"PAPERBOAT_HELPER_AGENT_TOKEN_FILE=/state/agent/token",
 		},
 		StateRoot: filepath.Join(t.TempDir(), "herdr"),

@@ -16,7 +16,7 @@ func TestRunVersion(t *testing.T) {
 	if code := run([]string{"version"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("run version exit code = %d, want 0; stderr = %q", code, stderr.String())
 	}
-	if !strings.HasPrefix(stdout.String(), "paperboat-helper ") {
+	if !strings.HasPrefix(stdout.String(), "pbh ") {
 		t.Fatalf("version output = %q", stdout.String())
 	}
 }
@@ -38,7 +38,7 @@ func TestPreviewCreatePrintsPublicURLAndAcknowledgement(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("local-agent-token-01234567890123456789\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PAPERBOAT_HELPER_AGENT_ENDPOINT", server.URL+"/v1/agent/previews")
+	t.Setenv("PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT", server.URL+"/v1/preview-registrations")
 	t.Setenv("PAPERBOAT_HELPER_AGENT_TOKEN_FILE", tokenFile)
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"preview", "create", "--name", "web", "--port", "3000", "--public"}, &stdout, &stderr); code != 0 {
@@ -54,7 +54,7 @@ func TestPreviewRejectsInsecureTokenFile(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("local-agent-token-01234567890123456789\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PAPERBOAT_HELPER_AGENT_ENDPOINT", "http://127.0.0.1:38080/v1/agent/previews")
+	t.Setenv("PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT", "http://127.0.0.1:38080/v1/preview-registrations")
 	t.Setenv("PAPERBOAT_HELPER_AGENT_TOKEN_FILE", tokenFile)
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"preview", "list"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "authorization is unavailable") {
@@ -94,13 +94,13 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 	if code := run([]string{"serve"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("run unknown exit code = %d, want 2", code)
 	}
-	if got := stderr.String(); got != "paperboat-helper: unknown command \"serve\"\n" {
+	if got := stderr.String(); got != "pbh: unknown command \"serve\"\n" {
 		t.Fatalf("stderr = %q", got)
 	}
 }
 
 func TestRemovedTransitionalCommandsAreUnknown(t *testing.T) {
-	for _, arguments := range [][]string{{"phase2-harness"}, {"enroll", "/tmp/config"}} {
+	for _, arguments := range [][]string{{"enroll", "/tmp/config"}} {
 		var stdout, stderr bytes.Buffer
 		if code := run(arguments, &stdout, &stderr); code != 2 {
 			t.Fatalf("arguments=%v code=%d stderr=%q", arguments, code, stderr.String())
@@ -116,7 +116,7 @@ func TestHelpAdvertisesOnlyProductionEnrollmentPath(t *testing.T) {
 	if code := run([]string{"help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "phase2-harness") || strings.Contains(stdout.String(), "helper enroll") || !strings.Contains(stdout.String(), "paperboat-helper run") || !strings.Contains(stdout.String(), "dashboard-started enrollment") {
+	if strings.Contains(stdout.String(), "helper enroll") || !strings.Contains(stdout.String(), "pbh run") || !strings.Contains(stdout.String(), "dashboard-started enrollment") {
 		t.Fatalf("help=%q", stdout.String())
 	}
 }

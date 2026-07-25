@@ -22,7 +22,7 @@ func TestEnrollBindsKeyAndPersistsPrivateIdentity(t *testing.T) {
 	credential := strings.Repeat("g", 32)
 	var publicKey string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/control/v1/helpers/enroll" || r.Header.Get("Content-Type") != "application/json" {
+		if r.Method != http.MethodPost || r.URL.Path != "/control/v1/helper-enrollments" || r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 		}
 		var input struct {
@@ -96,9 +96,9 @@ func TestHostedBootstrapUsesHelperProofAndValidatesMemoryOnlyMaterial(t *testing
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/v1/helpers/enroll":
+		case "/v1/helper-enrollments":
 			_, _ = w.Write([]byte(`{"data":{"helper_id":"helper_1","environment_id":"env_1","credential":"identity-credential-0123456789012345","expires_at":"2099-01-01T00:00:00Z"}}`))
-		case "/v1/helpers/hosted-bootstrap":
+		case "/v1/hosted-helper-bootstrap":
 			if r.Header.Get("Authorization") != "Bearer identity-credential-0123456789012345" ||
 				r.Header.Get("X-Paperboat-Helper-Proof") == "" {
 				t.Error("hosted bootstrap proof headers are missing")

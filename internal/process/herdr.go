@@ -82,7 +82,7 @@ func NewSupervisor(ctx context.Context, config Config) (*Supervisor, error) {
 var allowedEnvironment = map[string]bool{
 	"HOME": true, "XDG_CONFIG_HOME": true, "PATH": true, "SHELL": true,
 	"TERM": true, "COLORTERM": true, "LANG": true, "LC_ALL": true, "NO_COLOR": true,
-	"PAPERBOAT_HELPER_AGENT_ENDPOINT": true, "PAPERBOAT_HELPER_AGENT_TOKEN_FILE": true,
+	"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT": true, "PAPERBOAT_HELPER_AGENT_TOKEN_FILE": true,
 }
 
 func validEnvironment(environment []string) bool {

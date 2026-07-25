@@ -1,6 +1,6 @@
 # paperboat-helper
 
-The remote Paperboat runtime for hosted environments and approved BYOD machines. It owns
+The remote Paperboat runtime for hosted environments and approved user machines. It owns
 the outbound tunnel connector, PTYs, durable terminal sessions, Herdr process launch,
 image staging, preview targets, activity, health, and assigned configuration sync.
 
@@ -16,16 +16,25 @@ engineering requirements.
 make check
 ```
 
-`paperboat-helper bootstrap` is the dashboard-started BYOD path. It consumes single-use
+`pbh bootstrap` is the dashboard-started BYOD path. It consumes single-use
 installation material, verifies the signed helper artifact, installs the user service,
-and waits for authenticated readiness. A missing machine name is prompted interactively;
+and waits for authenticated readiness. A missing user-machine name is prompted interactively;
 the workspace is always the invoking user's canonical home directory and cannot be
 overridden.
 
 Development deployments can produce signed helper-artifact metadata with
-`go run ./cmd/paperboat-helper-artifact`. The command requires an owner-only private-key
+`go run ./tools/artifact`. The command requires an owner-only private-key
 file and writes only the manifest and public key; production signing and release channels
 remain separate operations.
+
+## Release
+
+`YYYY.MM.DD.X` tags build Darwin and Linux binaries for amd64 and arm64, sign the server-consumable
+artifact manifest, generate checksums and an SPDX SBOM, attest the binaries, and publish a
+GitHub release. Configure the repository secret `HELPER_ARTIFACT_SIGNING_KEY` with the
+base64-encoded Ed25519 release seed. The hosted runtime image is published separately as
+`ghcr.io/pinksaucepasta/paperboat-helper-hosted`.
+Use `tools/release-version.sh next` to generate the next tag; tags have no `v` prefix.
 
 ## License
 
