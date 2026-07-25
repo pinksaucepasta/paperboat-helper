@@ -86,7 +86,7 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	if err != nil {
 		return err
 	}
-	artifactHTTP := &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return bootstrap.ErrArtifactManifest }}
+	artifactHTTP := artifactHTTPClient()
 	artifactPath, err := prepareInstallation(ctx, &material, *stateRoot, artifactHTTP, client)
 	if err != nil {
 		if !material.ReuseIdentity {
@@ -152,6 +152,17 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func artifactHTTPClient() *http.Client {
+	return &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(request *http.Request, via []*http.Request) error {
+		if len(via) != 1 || request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.User != nil ||
+			!strings.EqualFold(via[0].URL.Hostname(), "github.com") ||
+			!strings.EqualFold(request.URL.Hostname(), "release-assets.githubusercontent.com") {
+			return bootstrap.ErrArtifactManifest
+		}
+		return nil
+	}}
 }
 
 func canonicalUserHome() (string, error) {

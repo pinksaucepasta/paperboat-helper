@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -181,6 +182,31 @@ func TestReportArtifactFailureUsesOneTimeEnrollmentCredential(t *testing.T) {
 	}
 	if !received {
 		t.Fatal("artifact failure report was not received")
+	}
+}
+
+func TestArtifactHTTPClientAllowsOnlyGitHubReleaseAssetRedirect(t *testing.T) {
+	check := artifactHTTPClient().CheckRedirect
+	origin := httptest.NewRequest(http.MethodGet, "https://github.com/pinksaucepasta/paperboat-helper/releases/download/version/pbh", nil)
+	allowed := httptest.NewRequest(http.MethodGet, "https://release-assets.githubusercontent.com/github-production-release-asset/file?signature=value", nil)
+	if err := check(allowed, []*http.Request{origin}); err != nil {
+		t.Fatalf("valid GitHub release redirect rejected: %v", err)
+	}
+
+	for name, target := range map[string]string{
+		"insecure":    "http://release-assets.githubusercontent.com/file",
+		"credentials": "https://user@release-assets.githubusercontent.com/file",
+		"other host":  "https://example.com/file",
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target, nil)
+			if err := check(request, []*http.Request{origin}); !errors.Is(err, bootstrap.ErrArtifactManifest) {
+				t.Fatalf("redirect error = %v", err)
+			}
+		})
+	}
+	if err := check(allowed, []*http.Request{origin, allowed}); !errors.Is(err, bootstrap.ErrArtifactManifest) {
+		t.Fatalf("second redirect error = %v", err)
 	}
 }
 
