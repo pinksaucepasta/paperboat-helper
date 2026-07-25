@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Runner interface {
@@ -101,8 +103,23 @@ func (c LaunchdController) Apply(ctx context.Context, path string, upgrading boo
 			return err
 		}
 	}
-	if err := c.Runner.Run(ctx, "launchctl", "bootstrap", domain, path); err != nil {
-		return err
+	for {
+		err := c.Runner.Run(ctx, "launchctl", "bootstrap", domain, path)
+		if err == nil {
+			break
+		}
+		// launchd can keep a recently booted-out label reserved briefly. It can
+		// also return an error after loading the job, so verify state before retrying.
+		if c.Runner.Run(ctx, "launchctl", "print", service) == nil {
+			break
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
 	}
 	if err := c.Runner.Run(ctx, "launchctl", "kickstart", "-k", service); err != nil {
 		return err

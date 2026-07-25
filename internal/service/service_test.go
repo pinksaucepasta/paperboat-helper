@@ -265,6 +265,39 @@ func TestNativeControllerCommandSequences(t *testing.T) {
 	}
 }
 
+func TestLaunchdControllerHandlesBootstrapTransition(t *testing.T) {
+	loadedAfterError := &commandRunner{errAt: 1}
+	controller := LaunchdController{Runner: loadedAfterError, UID: 501}
+	if err := controller.Apply(context.Background(), "/tmp/helper.plist", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(loadedAfterError.calls) != 4 || strings.Join(loadedAfterError.calls[1], " ") != "launchctl print gui/501/"+Label {
+		t.Fatalf("loaded-after-error calls=%v", loadedAfterError.calls)
+	}
+
+	reservedLabel := &launchdTransitionRunner{failures: 2}
+	controller.Runner = reservedLabel
+	if err := controller.Apply(context.Background(), "/tmp/helper.plist", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(reservedLabel.calls) != 5 || strings.Join(reservedLabel.calls[2], " ") != "launchctl bootstrap gui/501 /tmp/helper.plist" {
+		t.Fatalf("reserved-label calls=%v", reservedLabel.calls)
+	}
+}
+
+type launchdTransitionRunner struct {
+	calls    [][]string
+	failures int
+}
+
+func (r *launchdTransitionRunner) Run(_ context.Context, name string, args ...string) error {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	if len(r.calls) <= r.failures {
+		return errors.New("launchd transition in progress")
+	}
+	return nil
+}
+
 func TestExecRunnerReturnsBoundedNativeDiagnostics(t *testing.T) {
 	err := (ExecRunner{}).Run(context.Background(), "/bin/sh", "-c", "printf native-diagnostic >&2; exit 7")
 	var commandErr *CommandError

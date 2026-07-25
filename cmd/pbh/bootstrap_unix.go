@@ -73,7 +73,7 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stderr, "Pairing approved. Installing Paperboat helper...")
+	fmt.Fprintln(stderr, "Pairing approved. Setting up the managed helper service...")
 	client, err := enrollment.NewClient(nil, 15*time.Second)
 	if err != nil {
 		return err
