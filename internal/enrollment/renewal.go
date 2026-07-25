@@ -55,7 +55,7 @@ func (s *RenewingTokenSource) Token(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.config.Clock().UTC()
-	current, err := LoadRuntimeIdentity(s.config.StateRoot, now)
+	current, err := LoadRuntimeIdentityForRenewal(s.config.StateRoot, now)
 	if err != nil {
 		return "", err
 	}
@@ -69,7 +69,7 @@ func (s *RenewingTokenSource) Token(ctx context.Context) (string, error) {
 	body, _ := json.Marshal(struct {
 		OperationID string `json:"operation_id"`
 	}{operationID})
-	proof, err := (ProofSource{StateRoot: s.config.StateRoot, Clock: s.config.Clock}).Proof(ctx, operationID, http.MethodPost, s.endpoint.Path, body)
+	proof, err := (ProofSource{StateRoot: s.config.StateRoot, Clock: s.config.Clock}).renewalProof(operationID, http.MethodPost, s.endpoint.Path, body)
 	if err != nil {
 		return "", err
 	}

@@ -71,11 +71,25 @@ type ProofSource struct {
 }
 
 func (s ProofSource) Proof(_ context.Context, operationID, method, path string, body []byte) ([]byte, error) {
+	return s.proof(operationID, method, path, body, false)
+}
+
+func (s ProofSource) renewalProof(operationID, method, path string, body []byte) ([]byte, error) {
+	return s.proof(operationID, method, path, body, true)
+}
+
+func (s ProofSource) proof(operationID, method, path string, body []byte, allowExpiredIdentity bool) ([]byte, error) {
 	now := time.Now().UTC()
 	if s.Clock != nil {
 		now = s.Clock().UTC()
 	}
-	value, err := LoadRuntimeIdentity(s.StateRoot, now)
+	var value RuntimeIdentity
+	var err error
+	if allowExpiredIdentity {
+		value, err = LoadRuntimeIdentityForRenewal(s.StateRoot, now)
+	} else {
+		value, err = LoadRuntimeIdentity(s.StateRoot, now)
+	}
 	if err != nil || len(operationID) < 8 || len(operationID) > 128 || method != http.MethodPost || path == "" || len(body) > 1<<20 {
 		return nil, ErrInvalid
 	}
@@ -446,6 +460,14 @@ func writeIdentity(root string, value RuntimeIdentity) error {
 }
 
 func LoadRuntimeIdentity(root string, now time.Time) (RuntimeIdentity, error) {
+	return loadRuntimeIdentity(root, now, 0)
+}
+
+func LoadRuntimeIdentityForRenewal(root string, now time.Time) (RuntimeIdentity, error) {
+	return loadRuntimeIdentity(root, now, 24*time.Hour)
+}
+
+func loadRuntimeIdentity(root string, now time.Time, expiryGrace time.Duration) (RuntimeIdentity, error) {
 	if !filepath.IsAbs(root) || now.IsZero() {
 		return RuntimeIdentity{}, ErrInvalid
 	}
@@ -463,7 +485,7 @@ func LoadRuntimeIdentity(root string, now time.Time) (RuntimeIdentity, error) {
 		return RuntimeIdentity{}, err
 	}
 	var value RuntimeIdentity
-	if strictJSON(body, &value) != nil || value.Version != 1 || value.HelperID == "" || value.EnvironmentID == "" || len(value.Credential) < 32 || !value.ExpiresAt.After(now) || value.KeyID == "" {
+	if strictJSON(body, &value) != nil || value.Version != 1 || value.HelperID == "" || value.EnvironmentID == "" || len(value.Credential) < 32 || !value.ExpiresAt.After(now.Add(-expiryGrace)) || value.KeyID == "" {
 		return RuntimeIdentity{}, ErrInvalid
 	}
 	store, err := identity.Open(identity.Config{StateRoot: root})

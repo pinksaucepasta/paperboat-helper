@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,5 +51,48 @@ func TestRenewingTokenSourceRenewsAndPersistsIdentity(t *testing.T) {
 	}
 	if stored.Credential != renewedCredential || stored.KeyID == "" {
 		t.Fatalf("stored=%#v", stored)
+	}
+}
+
+func TestRenewingTokenSourceRecoversExpiredIdentityWithinGrace(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/helper-enrollments":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"helper_id": "hlp_1", "environment_id": "env_1", "credential": "initial-helper-credential-012345678901234567890", "expires_at": now.Add(time.Hour)}})
+		case "/v1/helper-identity-renewals":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"helper_id": "hlp_1", "environment_id": "env_1", "credential": "renewed-helper-credential-012345678901234567890", "expires_at": now.Add(time.Hour)}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	client, _ := NewClient(server.Client().Transport, time.Second)
+	if _, err := client.Enroll(context.Background(), Config{ControlURL: server.URL, StateRoot: root, EnrollmentCredential: "grant-credential-012345678901234567890"}); err != nil {
+		t.Fatal(err)
+	}
+	var identity RuntimeIdentity
+	body, _ := os.ReadFile(filepath.Join(root, "runtime-identity.json"))
+	if err := json.Unmarshal(body, &identity); err != nil {
+		t.Fatal(err)
+	}
+	identity.ExpiresAt = now.Add(-time.Hour)
+	if err := writeIdentity(root, identity); err != nil {
+		t.Fatal(err)
+	}
+	source, err := NewRenewingTokenSource(RenewingTokenConfig{ControlURL: server.URL, StateRoot: root, Transport: server.Client().Transport, Clock: func() time.Time { return now }, OperationID: func() (string, error) { return "op_renew_expired", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Token(context.Background()); err != nil {
+		t.Fatalf("renew expired identity: %v", err)
+	}
+	identity.ExpiresAt = now.Add(-25 * time.Hour)
+	if err := writeIdentity(root, identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Token(context.Background()); err == nil {
+		t.Fatal("renewed identity outside recovery grace")
 	}
 }

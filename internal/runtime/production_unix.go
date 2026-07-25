@@ -68,38 +68,55 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
+	operationID := func() (string, error) {
+		bytes := make([]byte, 16)
+		if _, err := rand.Read(bytes); err != nil {
+			return "", err
+		}
+		return "op_admit_" + hex.EncodeToString(bytes), nil
+	}
+	renewingTokens, err := enrollment.NewRenewingTokenSource(enrollment.RenewingTokenConfig{ControlURL: controlURL.String(), StateRoot: runtimeConfig.StateRoot, Transport: transport, RenewBefore: 10 * time.Minute, Timeout: 15 * time.Second, Clock: func() time.Time { return time.Now().UTC() }, OperationID: operationID})
+	if err != nil {
+		return nil, err
+	}
 	var enrollmentClient *enrollment.Client
 	if _, loadErr := enrollment.LoadRuntimeIdentity(runtimeConfig.StateRoot, time.Now().UTC()); loadErr != nil {
-		var clientErr error
-		enrollmentClient, clientErr = enrollment.NewClient(transport, 15*time.Second)
-		if clientErr != nil {
-			return nil, clientErr
-		}
-		enrollmentConfig := enrollment.Config{
-			ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"),
-			StateRoot: runtimeConfig.StateRoot,
-		}
-		if runtimeConfig.Profile == helperconfig.Hosted {
-			_, err = retryHostedControl(ctx, func(attemptCtx context.Context) (enrollment.RuntimeIdentity, error) {
-				return enrollmentClient.EnrollHosted(attemptCtx, enrollmentConfig)
-			})
+		if _, recoveryErr := enrollment.LoadRuntimeIdentityForRenewal(runtimeConfig.StateRoot, time.Now().UTC()); recoveryErr == nil {
+			if _, err := renewingTokens.Token(ctx); err != nil {
+				return nil, err
+			}
 		} else {
-			grantName := valueOrRuntime(environ("PAPERBOAT_ENROLLMENT_CREDENTIAL_ENV"), "PAPERBOAT_ENROLLMENT_CREDENTIAL")
-			if !safeProductionEnvironmentName(grantName) {
-				return nil, ErrProductionInvalid
+			var clientErr error
+			enrollmentClient, clientErr = enrollment.NewClient(transport, 15*time.Second)
+			if clientErr != nil {
+				return nil, clientErr
 			}
-			enrollmentConfig.EnrollmentCredential = environ(grantName)
-			if enrollmentConfig.EnrollmentCredential == "" {
-				return nil, loadErr
+			enrollmentConfig := enrollment.Config{
+				ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"),
+				StateRoot: runtimeConfig.StateRoot,
 			}
-			_, err = enrollmentClient.Enroll(ctx, enrollmentConfig)
-			_ = os.Unsetenv(grantName)
-		}
-		if err != nil {
 			if runtimeConfig.Profile == helperconfig.Hosted {
-				return nil, fmt.Errorf("hosted identity bootstrap: %w", err)
+				_, err = retryHostedControl(ctx, func(attemptCtx context.Context) (enrollment.RuntimeIdentity, error) {
+					return enrollmentClient.EnrollHosted(attemptCtx, enrollmentConfig)
+				})
+			} else {
+				grantName := valueOrRuntime(environ("PAPERBOAT_ENROLLMENT_CREDENTIAL_ENV"), "PAPERBOAT_ENROLLMENT_CREDENTIAL")
+				if !safeProductionEnvironmentName(grantName) {
+					return nil, ErrProductionInvalid
+				}
+				enrollmentConfig.EnrollmentCredential = environ(grantName)
+				if enrollmentConfig.EnrollmentCredential == "" {
+					return nil, loadErr
+				}
+				_, err = enrollmentClient.Enroll(ctx, enrollmentConfig)
+				_ = os.Unsetenv(grantName)
 			}
-			return nil, err
+			if err != nil {
+				if runtimeConfig.Profile == helperconfig.Hosted {
+					return nil, fmt.Errorf("hosted identity bootstrap: %w", err)
+				}
+				return nil, err
+			}
 		}
 	}
 	identity, err := enrollment.LoadRuntimeIdentity(runtimeConfig.StateRoot, time.Now().UTC())
@@ -141,17 +158,6 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	}
 	verifier := auth.Verifier{Keys: cache, Clock: productionClock{}, Replays: auth.NewReplayCache(4096, productionClock{}), ClockSkew: 30 * time.Second, RefreshTimeout: 2 * time.Second}
 	authorizer, err := NewCredentialAuthorizer(CredentialAuthConfig{Issuer: issuer, EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, Verifier: verifier})
-	if err != nil {
-		return nil, err
-	}
-	operationID := func() (string, error) {
-		bytes := make([]byte, 16)
-		if _, err := rand.Read(bytes); err != nil {
-			return "", err
-		}
-		return "op_admit_" + hex.EncodeToString(bytes), nil
-	}
-	renewingTokens, err := enrollment.NewRenewingTokenSource(enrollment.RenewingTokenConfig{ControlURL: controlURL.String(), StateRoot: runtimeConfig.StateRoot, Transport: transport, RenewBefore: 10 * time.Minute, Timeout: 15 * time.Second, Clock: func() time.Time { return time.Now().UTC() }, OperationID: operationID})
 	if err != nil {
 		return nil, err
 	}
