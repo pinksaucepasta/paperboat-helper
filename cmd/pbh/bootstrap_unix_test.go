@@ -64,8 +64,12 @@ func TestResolveUserShellUsesOverrideAndEnvironment(t *testing.T) {
 	if err := os.WriteFile(shell, []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	canonicalShell, err := filepath.EvalSymlinks(shell)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := resolveUserShell(shell, func(string) string { return "/bin/false" })
-	if err != nil || got != shell {
+	if err != nil || got != canonicalShell {
 		t.Fatalf("override shell=%q err=%v", got, err)
 	}
 	got, err = resolveUserShell("", func(name string) string {
@@ -74,7 +78,7 @@ func TestResolveUserShellUsesOverrideAndEnvironment(t *testing.T) {
 		}
 		return ""
 	})
-	if err != nil || got != shell {
+	if err != nil || got != canonicalShell {
 		t.Fatalf("detected shell=%q err=%v", got, err)
 	}
 	if _, err := resolveUserShell("relative-shell", nil); err == nil {

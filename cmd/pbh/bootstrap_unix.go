@@ -348,11 +348,15 @@ func validateUserShell(path string) (string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", errors.New("shell must be an absolute canonical path")
 	}
-	info, err := os.Stat(path)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {
+		return "", errors.New("shell must be an executable regular file")
+	}
+	info, err := os.Lstat(resolved)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return "", errors.New("shell must be an executable regular file")
 	}
-	return path, nil
+	return resolved, nil
 }
 
 func accountLoginShell() string {

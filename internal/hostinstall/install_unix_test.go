@@ -171,11 +171,15 @@ func validRequest(t *testing.T) Request {
 	if err := os.WriteFile(herdr, []byte("herdr"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	shell, err := filepath.EvalSymlinks("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Request{
 		Schema: SchemaV1, Platform: runtime.GOOS, User: account.Username, UID: uid, Group: group.Name, GID: gid,
 		Executable: executable, Artifact: manifest, HostExecutable: executable, HostArtifact: hostManifest, ArtifactPublicKey: base64.RawURLEncoding.EncodeToString(public),
 		Home: account.HomeDir, Path: "/usr/bin:/bin", StateRoot: state, WorkspaceRoot: account.HomeDir,
-		ControlURL: "https://control.example.test", UserMachineID: "um_test", Shell: "/bin/sh",
+		ControlURL: "https://control.example.test", UserMachineID: "um_test", Shell: shell,
 		HelperListenAddress: "127.0.0.1:8080", HerdrPath: herdr, HerdrVersion: "test",
 	}
 }
