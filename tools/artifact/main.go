@@ -16,12 +16,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/pinksaucepasta/paperboat-helper/internal/binarytarget"
 )
 
-const schema = "paperboat.helper-artifact/v1"
+const schema = "paperboat.helper-artifact/v2"
 
 type manifest struct {
 	Schema       string `json:"schema"`
+	Kind         string `json:"kind"`
 	Version      string `json:"version"`
 	Platform     string `json:"platform"`
 	Architecture string `json:"architecture"`
@@ -33,6 +36,7 @@ type manifest struct {
 type payload struct {
 	Architecture string `json:"architecture"`
 	ByteLength   int64  `json:"byte_length"`
+	Kind         string `json:"kind"`
 	Platform     string `json:"platform"`
 	Schema       string `json:"schema"`
 	SHA256       string `json:"sha256"`
@@ -47,18 +51,19 @@ func main() {
 	version := flags.String("version", "", "artifact version")
 	platform := flags.String("platform", runtime.GOOS, "target platform")
 	architecture := flags.String("architecture", runtime.GOARCH, "target architecture")
+	kind := flags.String("kind", "", "artifact kind: worker or host_service")
 	publicURL := flags.String("url", "", "HTTPS URL where the artifact is served")
 	manifestPath := flags.String("manifest-output", "", "output JSON array path")
 	publicPath := flags.String("public-key-output", "", "output base64 public-key path")
 	flags.Parse(os.Args[1:])
-	if err := generate(*artifactPath, *keyPath, *version, *platform, *architecture, *publicURL, *manifestPath, *publicPath); err != nil {
+	if err := generate(*artifactPath, *keyPath, *version, *platform, *architecture, *kind, *publicURL, *manifestPath, *publicPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func generate(artifactPath, keyPath, version, platform, architecture, publicURL, manifestPath, publicPath string) error {
-	if strings.TrimSpace(artifactPath) == "" || strings.TrimSpace(keyPath) == "" || strings.TrimSpace(version) == "" || strings.TrimSpace(publicURL) == "" || strings.TrimSpace(manifestPath) == "" || strings.TrimSpace(publicPath) == "" || !filepath.IsAbs(artifactPath) || !filepath.IsAbs(keyPath) || !filepath.IsAbs(manifestPath) || !filepath.IsAbs(publicPath) {
+func generate(artifactPath, keyPath, version, platform, architecture, kind, publicURL, manifestPath, publicPath string) error {
+	if strings.TrimSpace(artifactPath) == "" || strings.TrimSpace(keyPath) == "" || strings.TrimSpace(version) == "" || kind != "worker" && kind != "host_service" || strings.TrimSpace(publicURL) == "" || strings.TrimSpace(manifestPath) == "" || strings.TrimSpace(publicPath) == "" || !filepath.IsAbs(artifactPath) || !filepath.IsAbs(keyPath) || !filepath.IsAbs(manifestPath) || !filepath.IsAbs(publicPath) {
 		return errors.New("artifact, private-key, version, url, manifest-output, and public-key-output are required (absolute paths for files)")
 	}
 	parsedURL, err := url.Parse(publicURL)
@@ -92,9 +97,12 @@ func generate(artifactPath, keyPath, version, platform, architecture, publicURL,
 	if err != nil {
 		return err
 	}
+	if err := binarytarget.Validate(artifactPath, platform, architecture); err != nil {
+		return err
+	}
 	digest := sha256.Sum256(artifact)
-	item := manifest{Schema: schema, Version: version, Platform: platform, Architecture: architecture, URL: publicURL, ByteLength: int64(len(artifact)), SHA256: hex.EncodeToString(digest[:])}
-	encoded, err := json.Marshal(payload{Architecture: item.Architecture, ByteLength: item.ByteLength, Platform: item.Platform, Schema: item.Schema, SHA256: item.SHA256, URL: item.URL, Version: item.Version})
+	item := manifest{Schema: schema, Kind: kind, Version: version, Platform: platform, Architecture: architecture, URL: publicURL, ByteLength: int64(len(artifact)), SHA256: hex.EncodeToString(digest[:])}
+	encoded, err := json.Marshal(payload{Architecture: item.Architecture, ByteLength: item.ByteLength, Kind: item.Kind, Platform: item.Platform, Schema: item.Schema, SHA256: item.SHA256, URL: item.URL, Version: item.Version})
 	if err != nil {
 		return err
 	}

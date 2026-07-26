@@ -25,12 +25,15 @@ import (
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
 	"github.com/pinksaucepasta/paperboat-helper/internal/auth"
+	"github.com/pinksaucepasta/paperboat-helper/internal/availability"
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/connector"
 	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/hosted"
+	"github.com/pinksaucepasta/paperboat-helper/internal/hostservice"
+	"github.com/pinksaucepasta/paperboat-helper/internal/observability"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
 )
 
@@ -48,6 +51,15 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, errors.Join(ErrProductionInvalid, err)
 	}
+	bootState, recoveryExitSignal, err := recordWorkerBoot(runtimeConfig.StateRoot)
+	if err != nil {
+		return nil, err
+	}
+	metrics, err := observability.NewRegistry(observability.DefaultDescriptors())
+	if err != nil {
+		return nil, err
+	}
+	_ = metrics.Record("paperboat_helper_restart_total", float64(bootState.Generation), nil)
 	var hostedConfig hosted.Config
 	if runtimeConfig.Profile == helperconfig.Hosted {
 		hostedConfig, err = hosted.FromEnv(environ)
@@ -75,51 +87,45 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		}
 		return "op_admit_" + hex.EncodeToString(bytes), nil
 	}
-	renewingTokens, err := enrollment.NewRenewingTokenSource(enrollment.RenewingTokenConfig{ControlURL: controlURL.String(), StateRoot: runtimeConfig.StateRoot, Transport: transport, RenewBefore: 10 * time.Minute, Timeout: 15 * time.Second, Clock: func() time.Time { return time.Now().UTC() }, OperationID: operationID})
+	renewingTokens, err := enrollment.NewRenewingTokenSource(enrollment.RenewingTokenConfig{ControlURL: controlURL.String(), StateRoot: runtimeConfig.StateRoot, Transport: transport, RenewBefore: 10 * time.Minute, Timeout: 15 * time.Second, Clock: func() time.Time { return time.Now().UTC() }, OperationID: operationID, Metrics: metrics})
 	if err != nil {
 		return nil, err
 	}
 	var enrollmentClient *enrollment.Client
-	if _, loadErr := enrollment.LoadRuntimeIdentity(runtimeConfig.StateRoot, time.Now().UTC()); loadErr != nil {
-		if _, recoveryErr := enrollment.LoadRuntimeIdentityForRenewal(runtimeConfig.StateRoot, time.Now().UTC()); recoveryErr == nil {
-			if _, err := renewingTokens.Token(ctx); err != nil {
-				return nil, err
-			}
+	if _, loadErr := enrollment.LoadRuntimeIdentityForRenewal(runtimeConfig.StateRoot, time.Now().UTC()); loadErr != nil {
+		var clientErr error
+		enrollmentClient, clientErr = enrollment.NewClient(transport, 15*time.Second)
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		enrollmentConfig := enrollment.Config{
+			ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"),
+			StateRoot: runtimeConfig.StateRoot,
+		}
+		if runtimeConfig.Profile == helperconfig.Hosted {
+			_, err = retryHostedControl(ctx, func(attemptCtx context.Context) (enrollment.RuntimeIdentity, error) {
+				return enrollmentClient.EnrollHosted(attemptCtx, enrollmentConfig)
+			})
 		} else {
-			var clientErr error
-			enrollmentClient, clientErr = enrollment.NewClient(transport, 15*time.Second)
-			if clientErr != nil {
-				return nil, clientErr
+			grantName := valueOrRuntime(environ("PAPERBOAT_ENROLLMENT_CREDENTIAL_ENV"), "PAPERBOAT_ENROLLMENT_CREDENTIAL")
+			if !safeProductionEnvironmentName(grantName) {
+				return nil, ErrProductionInvalid
 			}
-			enrollmentConfig := enrollment.Config{
-				ControlURL: controlURL.String(), ControlCAFile: environ("PAPERBOAT_CONTROL_CA_FILE"),
-				StateRoot: runtimeConfig.StateRoot,
+			enrollmentConfig.EnrollmentCredential = environ(grantName)
+			if enrollmentConfig.EnrollmentCredential == "" {
+				return nil, loadErr
 			}
+			_, err = enrollmentClient.Enroll(ctx, enrollmentConfig)
+			_ = os.Unsetenv(grantName)
+		}
+		if err != nil {
 			if runtimeConfig.Profile == helperconfig.Hosted {
-				_, err = retryHostedControl(ctx, func(attemptCtx context.Context) (enrollment.RuntimeIdentity, error) {
-					return enrollmentClient.EnrollHosted(attemptCtx, enrollmentConfig)
-				})
-			} else {
-				grantName := valueOrRuntime(environ("PAPERBOAT_ENROLLMENT_CREDENTIAL_ENV"), "PAPERBOAT_ENROLLMENT_CREDENTIAL")
-				if !safeProductionEnvironmentName(grantName) {
-					return nil, ErrProductionInvalid
-				}
-				enrollmentConfig.EnrollmentCredential = environ(grantName)
-				if enrollmentConfig.EnrollmentCredential == "" {
-					return nil, loadErr
-				}
-				_, err = enrollmentClient.Enroll(ctx, enrollmentConfig)
-				_ = os.Unsetenv(grantName)
+				return nil, fmt.Errorf("hosted identity bootstrap: %w", err)
 			}
-			if err != nil {
-				if runtimeConfig.Profile == helperconfig.Hosted {
-					return nil, fmt.Errorf("hosted identity bootstrap: %w", err)
-				}
-				return nil, err
-			}
+			return nil, err
 		}
 	}
-	identity, err := enrollment.LoadRuntimeIdentity(runtimeConfig.StateRoot, time.Now().UTC())
+	identity, err := enrollment.LoadRuntimeIdentityForRenewal(runtimeConfig.StateRoot, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -146,16 +152,14 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	cache, err := auth.NewJWKSCache(auth.JWKSConfig{Fetcher: fetcher, Clock: productionClock{}, TTL: 5 * time.Minute, RetainMissing: auth.DefaultRetainMissing})
+	cache, err := auth.NewJWKSCache(auth.JWKSConfig{Fetcher: fetcher, Clock: productionClock{}, TTL: 5 * time.Minute, RetainMissing: auth.DefaultRetainMissing, PersistencePath: filepath.Join(runtimeConfig.StateRoot, "authorization", "jwks.json")})
 	if err != nil {
 		return nil, err
 	}
 	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	err = cache.Refresh(refreshCtx)
+	_ = cache.Refresh(refreshCtx)
 	cancel()
-	if err != nil {
-		return nil, err
-	}
+	authorizationRefresh := &jwksRefreshService{cache: cache, interval: time.Minute}
 	verifier := auth.Verifier{Keys: cache, Clock: productionClock{}, Replays: auth.NewReplayCache(4096, productionClock{}), ClockSkew: 30 * time.Second, RefreshTimeout: 2 * time.Second}
 	authorizer, err := NewCredentialAuthorizer(CredentialAuthConfig{Issuer: issuer, EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, Verifier: verifier})
 	if err != nil {
@@ -177,11 +181,15 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	supervisor, err := connector.NewSupervisor(connector.SupervisorConfig{Manager: manager, Admissions: source, InitialBackoff: time.Second, MaxBackoff: time.Minute})
+	supervisor, err := connector.NewSupervisor(connector.SupervisorConfig{Manager: manager, Admissions: source, InitialBackoff: time.Second, MaxBackoff: 45 * time.Second, Metrics: metrics})
 	if err != nil {
 		return nil, err
 	}
-	connectorService := &connectorReadinessService{supervisor: supervisor, manager: manager, timeout: durationRuntime(environ("PAPERBOAT_CONNECTOR_READY_TIMEOUT_SECONDS"), 30*time.Second)}
+	networkChanges, err := newNetworkChangeService(2*time.Second, supervisor.NetworkChanged)
+	if err != nil {
+		return nil, err
+	}
+	connectorService := &connectorReadinessService{supervisor: supervisor, manager: manager, networkChanges: networkChanges}
 	collector, err := activity.New(activity.Config{MaxQueued: runtimeConfig.Resources.MaxActivityEvents, MaxDiagnostics: 128})
 	if err != nil {
 		return nil, err
@@ -211,6 +219,8 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		return nil, err
 	}
 	var activityDelivery *activity.Delivery
+	var availabilityService *availability.Service
+	var updateClient *hostservice.Client
 	machineID := environ("PAPERBOAT_USER_MACHINE_ID")
 	if runtimeConfig.Profile == helperconfig.Hosted {
 		machineID = valueOrRuntime(environ("FLY_MACHINE_ID"), environ("PAPERBOAT_MACHINE_ID"))
@@ -218,9 +228,31 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if machineID == "" {
 		return nil, ErrProductionInvalid
 	}
+	if runtimeConfig.Profile == helperconfig.BYOD {
+		resolver, resolverErr := availability.NewResolver(controlURL.ResolveReference(&url.URL{Path: "/v1/helper-runtime-policies/resolve"}).String(), renewingTokens, enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID, &http.Client{Transport: transport, Timeout: 10 * time.Second})
+		if resolverErr != nil {
+			return nil, resolverErr
+		}
+		hostClient, hostErr := availability.NewHostClient("/var/run/paperboat/host-service.sock", 5*time.Second)
+		if hostErr != nil {
+			return nil, hostErr
+		}
+		availabilityService, err = availability.NewService(resolver, hostClient, runtimeConfig.Limits.HeartbeatInterval, metrics)
+		if err != nil {
+			return nil, err
+		}
+		updateClient, err = hostservice.NewClient("/var/run/paperboat/host-service.sock", 2*time.Minute)
+		if err != nil {
+			return nil, err
+		}
+	}
 	{
 		activityEndpoint := controlURL.ResolveReference(&url.URL{Path: "/v1/environment-activity-observations"}).String()
-		sender := &heartbeatSender{endpoint: activityEndpoint, tokens: renewingTokens, proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID: operationID, projectID: identity.EnvironmentID, machineID: machineID, reporterVersion: version, client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, lastActivity: time.Now().UTC()}
+		scope := environ("PAPERBOAT_HELPER_SERVICE_SCOPE")
+		if scope != "system" && scope != "user" {
+			scope = "unknown"
+		}
+		sender := &heartbeatSender{endpoint: activityEndpoint, tokens: renewingTokens, proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID: operationID, projectID: identity.EnvironmentID, machineID: machineID, reporterVersion: version, client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, lastActivity: time.Now().UTC(), availability: availabilityService, receiptPath: filepath.Join(runtimeConfig.StateRoot, "runtime", "server-heartbeat.json"), workerGeneration: bootState.Generation, osBootID: bootState.OSBootID, serviceScope: scope, connector: manager}
 		activityDelivery, err = activity.NewDelivery(activity.DeliveryConfig{Collector: collector, Sender: sender, Interval: runtimeConfig.Limits.HeartbeatInterval, Timeout: 10 * time.Second})
 		if err != nil {
 			return nil, err
@@ -279,15 +311,55 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		return nil, err
 	}
 	listen := valueOrRuntime(environ("PAPERBOAT_HELPER_LISTEN_ADDRESS"), "127.0.0.1:8080")
+	if err := writeWorkerLocal(runtimeConfig.StateRoot, listen); err != nil {
+		return nil, err
+	}
 	herdrPath := valueOrRuntime(environ("PAPERBOAT_HERDR_PATH"), "/usr/local/bin/herdr")
 	herdrVersion := valueOrRuntime(environ("PAPERBOAT_HERDR_VERSION"), "0.7.4")
-	dependencies := HelperDependencies{Authorizer: authorizer, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, Activity: collector, ActivityService: activityDelivery, ConfigSync: configSyncService}
+	activityService := Service(activityDelivery)
+	if availabilityService != nil {
+		activityService = serviceGroup{availabilityService, activityDelivery}
+	}
+	dependencies := HelperDependencies{Authorizer: authorizer, AuthorizationService: authorizationRefresh, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, Activity: collector, ActivityService: activityService, ConfigSync: configSyncService, Updates: updateClient, Metrics: metrics}
 	if runtimeConfig.Profile == helperconfig.Hosted {
 		dependencies.HostedLifecycle = hostedLifecycle
 		dependencies.ConfigApply = configapply.SyncHandler{Apply: configSyncService.Apply}
 		dependencies.ConfigApplyProof = true
 	}
-	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout}, dependencies)
+	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal}, dependencies)
+}
+
+func writeWorkerLocal(stateRoot, listenAddress string) error {
+	body, err := json.Marshal(struct {
+		Schema        string `json:"schema"`
+		ListenAddress string `json:"listen_address"`
+	}{"paperboat.worker-local/v1", listenAddress})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(stateRoot, "runtime", "worker-local.json")
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".worker-local-*")
+	if err != nil {
+		return err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(body); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func retryHostedControl[T any](ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
@@ -359,6 +431,14 @@ type heartbeatSender struct {
 	client       *http.Client
 	mu           sync.Mutex
 	lastActivity time.Time
+	availability interface {
+		Observation() *availability.Observation
+	}
+	receiptPath      string
+	workerGeneration uint64
+	osBootID         string
+	serviceScope     string
+	connector        interface{ Status() connector.Status }
 }
 
 func (s *heartbeatSender) Send(ctx context.Context, batch activity.Batch) error {
@@ -387,13 +467,15 @@ func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) err
 	last := s.lastActivity
 	s.mu.Unlock()
 	body, err := json.Marshal(struct {
-		EnvironmentID   string            `json:"environment_id"`
-		ResourceID      string            `json:"resource_id"`
-		LastActivityAt  time.Time         `json:"last_activity_at"`
-		Signals         map[string]string `json:"signals"`
-		ReporterVersion string            `json:"reporter_version"`
-		SampledAt       time.Time         `json:"sampled_at"`
-	}{s.projectID, s.machineID, last, signals, s.reporterVersion, now})
+		EnvironmentID      string                         `json:"environment_id"`
+		ResourceID         string                         `json:"resource_id"`
+		LastActivityAt     time.Time                      `json:"last_activity_at"`
+		Signals            map[string]string              `json:"signals"`
+		ReporterVersion    string                         `json:"reporter_version"`
+		SampledAt          time.Time                      `json:"sampled_at"`
+		Availability       *availability.Observation      `json:"availability,omitempty"`
+		RuntimeDiagnostics *runtimeDiagnosticsObservation `json:"runtime_diagnostics,omitempty"`
+	}{s.projectID, s.machineID, last, signals, s.reporterVersion, now, availabilityObservation(s.availability), s.runtimeDiagnostics(now)})
 	if err != nil {
 		return err
 	}
@@ -425,7 +507,80 @@ func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) err
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("activity heartbeat rejected with status %d", response.StatusCode)
 	}
-	return nil
+	if s.receiptPath == "" {
+		return nil
+	}
+	return writeServerHeartbeatReceipt(s.receiptPath, serverHeartbeatReceipt{Schema: "paperboat.server-heartbeat/v1", WorkerGeneration: s.workerGeneration, ReporterVersion: s.reporterVersion, AcceptedAt: time.Now().UTC()})
+}
+
+type runtimeDiagnosticsObservation struct {
+	WorkerGeneration    uint64    `json:"worker_generation"`
+	OSBootID            string    `json:"os_boot_id"`
+	ConnectorState      string    `json:"connector_state"`
+	ConnectorGeneration uint64    `json:"connector_generation"`
+	WorkerServiceScope  string    `json:"worker_service_scope"`
+	ObservedAt          time.Time `json:"observed_at"`
+}
+
+func (s *heartbeatSender) runtimeDiagnostics(observedAt time.Time) *runtimeDiagnosticsObservation {
+	if s.workerGeneration < 1 || s.osBootID == "" || s.connector == nil {
+		return nil
+	}
+	status := s.connector.Status()
+	state := "unavailable"
+	if status.Connected {
+		state = "ready"
+	} else if status.Stopping {
+		state = "degraded"
+	}
+	return &runtimeDiagnosticsObservation{WorkerGeneration: s.workerGeneration, OSBootID: s.osBootID, ConnectorState: state, ConnectorGeneration: status.Generation, WorkerServiceScope: s.serviceScope, ObservedAt: observedAt}
+}
+
+type serverHeartbeatReceipt struct {
+	Schema           string    `json:"schema"`
+	WorkerGeneration uint64    `json:"worker_generation"`
+	ReporterVersion  string    `json:"reporter_version"`
+	AcceptedAt       time.Time `json:"accepted_at"`
+}
+
+func writeServerHeartbeatReceipt(path string, receipt serverHeartbeatReceipt) error {
+	if !filepath.IsAbs(path) || receipt.WorkerGeneration < 1 || receipt.ReporterVersion == "" || receipt.AcceptedAt.IsZero() {
+		return ErrProductionInvalid
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrProductionInvalid
+	}
+	temporary, err := os.CreateTemp(directory, ".server-heartbeat-*")
+	if err != nil {
+		return err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(body); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func parseActivityTime(value string) time.Time {
@@ -433,34 +588,84 @@ func parseActivityTime(value string) time.Time {
 	return parsed
 }
 
+func availabilityObservation(source interface {
+	Observation() *availability.Observation
+}) *availability.Observation {
+	if source == nil {
+		return nil
+	}
+	return source.Observation()
+}
+
 type connectorReadinessService struct {
-	supervisor *connector.Supervisor
-	manager    *connector.Manager
-	timeout    time.Duration
+	supervisor     *connector.Supervisor
+	manager        *connector.Manager
+	networkChanges Service
 }
 
 func (s *connectorReadinessService) Start(ctx context.Context) error {
 	if err := s.supervisor.Start(ctx); err != nil {
 		return err
 	}
-	readyCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if s.manager.Status().Connected {
-			return nil
-		}
-		select {
-		case <-readyCtx.Done():
-			_ = s.supervisor.Shutdown(context.Background())
-			return readyCtx.Err()
-		case <-ticker.C:
+	if s.networkChanges != nil {
+		if err := s.networkChanges.Start(ctx); err != nil {
+			return errors.Join(err, s.supervisor.Shutdown(context.Background()))
 		}
 	}
+	return nil
 }
 func (s *connectorReadinessService) Shutdown(ctx context.Context) error {
-	return s.supervisor.Shutdown(ctx)
+	var networkErr error
+	if s.networkChanges != nil {
+		networkErr = s.networkChanges.Shutdown(ctx)
+	}
+	return errors.Join(networkErr, s.supervisor.Shutdown(ctx))
+}
+
+type jwksRefreshService struct {
+	cache    *auth.JWKSCache
+	interval time.Duration
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+func (s *jwksRefreshService) Start(context.Context) error {
+	if s.cache == nil || s.interval <= 0 || s.cancel != nil {
+		return ErrProductionInvalid
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel, s.done = cancel, make(chan struct{})
+	go func() {
+		defer close(s.done)
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
+				_ = s.cache.Refresh(attemptCtx)
+				attemptCancel()
+				timer.Reset(s.interval)
+			}
+		}
+	}()
+	return nil
+}
+
+func (s *jwksRefreshService) Shutdown(ctx context.Context) error {
+	if s.cancel == nil {
+		return nil
+	}
+	s.cancel()
+	select {
+	case <-s.done:
+		s.cancel, s.done = nil, nil
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *connectorReadinessService) CapabilityHealth() health.Capability {

@@ -35,11 +35,10 @@ func TestNativeBootstrapLaunchdFailureRetryAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
+	if os.Geteuid() != 0 {
+		t.Fatal("native LaunchDaemon test must run as root with an isolated test account")
 	}
-	definition := filepath.Join(home, "Library", "LaunchAgents", service.Label+".plist")
+	definition := filepath.Join("/Library", "LaunchDaemons", service.Label+".plist")
 	if _, err := os.Lstat(definition); err == nil {
 		t.Fatalf("refusing to replace existing service definition %s", definition)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -47,7 +46,7 @@ func TestNativeBootstrapLaunchdFailureRetryAndCleanup(t *testing.T) {
 	}
 	runner := &darwinFailFirstRunner{next: service.ExecRunner{}}
 	installer, err := service.New(service.Config{
-		Platform: "darwin", ConfigRoot: home, Executable: executable,
+		Platform: "darwin", ConfigRoot: "/", Executable: executable, User: "nobody", Group: "nobody",
 		Arguments:   []string{"-test.run=^TestNativeBootstrapLaunchdServiceProcess$", "-test.v"},
 		Environment: map[string]string{"PAPERBOAT_NATIVE_BOOTSTRAP_DARWIN_CHILD": "1"},
 		Controller:  service.LaunchdController{Runner: runner, UID: os.Getuid()},

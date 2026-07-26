@@ -11,7 +11,12 @@ import (
 	"strings"
 )
 
-const Label = "com.pinksaucepasta.paperboat-helper"
+const (
+	Label      = "com.pinksaucepasta.paperboat-helper"
+	HostLabel  = "com.pinksaucepasta.paperboat-host-service"
+	WorkerKind = "worker"
+	HostKind   = "host"
+)
 
 var (
 	ErrInvalidDefinition   = errors.New("invalid service definition")
@@ -24,8 +29,11 @@ type Controller interface {
 }
 type Config struct {
 	Platform    string
+	Kind        string
 	ConfigRoot  string
 	Executable  string
+	User        string
+	Group       string
 	Arguments   []string
 	Environment map[string]string
 	Controller  Controller
@@ -36,7 +44,10 @@ type Installer struct {
 }
 
 func New(config Config) (*Installer, error) {
-	if config.Controller == nil || !filepath.IsAbs(config.ConfigRoot) || !filepath.IsAbs(config.Executable) || len(config.Arguments) == 0 {
+	if config.Kind == "" {
+		config.Kind = WorkerKind
+	}
+	if config.Controller == nil || !filepath.IsAbs(config.ConfigRoot) || !filepath.IsAbs(config.Executable) || len(config.Arguments) == 0 || !safeAccount(config.User) || !safeAccount(config.Group) {
 		return nil, ErrInvalidDefinition
 	}
 	if err := safeExecutable(config.Executable); err != nil {
@@ -51,9 +62,21 @@ func New(config Config) (*Installer, error) {
 	var path string
 	switch config.Platform {
 	case "darwin":
-		path = filepath.Join(config.ConfigRoot, "Library", "LaunchAgents", Label+".plist")
+		label := Label
+		if config.Kind == HostKind {
+			label = HostLabel
+		} else if config.Kind != WorkerKind {
+			return nil, ErrInvalidDefinition
+		}
+		path = filepath.Join(config.ConfigRoot, "Library", "LaunchDaemons", label+".plist")
 	case "linux":
-		path = filepath.Join(config.ConfigRoot, "systemd", "user", "paperboat-helper.service")
+		unit := "paperboat-helper.service"
+		if config.Kind == HostKind {
+			unit = "paperboat-host-service.service"
+		} else if config.Kind != WorkerKind {
+			return nil, ErrInvalidDefinition
+		}
+		path = filepath.Join(config.ConfigRoot, "etc", "systemd", "system", unit)
 	default:
 		return nil, ErrUnsupportedPlatform
 	}
@@ -76,19 +99,36 @@ func (i *Installer) Install(ctx context.Context) error {
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
+	var previous []byte
+	if upgrading {
+		previous, err = os.ReadFile(i.definitionPath)
+		if err != nil {
+			return err
+		}
+	}
 	if err := atomicWrite(i.definitionPath, definition, 0o600); err != nil {
 		return err
 	}
-	if i.config.Platform == "darwin" {
-		logDirectory := filepath.Join(i.config.ConfigRoot, "Library", "Logs", "Paperboat")
-		if err := os.MkdirAll(logDirectory, 0o700); err != nil {
-			return err
-		}
-		if err := os.Chmod(logDirectory, 0o700); err != nil {
-			return err
-		}
+	if err := i.config.Controller.Apply(ctx, i.definitionPath, upgrading); err != nil {
+		rollbackErr := i.rollback(ctx, previous, upgrading)
+		return errors.Join(err, rollbackErr)
 	}
-	return i.config.Controller.Apply(ctx, i.definitionPath, upgrading)
+	return nil
+}
+
+func (i *Installer) rollback(ctx context.Context, previous []byte, upgrading bool) error {
+	if !upgrading {
+		managerErr := i.config.Controller.Remove(ctx, i.definitionPath)
+		removeErr := os.Remove(i.definitionPath)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+		return errors.Join(managerErr, removeErr, syncDirectory(filepath.Dir(i.definitionPath)))
+	}
+	if err := atomicWrite(i.definitionPath, previous, 0o600); err != nil {
+		return err
+	}
+	return i.config.Controller.Apply(ctx, i.definitionPath, true)
 }
 func (i *Installer) Uninstall(ctx context.Context) error {
 	if err := i.config.Controller.Remove(ctx, i.definitionPath); err != nil {
@@ -131,8 +171,11 @@ func renderLaunchd(config Config) ([]byte, error) {
 	if err := start("dict"); err != nil {
 		return nil, err
 	}
-	logPath := filepath.Join(config.ConfigRoot, "Library", "Logs", "Paperboat", "paperboat-helper.log")
-	pairs := [][2]string{{"Label", Label}, {"ProcessType", "Background"}, {"StandardOutPath", logPath}, {"StandardErrorPath", logPath}}
+	label := Label
+	if config.Kind == HostKind {
+		label = HostLabel
+	}
+	pairs := [][2]string{{"Label", label}, {"ProcessType", "Background"}, {"UserName", config.User}, {"GroupName", config.Group}}
 	for _, pair := range pairs {
 		if err := text("key", pair[0]); err != nil {
 			return nil, err
@@ -184,6 +227,18 @@ func renderLaunchd(config Config) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if err := text("key", "Umask"); err != nil {
+		return nil, err
+	}
+	if err := start("integer"); err != nil {
+		return nil, err
+	}
+	if err := encoder.EncodeToken(xml.CharData("63")); err != nil {
+		return nil, err
+	}
+	if err := end("integer"); err != nil {
+		return nil, err
+	}
 	if err := end("dict"); err != nil {
 		return nil, err
 	}
@@ -198,7 +253,17 @@ func renderLaunchd(config Config) ([]byte, error) {
 
 func renderSystemd(config Config) []byte {
 	var output strings.Builder
-	output.WriteString("[Unit]\nDescription=Paperboat helper runtime\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=")
+	description := "Paperboat helper runtime"
+	if config.Kind == HostKind {
+		description = "Paperboat host service"
+	}
+	output.WriteString("[Unit]\nDescription=")
+	output.WriteString(description)
+	output.WriteString("\nAfter=local-fs.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nUser=")
+	output.WriteString(config.User)
+	output.WriteString("\nGroup=")
+	output.WriteString(config.Group)
+	output.WriteString("\nExecStart=")
 	output.WriteString(systemdEscape(config.Executable))
 	for _, argument := range config.Arguments {
 		output.WriteByte(' ')
@@ -210,7 +275,7 @@ func renderSystemd(config Config) []byte {
 		output.WriteString(systemdEscape(key + "=" + config.Environment[key]))
 		output.WriteByte('\n')
 	}
-	output.WriteString("Restart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n")
+	output.WriteString("Restart=always\nRestartSec=5s\nTimeoutStopSec=60s\nKillMode=mixed\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=multi-user.target\n")
 	return []byte(output.String())
 }
 
@@ -220,18 +285,18 @@ func systemdEscape(value string) string {
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return ErrInvalidDefinition
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
+	if err := os.Chmod(directory, 0o755); err != nil {
 		return err
 	}
 	info, err = os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o755 {
 		return ErrInvalidDefinition
 	}
 	temporary, err := os.CreateTemp(directory, ".service-*")
@@ -298,6 +363,18 @@ func safeEnvironmentKey(value string) bool {
 	}
 	for _, char := range value {
 		if !(char == '_' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func safeAccount(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if !(char == '_' || char == '-' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9') {
 			return false
 		}
 	}

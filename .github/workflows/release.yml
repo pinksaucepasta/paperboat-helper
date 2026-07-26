@@ -24,7 +24,7 @@ jobs:
         run: ./tools/release-version.sh validate "${GITHUB_REF_NAME}"
       - name: Test
         run: make check
-      - name: Build helper binaries
+      - name: Build helper and host-service binaries
         env:
           VERSION: ${{ github.ref_name }}
         run: |
@@ -38,6 +38,9 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
               -ldflags="-s -w -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$version -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$commit" \
               -o "dist/pbh_${VERSION}_${os}_${arch}" ./cmd/pbh
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$version -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$commit" \
+              -o "dist/paperboat-host-service_${VERSION}_${os}_${arch}" ./cmd/paperboat-host-service
           done
       - name: Sign helper manifest
         env:
@@ -57,14 +60,21 @@ jobs:
             artifact="${GITHUB_WORKSPACE}/dist/pbh_${VERSION}_${os}_${arch}"
             go run ./tools/artifact \
               -artifact "$artifact" -private-key "$key_file" -version "$version" \
-              -platform "$os" -architecture "$arch" \
+              -platform "$os" -architecture "$arch" -kind worker \
               -url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/pbh_${VERSION}_${os}_${arch}" \
-              -manifest-output "${GITHUB_WORKSPACE}/dist/manifest-${os}-${arch}.json" \
+              -manifest-output "${GITHUB_WORKSPACE}/dist/manifest-worker-${os}-${arch}.json" \
+              -public-key-output "${GITHUB_WORKSPACE}/dist/paperboat-helper-artifact-public-key"
+            host_artifact="${GITHUB_WORKSPACE}/dist/paperboat-host-service_${VERSION}_${os}_${arch}"
+            go run ./tools/artifact \
+              -artifact "$host_artifact" -private-key "$key_file" -version "$version" \
+              -platform "$os" -architecture "$arch" -kind host_service \
+              -url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/paperboat-host-service_${VERSION}_${os}_${arch}" \
+              -manifest-output "${GITHUB_WORKSPACE}/dist/manifest-host-${os}-${arch}.json" \
               -public-key-output "${GITHUB_WORKSPACE}/dist/paperboat-helper-artifact-public-key"
           done
           jq -s 'add' dist/manifest-*.json > dist/paperboat-helper-artifacts.json
           rm dist/manifest-*.json
-          (cd dist && sha256sum pbh_* > SHA256SUMS)
+          (cd dist && sha256sum pbh_* paperboat-host-service_* > SHA256SUMS)
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -74,7 +84,9 @@ jobs:
       - name: Attest release assets
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/pbh_*
+          subject-path: |
+            dist/pbh_*
+            dist/paperboat-host-service_*
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

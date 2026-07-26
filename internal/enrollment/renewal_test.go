@@ -7,10 +7,24 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type renewalMetric struct {
+	mu    sync.Mutex
+	count float64
+}
+
+func (m *renewalMetric) Record(name string, value float64, labels map[string]string) error {
+	if name == "paperboat_helper_renewal_failures_total" && len(labels) == 0 {
+		m.mu.Lock()
+		m.count += value
+		m.mu.Unlock()
+	}
+	return nil
+}
 
 func TestRenewingTokenSourceRenewsAndPersistsIdentity(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
@@ -20,7 +34,7 @@ func TestRenewingTokenSourceRenewsAndPersistsIdentity(t *testing.T) {
 		case "/v1/helper-enrollments":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"helper_id": "hlp_1", "environment_id": "env_1", "credential": "initial-helper-credential-012345678901234567890", "expires_at": now.Add(5 * time.Minute)}})
 		case "/v1/helper-identity-renewals":
-			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer initial-helper") || r.Header.Get("X-Paperboat-Helper-Proof") == "" {
+			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Paperboat-Helper-Proof") == "" {
 				t.Errorf("renew headers=%v", r.Header)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"helper_id": "hlp_1", "environment_id": "env_1", "credential": renewedCredential, "expires_at": now.Add(time.Hour)}})
@@ -54,7 +68,7 @@ func TestRenewingTokenSourceRenewsAndPersistsIdentity(t *testing.T) {
 	}
 }
 
-func TestRenewingTokenSourceRecoversExpiredIdentityWithinGrace(t *testing.T) {
+func TestRenewingTokenSourceRecoversIdentityAfterLongOutage(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -77,7 +91,7 @@ func TestRenewingTokenSourceRecoversExpiredIdentityWithinGrace(t *testing.T) {
 	if err := json.Unmarshal(body, &identity); err != nil {
 		t.Fatal(err)
 	}
-	identity.ExpiresAt = now.Add(-time.Hour)
+	identity.ExpiresAt = now.Add(-30 * 24 * time.Hour)
 	if err := writeIdentity(root, identity); err != nil {
 		t.Fatal(err)
 	}
@@ -88,11 +102,26 @@ func TestRenewingTokenSourceRecoversExpiredIdentityWithinGrace(t *testing.T) {
 	if _, err := source.Token(context.Background()); err != nil {
 		t.Fatalf("renew expired identity: %v", err)
 	}
-	identity.ExpiresAt = now.Add(-25 * time.Hour)
-	if err := writeIdentity(root, identity); err != nil {
+}
+
+func TestRenewingTokenSourceRecordsRenewalFailure(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root := t.TempDir()
+	if err := writeIdentity(root, RuntimeIdentity{Version: 1, HelperID: "hlp_1", EnvironmentID: "env_1", Credential: "expired-helper-credential-012345678901234567890", ExpiresAt: now.Add(-time.Hour), KeyID: "ed25519:test"}); err != nil {
+		t.Fatal(err)
+	}
+	metric := &renewalMetric{}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	source, err := NewRenewingTokenSource(RenewingTokenConfig{ControlURL: "https://127.0.0.1:1", StateRoot: root, Transport: transport, Timeout: time.Millisecond, Clock: func() time.Time { return now }, OperationID: func() (string, error) { return "op_renew_failure", nil }, Metrics: metric})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := source.Token(context.Background()); err == nil {
-		t.Fatal("renewed identity outside recovery grace")
+		t.Fatal("renewal unexpectedly succeeded")
+	}
+	metric.mu.Lock()
+	defer metric.mu.Unlock()
+	if metric.count != 1 {
+		t.Fatalf("renewal failure metric=%v", metric.count)
 	}
 }

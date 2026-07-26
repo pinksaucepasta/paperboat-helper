@@ -49,6 +49,7 @@ type Material struct {
 	ReuseIdentity           bool              `json:"reuse_identity,omitempty"`
 	ExpiresAt               time.Time         `json:"expires_at"`
 	Artifact                *ArtifactManifest `json:"artifact,omitempty"`
+	HostServiceArtifact     *ArtifactManifest `json:"host_service_artifact,omitempty"`
 	ArtifactPublicKey       string            `json:"artifact_public_key,omitempty"`
 	HelperListenAddress     string            `json:"helper_listen_address"`
 }
@@ -90,7 +91,7 @@ func WaitForMaterial(ctx context.Context, config Config, expiresAt time.Time, in
 		err := request(ctx, client(config), http.MethodPost, base+"/v1/user-machines/pairings/installation", body, &material)
 		if err == nil {
 			validEnrollment := material.ReuseIdentity && material.EnrollmentID == "" && material.EnrollmentCredential == "" || !material.ReuseIdentity && material.EnrollmentID != "" && len(material.EnrollmentCredential) >= 32
-			if material.Schema != "paperboat.byod-installation/v1" || material.UserMachineID == "" || material.UserMachineEnrollmentID == "" || material.EnvironmentID == "" || material.HelperID == "" || !validEnrollment || !validLoopbackAddress(material.HelperListenAddress) || !time.Now().UTC().Before(material.ExpiresAt) || material.Artifact == nil || VerifyArtifactManifest(*material.Artifact, material.ArtifactPublicKey) != nil {
+			if material.Schema != "paperboat.byod-installation/v1" || material.UserMachineID == "" || material.UserMachineEnrollmentID == "" || material.EnvironmentID == "" || material.HelperID == "" || !validEnrollment || !validLoopbackAddress(material.HelperListenAddress) || !time.Now().UTC().Before(material.ExpiresAt) || material.Artifact == nil || material.HostServiceArtifact == nil || VerifyArtifactManifest(*material.Artifact, material.ArtifactPublicKey) != nil || VerifyArtifactManifest(*material.HostServiceArtifact, material.ArtifactPublicKey) != nil || material.Artifact.Schema != ArtifactSchemaV2 || material.Artifact.Kind != ArtifactKindWorker || material.HostServiceArtifact.Schema != ArtifactSchemaV2 || material.HostServiceArtifact.Kind != ArtifactKindHostService || material.Artifact.Version != material.HostServiceArtifact.Version {
 				return Material{}, ErrInvalid
 			}
 			return material, nil

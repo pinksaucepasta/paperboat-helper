@@ -18,10 +18,12 @@ Usage:
   pbh preview create --name <name> --port <port> --public
   pbh preview list
   pbh preview remove <name>
+  pbh doctor [--json]
+  pbh service uninstall
   pbh run
 
 The bootstrap command performs dashboard-started enrollment, verifies the signed helper
-artifact, installs the user service, and waits for readiness.`
+artifact, requests administrator approval for the durable system service, and waits for readiness.`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -43,6 +45,20 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	}
 	if args[0] == "bootstrap" {
 		if err := runBootstrap(context.Background(), args[1:], stdin, stdout, stderr); err != nil {
+			writeError(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if args[0] == "service" {
+		if err := runServiceCommand(context.Background(), args[1:], stdin, stdout, stderr); err != nil {
+			writeError(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if args[0] == "doctor" {
+		if err := runDoctor(context.Background(), args[1:], stdout, stderr); err != nil {
 			writeError(stderr, err)
 			return 1
 		}

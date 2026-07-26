@@ -21,6 +21,9 @@ type RenewingTokenConfig struct {
 	Timeout     time.Duration
 	Clock       func() time.Time
 	OperationID func() (string, error)
+	Metrics     interface {
+		Record(string, float64, map[string]string) error
+	}
 }
 
 type RenewingTokenSource struct {
@@ -51,7 +54,12 @@ func NewRenewingTokenSource(config RenewingTokenConfig) (*RenewingTokenSource, e
 	return &RenewingTokenSource{config: config, endpoint: base, client: &http.Client{Transport: config.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrInvalid }}}, nil
 }
 
-func (s *RenewingTokenSource) Token(ctx context.Context) (string, error) {
+func (s *RenewingTokenSource) Token(ctx context.Context) (token string, resultErr error) {
+	defer func() {
+		if resultErr != nil && s.config.Metrics != nil {
+			_ = s.config.Metrics.Record("paperboat_helper_renewal_failures_total", 1, nil)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.config.Clock().UTC()
@@ -79,7 +87,6 @@ func (s *RenewingTokenSource) Token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set("Authorization", "Bearer "+current.Credential)
 	request.Header.Set("X-Paperboat-Helper-Proof", base64.RawURLEncoding.EncodeToString(proof))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")

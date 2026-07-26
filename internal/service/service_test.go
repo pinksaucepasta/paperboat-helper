@@ -33,9 +33,16 @@ func executable(t *testing.T) string {
 	return path
 }
 
+func TestSystemdDefinitionSignalsWorkerBeforeForceCleaningCgroup(t *testing.T) {
+	definition := string(renderSystemd(Config{User: "paperboat", Group: "paperboat", Executable: "/usr/local/libexec/paperboat/pbh"}))
+	if !strings.Contains(definition, "TimeoutStopSec=60s\nKillMode=mixed\n") {
+		t.Fatalf("systemd shutdown policy missing:\n%s", definition)
+	}
+}
+
 func TestSystemdInstallUpgradeAndUninstallAreDeterministic(t *testing.T) {
 	control := &controller{}
-	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), Arguments: []string{"run", "--state", "/var/lib/paperboat"}, Environment: map[string]string{"HOME": "/home/test", "PATH": "/usr/bin:/bin"}, Controller: control})
+	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), User: "test", Group: "test", Arguments: []string{"run", "--state", "/var/lib/paperboat"}, Environment: map[string]string{"HOME": "/home/test", "PATH": "/usr/bin:/bin"}, Controller: control})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +78,7 @@ func TestSystemdInstallUpgradeAndUninstallAreDeterministic(t *testing.T) {
 func TestServiceDefinitionsSafelyPreservePathsWithSpaces(t *testing.T) {
 	control := &controller{}
 	executable := executable(t)
-	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable, Arguments: []string{"run", "--state", "/home/test/Application Support/Paperboat"}, Environment: map[string]string{"HOME": "/home/test/Application Support"}, Controller: control})
+	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable, User: "test", Group: "test", Arguments: []string{"run", "--state", "/home/test/Application Support/Paperboat"}, Environment: map[string]string{"HOME": "/home/test/Application Support"}, Controller: control})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +95,7 @@ func TestServiceDefinitionsSafelyPreservePathsWithSpaces(t *testing.T) {
 }
 
 func TestServiceDefinitionRejectsControlCharacters(t *testing.T) {
-	_, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), Arguments: []string{"run\nExecStart=/tmp/other"}, Environment: map[string]string{"HOME": "/home/test"}, Controller: &controller{}})
+	_, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), User: "test", Group: "test", Arguments: []string{"run\nExecStart=/tmp/other"}, Environment: map[string]string{"HOME": "/home/test"}, Controller: &controller{}})
 	if !errors.Is(err, ErrInvalidDefinition) {
 		t.Fatalf("error=%v", err)
 	}
@@ -96,7 +103,7 @@ func TestServiceDefinitionRejectsControlCharacters(t *testing.T) {
 
 func TestLaunchdDefinitionIsEscapedValidXML(t *testing.T) {
 	root := t.TempDir()
-	installer, err := New(Config{Platform: "darwin", ConfigRoot: root, Executable: executable(t), Arguments: []string{"run"}, Environment: map[string]string{"HOME": "/Users/test"}, Controller: &controller{}})
+	installer, err := New(Config{Platform: "darwin", ConfigRoot: root, Executable: executable(t), User: "test", Group: "test", Arguments: []string{"run"}, Environment: map[string]string{"HOME": "/Users/test"}, Controller: &controller{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,27 +123,55 @@ func TestLaunchdDefinitionIsEscapedValidXML(t *testing.T) {
 	if !strings.Contains(string(data), "<key>ProgramArguments</key>") || !strings.Contains(string(data), Label) {
 		t.Fatalf("plist=%s", data)
 	}
-	if info, err := os.Stat(filepath.Join(root, "Library", "Logs", "Paperboat")); err != nil {
-		t.Fatal(err)
-	} else if info.Mode().Perm() != 0o700 {
-		t.Fatalf("logs mode=%v", info.Mode().Perm())
+	if strings.Contains(string(data), "StandardOutPath") || !strings.Contains(string(data), "<key>UserName</key>") {
+		t.Fatalf("plist must use unified logging and an explicit user: %s", data)
+	}
+}
+
+func TestHostServiceDefinitionsRunAsRootInBootDomain(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			root := t.TempDir()
+			installer, err := New(Config{Platform: platform, Kind: HostKind, ConfigRoot: root, Executable: executable(t), User: "root", Group: "root", Arguments: []string{"--uid", "501", "--gid", "20"}, Controller: &controller{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := installer.Install(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			body, err := os.ReadFile(installer.DefinitionPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition := string(body)
+			if platform == "linux" {
+				if !strings.HasSuffix(installer.DefinitionPath(), "/etc/systemd/system/paperboat-host-service.service") || !strings.Contains(definition, "User=root\nGroup=root") || !strings.Contains(definition, "WantedBy=multi-user.target") {
+					t.Fatalf("path=%s definition=%s", installer.DefinitionPath(), definition)
+				}
+			} else if !strings.HasSuffix(installer.DefinitionPath(), "/Library/LaunchDaemons/"+HostLabel+".plist") || !strings.Contains(definition, "<string>"+HostLabel+"</string>") || !strings.Contains(definition, "<key>UserName</key>") {
+				t.Fatalf("path=%s definition=%s", installer.DefinitionPath(), definition)
+			}
+		})
 	}
 }
 
 func TestControllerFailureIsNotReportedAsSuccess(t *testing.T) {
 	control := &controller{applyErr: errors.New("manager failed")}
-	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), Arguments: []string{"run"}, Controller: control})
+	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: executable(t), User: "test", Group: "test", Arguments: []string{"run"}, Controller: control})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := installer.Install(context.Background()); !errors.Is(err, control.applyErr) {
 		t.Fatalf("install err=%v", err)
 	}
+	if _, err := os.Stat(installer.DefinitionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed fresh definition remains: %v", err)
+	}
 	control.applyErr = nil
 	if err := installer.Install(context.Background()); err != nil {
 		t.Fatalf("install retry: %v", err)
 	}
-	if len(control.applied) != 2 || control.applied[0] || !control.applied[1] {
+	if len(control.applied) != 2 || control.applied[0] || control.applied[1] {
 		t.Fatalf("apply modes=%v", control.applied)
 	}
 	control.removeErr = errors.New("stop failed")
@@ -144,7 +179,26 @@ func TestControllerFailureIsNotReportedAsSuccess(t *testing.T) {
 		t.Fatalf("uninstall err=%v", err)
 	}
 	if _, err := os.Stat(installer.DefinitionPath()); err != nil {
-		t.Fatalf("definition removed after controller failure: %v", err)
+		t.Fatalf("definition removed despite controller failure: %v", err)
+	}
+	control.removeErr = nil
+	if err := installer.Uninstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := os.ReadFile(installer.DefinitionPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.applyErr = errors.New("upgrade failed")
+	if err := installer.Install(context.Background()); !errors.Is(err, control.applyErr) {
+		t.Fatalf("upgrade err=%v", err)
+	}
+	restored, err := os.ReadFile(installer.DefinitionPath())
+	if err != nil || string(restored) != string(previous) {
+		t.Fatalf("previous definition was not restored: err=%v", err)
 	}
 }
 
@@ -157,7 +211,7 @@ func TestDefinitionQuotesExecutablePathWithSpaces(t *testing.T) {
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: path, Arguments: []string{"run"}, Controller: &controller{}})
+	installer, err := New(Config{Platform: "linux", ConfigRoot: t.TempDir(), Executable: path, User: "test", Group: "test", Arguments: []string{"run"}, Controller: &controller{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +232,7 @@ func TestInstallDoesNotRewriteExistingConfigRootPermissions(t *testing.T) {
 	if err := os.Chmod(root, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	installer, err := New(Config{Platform: "linux", ConfigRoot: root, Executable: executable(t), Arguments: []string{"run"}, Controller: &controller{}})
+	installer, err := New(Config{Platform: "linux", ConfigRoot: root, Executable: executable(t), User: "test", Group: "test", Arguments: []string{"run"}, Controller: &controller{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,14 +247,14 @@ func TestInstallDoesNotRewriteExistingConfigRootPermissions(t *testing.T) {
 
 func TestInstallSecuresExistingServiceDefinitionDirectory(t *testing.T) {
 	root := t.TempDir()
-	directory := filepath.Join(root, "systemd", "user")
+	directory := filepath.Join(root, "etc", "systemd", "system")
 	if err := os.MkdirAll(directory, 0o775); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(directory, 0o775); err != nil {
 		t.Fatal(err)
 	}
-	installer, err := New(Config{Platform: "linux", ConfigRoot: root, Executable: executable(t), Arguments: []string{"run"}, Controller: &controller{}})
+	installer, err := New(Config{Platform: "linux", ConfigRoot: root, Executable: executable(t), User: "test", Group: "test", Arguments: []string{"run"}, Controller: &controller{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,8 +265,8 @@ func TestInstallSecuresExistingServiceDefinitionDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o700 {
-		t.Fatalf("service definition directory mode = %o, want 700", got)
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("service definition directory mode = %o, want 755", got)
 	}
 }
 
@@ -236,7 +290,7 @@ func TestNativeControllerCommandSequences(t *testing.T) {
 	if err := systemd.Apply(context.Background(), "", false); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 3 || strings.Join(runner.calls[1], " ") != "systemctl --user enable --now paperboat-helper.service" || strings.Join(runner.calls[2], " ") != "systemctl --user is-active --quiet paperboat-helper.service" {
+	if len(runner.calls) != 3 || strings.Join(runner.calls[1], " ") != "systemctl enable --now paperboat-helper.service" || strings.Join(runner.calls[2], " ") != "systemctl is-active --quiet paperboat-helper.service" {
 		t.Fatalf("calls=%v", runner.calls)
 	}
 	runner = &commandRunner{}
@@ -244,7 +298,7 @@ func TestNativeControllerCommandSequences(t *testing.T) {
 	if err := systemd.Apply(context.Background(), "", true); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 4 || strings.Join(runner.calls[2], " ") != "systemctl --user restart paperboat-helper.service" || strings.Join(runner.calls[3], " ") != "systemctl --user is-active --quiet paperboat-helper.service" {
+	if len(runner.calls) != 4 || strings.Join(runner.calls[2], " ") != "systemctl restart paperboat-helper.service" || strings.Join(runner.calls[3], " ") != "systemctl is-active --quiet paperboat-helper.service" {
 		t.Fatalf("upgrade calls=%v", runner.calls)
 	}
 	runner = &commandRunner{}
@@ -252,7 +306,7 @@ func TestNativeControllerCommandSequences(t *testing.T) {
 	if err := launchd.Apply(context.Background(), "/tmp/helper.plist", true); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 4 || strings.Join(runner.calls[0], " ") != "launchctl bootout gui/501/"+Label || strings.Join(runner.calls[3], " ") != "launchctl print gui/501/"+Label {
+	if len(runner.calls) != 4 || strings.Join(runner.calls[0], " ") != "launchctl bootout system/"+Label || strings.Join(runner.calls[3], " ") != "launchctl print system/"+Label {
 		t.Fatalf("calls=%v", runner.calls)
 	}
 	runner = &commandRunner{errAt: 3}
@@ -271,7 +325,7 @@ func TestLaunchdControllerHandlesBootstrapTransition(t *testing.T) {
 	if err := controller.Apply(context.Background(), "/tmp/helper.plist", false); err != nil {
 		t.Fatal(err)
 	}
-	if len(loadedAfterError.calls) != 4 || strings.Join(loadedAfterError.calls[1], " ") != "launchctl print gui/501/"+Label {
+	if len(loadedAfterError.calls) != 4 || strings.Join(loadedAfterError.calls[1], " ") != "launchctl print system/"+Label {
 		t.Fatalf("loaded-after-error calls=%v", loadedAfterError.calls)
 	}
 
@@ -280,7 +334,7 @@ func TestLaunchdControllerHandlesBootstrapTransition(t *testing.T) {
 	if err := controller.Apply(context.Background(), "/tmp/helper.plist", false); err != nil {
 		t.Fatal(err)
 	}
-	if len(reservedLabel.calls) != 5 || strings.Join(reservedLabel.calls[2], " ") != "launchctl bootstrap gui/501 /tmp/helper.plist" {
+	if len(reservedLabel.calls) != 5 || strings.Join(reservedLabel.calls[2], " ") != "launchctl bootstrap system /tmp/helper.plist" {
 		t.Fatalf("reserved-label calls=%v", reservedLabel.calls)
 	}
 }

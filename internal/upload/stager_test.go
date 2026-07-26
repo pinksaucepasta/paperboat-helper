@@ -62,6 +62,42 @@ func TestStagePublishesPrivateScopedImage(t *testing.T) {
 	}
 }
 
+func TestStagePublishesTIFFClipboardImage(t *testing.T) {
+	clock := &fixedClock{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	s, root := newStager(t, clock)
+	data := append([]byte{'I', 'I', 0x2a, 0x00}, make([]byte, 16)...)
+	result, err := s.Stage(context.Background(), Request{EnvironmentID: "env", DisplayName: "clipboard.tiff", DeclaredMIME: "image/tiff", DeclaredSize: int64(len(data)), Body: bytes.NewReader(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MIME != "image/tiff" || filepath.Ext(result.Path) != ".tiff" {
+		t.Fatalf("result=%#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, result.Path)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDetectImageMIMETIFFByteOrders(t *testing.T) {
+	for _, header := range [][]byte{{'I', 'I', 0x2a, 0x00}, {'M', 'M', 0x00, 0x2a}} {
+		if got := detectImageMIME(header); got != "image/tiff" {
+			t.Fatalf("detectImageMIME(%x) = %q", header, got)
+		}
+	}
+}
+
+func TestStageAcceptsUnknownImageSubtypeWithoutAllowlist(t *testing.T) {
+	s, _ := newStager(t, &fixedClock{time.Now()})
+	data := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'a', 'v', 'i', 'f'}
+	result, err := s.Stage(context.Background(), Request{EnvironmentID: "env", DisplayName: "photo.avif", DeclaredMIME: "image/avif", DeclaredSize: int64(len(data)), Body: bytes.NewReader(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MIME != "image/avif" || filepath.Ext(result.Path) != ".avif" {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestStageRejectsPathMimeAndSize(t *testing.T) {
 	s, _ := newStager(t, &fixedClock{time.Now()})
 	png := []byte("\x89PNG\r\n\x1a\n")

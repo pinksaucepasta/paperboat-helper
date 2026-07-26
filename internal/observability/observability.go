@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -175,10 +177,44 @@ func DefaultDescriptors() []Descriptor {
 		{Name: "paperboat_helper_active_resources", Kind: Gauge, Labels: map[string]map[string]bool{"kind": set("sessions", "attachments", "processes", "uploads", "previews", "connectors")}},
 		{Name: "paperboat_helper_readiness", Kind: Gauge, Labels: map[string]map[string]bool{"capability": set("terminal", "upload", "preview", "activity", "health", "connector", "update"), "state": set("ready", "degraded", "unavailable")}},
 		{Name: "paperboat_helper_connector_retries_total", Kind: Counter, Labels: map[string]map[string]bool{"transport": set("quic", "tcp_tls", "none"), "result": set("connected", "failed", "replaced", "canceled")}},
+		{Name: "paperboat_helper_restart_total", Kind: Counter},
+		{Name: "paperboat_helper_renewal_failures_total", Kind: Counter},
+		{Name: "paperboat_helper_connector_recovery_seconds", Kind: Gauge},
+		{Name: "paperboat_helper_update_rollbacks_total", Kind: Counter},
 		{Name: "paperboat_helper_terminal_events_total", Kind: Counter, Labels: map[string]map[string]bool{"event": set("replay_gap", "slow_consumer", "input_uncertain", "helper_restart")}},
 		{Name: "paperboat_helper_delivery_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("activity", "preview"), "result": set("delivered", "failed", "canceled")}},
 		{Name: "paperboat_helper_cleanup_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("upload", "update", "session"), "result": set("removed", "preserved", "failed")}},
 	}
+}
+
+func (r *Registry) Handler() http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		writer.Header().Set("Cache-Control", "no-store")
+		for _, series := range r.Snapshot() {
+			_, _ = writer.Write([]byte(series.Name))
+			if len(series.Labels) > 0 {
+				_, _ = writer.Write([]byte("{"))
+				keys := make([]string, 0, len(series.Labels))
+				for key := range series.Labels {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				for index, key := range keys {
+					if index > 0 {
+						_, _ = writer.Write([]byte(","))
+					}
+					_, _ = writer.Write([]byte(key + "=" + strconv.Quote(series.Labels[key])))
+				}
+				_, _ = writer.Write([]byte("}"))
+			}
+			_, _ = writer.Write([]byte(" " + strconv.FormatFloat(series.Value, 'g', -1, 64) + "\n"))
+		}
+	})
 }
 
 type Diagnostics struct {

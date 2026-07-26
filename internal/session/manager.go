@@ -61,6 +61,7 @@ type ManagerConfig struct {
 	MaxPendingActivity int
 	MaxAttachments     int
 	MaxInputDecisions  int
+	RecoveryExitSignal string
 	Metrics            interface {
 		Record(string, float64, map[string]string) error
 	}
@@ -168,7 +169,10 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	if config.MaxInputDecisions == 0 {
 		config.MaxInputDecisions = helperconfig.DefaultResources.MaxInputDecisions
 	}
-	if config.HistoryBytes < 1 || config.AttachmentBytes < 1 || config.TerminationTimeout <= 0 || config.TerminationGrace < 0 || config.TerminationGrace > config.TerminationTimeout || config.MaxSessions < 1 || config.MaxPendingActivity < 1 || config.MaxAttachments < 1 || config.MaxInputDecisions < 1 || config.Activity != nil && config.EnvironmentID == "" {
+	if config.RecoveryExitSignal == "" {
+		config.RecoveryExitSignal = "helper_restart"
+	}
+	if config.HistoryBytes < 1 || config.AttachmentBytes < 1 || config.TerminationTimeout <= 0 || config.TerminationGrace < 0 || config.TerminationGrace > config.TerminationTimeout || config.MaxSessions < 1 || config.MaxPendingActivity < 1 || config.MaxAttachments < 1 || config.MaxInputDecisions < 1 || config.Activity != nil && config.EnvironmentID == "" || config.RecoveryExitSignal != "helper_restart" && config.RecoveryExitSignal != "machine_reboot" {
 		return nil, ErrInvalidSession
 	}
 	manager := &Manager{config: config, sessions: make(map[string]*managedSession), names: make(map[string]string)}
@@ -753,6 +757,54 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	return result
 }
 
+// ShutdownForRecovery stops live PTYs and flushes their history while leaving
+// their durable generations recoverable by the next worker process.
+func (m *Manager) ShutdownForRecovery(ctx context.Context) error {
+	m.mu.RLock()
+	sessions := make(map[string]*managedSession, len(m.sessions))
+	for id, session := range m.sessions {
+		sessions[id] = session
+	}
+	m.mu.RUnlock()
+	recoverable := make(map[string]State)
+	for id, session := range sessions {
+		session.opMu.Lock()
+		state, _ := session.lifecycle.Snapshot()
+		if state == Running || state == Restarting {
+			recoverable[id] = state
+		}
+		session.opMu.Unlock()
+	}
+
+	result := m.Shutdown(ctx)
+	if m.config.Store == nil {
+		return result
+	}
+	restoreCtx, cancel := context.WithTimeout(context.Background(), m.config.TerminationTimeout)
+	defer cancel()
+	for id, original := range recoverable {
+		session, err := m.get(id)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		session.opMu.Lock()
+		state, _ := session.lifecycle.Snapshot()
+		if state != Closed {
+			session.opMu.Unlock()
+			result = errors.Join(result, ErrInvalidTransition)
+			continue
+		}
+		record := session.storeRecordLocked()
+		record.State = string(original)
+		record.ExitCode, record.ExitSignal, record.ExitedAt = nil, "", nil
+		err = m.config.Store.UpdateSession(restoreCtx, id, string(Closed), record)
+		session.opMu.Unlock()
+		result = errors.Join(result, err)
+	}
+	return result
+}
+
 func (m *Manager) capture(session *managedSession, process PTYProcess) {
 	buffer := make([]byte, 32<<10)
 	for {
@@ -937,7 +989,7 @@ func (m *Manager) recover(ctx context.Context) error {
 		case Running, Restarting:
 			recovered = Exited
 			code := 255
-			record.ExitCode, record.ExitSignal, record.ExitedAt = &code, "helper_restart", &now
+			record.ExitCode, record.ExitSignal, record.ExitedAt = &code, m.config.RecoveryExitSignal, &now
 		case Closing:
 			recovered = Closed
 		case Exited, Closed:

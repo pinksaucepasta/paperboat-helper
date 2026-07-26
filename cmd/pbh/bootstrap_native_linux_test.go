@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -35,11 +34,10 @@ func TestNativeBootstrapSystemdFailureRetryAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
+	if os.Geteuid() != 0 {
+		t.Fatal("native system service test must run as root with an isolated test account")
 	}
-	definition := filepath.Join(home, ".config", "systemd", "user", "paperboat-helper.service")
+	definition := "/etc/systemd/system/paperboat-helper.service"
 	if _, err := os.Lstat(definition); err == nil {
 		t.Fatalf("refusing to replace existing service definition %s", definition)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -47,7 +45,7 @@ func TestNativeBootstrapSystemdFailureRetryAndCleanup(t *testing.T) {
 	}
 	runner := &failFirstRunner{next: service.ExecRunner{}}
 	installer, err := service.New(service.Config{
-		Platform: "linux", ConfigRoot: filepath.Join(home, ".config"), Executable: executable,
+		Platform: "linux", ConfigRoot: "/", Executable: executable, User: "nobody", Group: "nogroup",
 		Arguments:   []string{"-test.run=^TestNativeBootstrapSystemdServiceProcess$", "-test.v"},
 		Environment: map[string]string{"PAPERBOAT_NATIVE_BOOTSTRAP_CHILD": "1"},
 		Controller:  service.SystemdController{Runner: runner},

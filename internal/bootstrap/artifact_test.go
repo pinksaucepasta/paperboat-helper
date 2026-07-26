@@ -30,6 +30,25 @@ func signedArtifact(t *testing.T, serverURL string, artifact []byte) (ArtifactMa
 	return manifest, base64.RawURLEncoding.EncodeToString(publicKey)
 }
 
+func signedArtifactPair(t *testing.T, serverURL string) (ArtifactManifest, ArtifactManifest, string) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign := func(kind, name, body string) ArtifactManifest {
+		digest := sha256.Sum256([]byte(body))
+		manifest := ArtifactManifest{Schema: ArtifactSchemaV2, Kind: kind, Version: "0.0.0-development", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: serverURL + "/" + name, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
+		payload, err := manifest.signaturePayload()
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+		return manifest
+	}
+	return sign(ArtifactKindWorker, "pbh", "helper"), sign(ArtifactKindHostService, "paperboat-host-service", "host"), base64.RawURLEncoding.EncodeToString(publicKey)
+}
+
 func TestFetchVerifiedArtifact(t *testing.T) {
 	artifact := []byte("verified helper binary")
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

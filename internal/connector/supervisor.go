@@ -124,6 +124,7 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 func (s *Supervisor) loop(ctx context.Context) {
 	defer func() { s.mu.Lock(); s.running = false; close(s.done); s.mu.Unlock() }()
 	backoff := s.config.InitialBackoff
+	var recoveryStarted time.Time
 	for ctx.Err() == nil {
 		admission, err := s.config.Admissions.Admission(ctx)
 		if err == nil {
@@ -135,6 +136,10 @@ func (s *Supervisor) loop(ctx context.Context) {
 			result, acceptErr := s.config.Manager.Accept(acceptCtx, admission)
 			cancelAccept()
 			if acceptErr == nil {
+				if !recoveryStarted.IsZero() && s.config.Metrics != nil {
+					_ = s.config.Metrics.Record("paperboat_helper_connector_recovery_seconds", time.Since(recoveryStarted).Seconds(), nil)
+					recoveryStarted = time.Time{}
+				}
 				metricResult := "connected"
 				if result.Replaced {
 					metricResult = "replaced"
@@ -171,6 +176,9 @@ func (s *Supervisor) loop(ctx context.Context) {
 			slog.Warn("connector admission request failed", "error", err)
 		}
 		s.recordRetry("none", "failed")
+		if recoveryStarted.IsZero() {
+			recoveryStarted = time.Now()
+		}
 		if s.config.Waiter.Wait(ctx, s.jitter(backoff), s.wake) != nil {
 			return
 		}

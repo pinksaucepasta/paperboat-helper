@@ -5,12 +5,36 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 )
+
+func TestMetricsHandlerRendersDeterministicPrometheusText(t *testing.T) {
+	registry, err := NewRegistry(DefaultDescriptors())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Record("paperboat_helper_restart_total", 4, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Record("paperboat_helper_connector_retries_total", 1, map[string]string{"result": "failed", "transport": "none"}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status=%d headers=%v", recorder.Code, recorder.Header())
+	}
+	want := "paperboat_helper_connector_retries_total{result=\"failed\",transport=\"none\"} 1\npaperboat_helper_restart_total 4\n"
+	if body := recorder.Body.String(); body != want || !strings.Contains(recorder.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("body=%q content-type=%q", body, recorder.Header().Get("Content-Type"))
+	}
+}
 
 func TestLoggerAcceptsOnlySafeStructuredFields(t *testing.T) {
 	var output bytes.Buffer

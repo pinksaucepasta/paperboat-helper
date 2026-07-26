@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -161,5 +163,41 @@ func TestJWKSConcurrentRefreshesAreSerialized(t *testing.T) {
 	wait.Wait()
 	if maximum.Load() != 1 {
 		t.Fatalf("concurrent fetches=%d", maximum.Load())
+	}
+}
+
+func TestJWKSPersistenceLoadsOnlyFreshValidatedMaterial(t *testing.T) {
+	clock := &fixedClock{now: time.Now().UTC()}
+	key := ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))
+	path := filepath.Join(t.TempDir(), "authorization", "jwks.json")
+	cache, err := NewJWKSCache(JWKSConfig{Clock: clock, TTL: time.Minute, PersistencePath: path, Fetcher: fetcherFunc(func(context.Context) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(jwksFor("persisted", key))), nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
+		t.Fatalf("persisted info=%v err=%v", info, err)
+	}
+	offline, err := NewJWKSCache(JWKSConfig{Clock: clock, TTL: time.Minute, PersistencePath: path, Fetcher: fetcherFunc(func(context.Context) (io.ReadCloser, error) {
+		return nil, errors.New("offline")
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := offline.Lookup(context.Background(), "persisted"); err != nil || !ok {
+		t.Fatalf("fresh persisted key ok=%v err=%v", ok, err)
+	}
+	clock.now = clock.now.Add(time.Minute)
+	stale, err := NewJWKSCache(JWKSConfig{Clock: clock, TTL: time.Minute, PersistencePath: path, Fetcher: fetcherFunc(func(context.Context) (io.ReadCloser, error) { return nil, errors.New("offline") })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := stale.Lookup(context.Background(), "persisted"); ok {
+		t.Fatal("stale persisted authorization material was accepted")
 	}
 }

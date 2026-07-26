@@ -17,7 +17,12 @@ import (
 	"strings"
 )
 
-const ArtifactSchemaV1 = "paperboat.helper-artifact/v1"
+const (
+	ArtifactSchemaV1        = "paperboat.helper-artifact/v1"
+	ArtifactSchemaV2        = "paperboat.helper-artifact/v2"
+	ArtifactKindWorker      = "worker"
+	ArtifactKindHostService = "host_service"
+)
 
 var (
 	ErrArtifactManifest  = errors.New("helper artifact manifest is invalid")
@@ -27,6 +32,7 @@ var (
 
 type ArtifactManifest struct {
 	Schema       string `json:"schema"`
+	Kind         string `json:"kind,omitempty"`
 	Version      string `json:"version"`
 	Platform     string `json:"platform"`
 	Architecture string `json:"architecture"`
@@ -48,8 +54,24 @@ type artifactSignaturePayload struct {
 	URL          string `json:"url"`
 	Version      string `json:"version"`
 }
+type artifactSignaturePayloadV2 struct {
+	Architecture string `json:"architecture"`
+	ByteLength   int64  `json:"byte_length"`
+	Kind         string `json:"kind"`
+	Platform     string `json:"platform"`
+	Schema       string `json:"schema"`
+	SHA256       string `json:"sha256"`
+	URL          string `json:"url"`
+	Version      string `json:"version"`
+}
 
 func (m ArtifactManifest) signaturePayload() ([]byte, error) {
+	if m.Schema == ArtifactSchemaV2 {
+		return json.Marshal(artifactSignaturePayloadV2{
+			Architecture: m.Architecture, ByteLength: m.ByteLength, Kind: m.Kind, Platform: m.Platform,
+			Schema: m.Schema, SHA256: m.SHA256, URL: m.URL, Version: m.Version,
+		})
+	}
 	return json.Marshal(artifactSignaturePayload{
 		Architecture: m.Architecture, ByteLength: m.ByteLength, Platform: m.Platform,
 		Schema: m.Schema, SHA256: m.SHA256, URL: m.URL, Version: m.Version,
@@ -58,7 +80,8 @@ func (m ArtifactManifest) signaturePayload() ([]byte, error) {
 
 func VerifyArtifactManifest(manifest ArtifactManifest, encodedPublicKey string) error {
 	parsed, err := url.Parse(manifest.URL)
-	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" || manifest.Schema != ArtifactSchemaV1 || manifest.Version == "" || manifest.Platform != runtime.GOOS || manifest.Architecture != runtime.GOARCH || manifest.ByteLength < 1 || manifest.ByteLength > 256<<20 || len(manifest.SHA256) != sha256.Size*2 {
+	validSchema := manifest.Schema == ArtifactSchemaV1 && manifest.Kind == "" || manifest.Schema == ArtifactSchemaV2 && (manifest.Kind == ArtifactKindWorker || manifest.Kind == ArtifactKindHostService)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" || !validSchema || manifest.Version == "" || manifest.Platform != runtime.GOOS || manifest.Architecture != runtime.GOARCH || manifest.ByteLength < 1 || manifest.ByteLength > 256<<20 || len(manifest.SHA256) != sha256.Size*2 {
 		return ErrArtifactManifest
 	}
 	if _, err := hex.DecodeString(manifest.SHA256); err != nil {

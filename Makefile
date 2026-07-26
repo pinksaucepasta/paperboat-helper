@@ -1,5 +1,7 @@
 BINARY := pbh
 PACKAGE := ./cmd/pbh
+HOST_BINARY := paperboat-host-service
+HOST_PACKAGE := ./cmd/paperboat-host-service
 GO_VERSION := 1.25.7
 GO := GOTOOLCHAIN=local go
 GOFMT := $(shell GOTOOLCHAIN=local go env GOROOT 2>/dev/null)/bin/gofmt
@@ -19,6 +21,7 @@ verify-toolchain:
 build: verify-toolchain
 	@mkdir -p bin
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PACKAGE)
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(HOST_BINARY) $(HOST_PACKAGE)
 
 artifact-manifest: verify-toolchain
 	@echo "Use tools/artifact with an explicit development signing key, artifact path, HTTPS URL, and output paths."
@@ -26,9 +29,13 @@ artifact-manifest: verify-toolchain
 cross-build: verify-toolchain
 	@mkdir -p dist
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-darwin-amd64 $(PACKAGE)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(HOST_BINARY)-darwin-amd64 $(HOST_PACKAGE)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-darwin-arm64 $(PACKAGE)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(HOST_BINARY)-darwin-arm64 $(HOST_PACKAGE)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-amd64 $(PACKAGE)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(HOST_BINARY)-linux-amd64 $(HOST_PACKAGE)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64 $(PACKAGE)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(HOST_BINARY)-linux-arm64 $(HOST_PACKAGE)
 
 fmt:
 	$(GOFMT) -w $(GO_FILES)

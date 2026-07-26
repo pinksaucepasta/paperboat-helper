@@ -464,7 +464,7 @@ func LoadRuntimeIdentity(root string, now time.Time) (RuntimeIdentity, error) {
 }
 
 func LoadRuntimeIdentityForRenewal(root string, now time.Time) (RuntimeIdentity, error) {
-	return loadRuntimeIdentity(root, now, 24*time.Hour)
+	return loadRuntimeIdentity(root, now, -1)
 }
 
 func loadRuntimeIdentity(root string, now time.Time, expiryGrace time.Duration) (RuntimeIdentity, error) {
@@ -485,7 +485,11 @@ func loadRuntimeIdentity(root string, now time.Time, expiryGrace time.Duration) 
 		return RuntimeIdentity{}, err
 	}
 	var value RuntimeIdentity
-	if strictJSON(body, &value) != nil || value.Version != 1 || value.HelperID == "" || value.EnvironmentID == "" || len(value.Credential) < 32 || !value.ExpiresAt.After(now.Add(-expiryGrace)) || value.KeyID == "" {
+	if strictJSON(body, &value) != nil {
+		return RuntimeIdentity{}, ErrInvalid
+	}
+	validExpiry := expiryGrace < 0 || value.ExpiresAt.After(now.Add(-expiryGrace))
+	if value.Version != 1 || value.HelperID == "" || value.EnvironmentID == "" || len(value.Credential) < 32 || !validExpiry || value.KeyID == "" {
 		return RuntimeIdentity{}, ErrInvalid
 	}
 	store, err := identity.Open(identity.Config{StateRoot: root})

@@ -177,6 +177,69 @@ func TestManagerMarksUnverifiedRunningGenerationLostOnRecovery(t *testing.T) {
 	}
 }
 
+func TestManagerMarksRunningGenerationLostOnMachineReboot(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	state, err := store.Open(context.Background(), store.Config{Root: stateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	record := store.Session{ID: "ses_reboot", Name: "reboot", CWD: t.TempDir(), CommandPath: "/bin/sh", CommandArgs: []string{"-c", "exit"}, CommandEnv: []string{"PATH=/bin"}, Columns: 80, Rows: 24, State: "restarting", Generation: 4, CreatedAt: now, UpdatedAt: now}
+	if err := state.CreateSession(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(ManagerConfig{Store: state, RecoveryExitSignal: "machine_reboot", Launch: func(pty.Command) (PTYProcess, error) { t.Fatal("recovery must not launch"); return nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	snapshot, err := manager.Snapshot("ses_reboot")
+	if err != nil || snapshot.State != Exited || snapshot.Generation != 4 || snapshot.Exit == nil || snapshot.Exit.Signal != "machine_reboot" {
+		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestManagerShutdownPreservesRunningGenerationForBootRecovery(t *testing.T) {
+	workspace := t.TempDir()
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	state, err := store.Open(context.Background(), store.Config{Root: stateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := pty.NewAdapter(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(ManagerConfig{Store: state, Launch: func(command pty.Command) (PTYProcess, error) { return adapter.Start(command) }, TerminationTimeout: 3 * time.Second, TerminationGrace: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := manager.Create(context.Background(), CreateRequest{Name: "boot-recovery", Command: shellCommand("/bin/sh", workspace, "printf retained; read line")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitLatest(t, manager, created.ID, uint64(len("retained")))
+	if err := manager.ShutdownForRecovery(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.Open(context.Background(), store.Config{Root: stateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	recovered, err := NewManager(ManagerConfig{Store: state, RecoveryExitSignal: "machine_reboot", Launch: func(pty.Command) (PTYProcess, error) { t.Fatal("recovery must not launch"); return nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := recovered.Snapshot(created.ID)
+	if err != nil || snapshot.State != Exited || snapshot.Exit == nil || snapshot.Exit.Signal != "machine_reboot" || snapshot.LatestSequence < uint64(len("retained")) {
+		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
 func TestManagerRecoveryCompactsHistoryToConfiguredLimit(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	state, err := store.Open(context.Background(), store.Config{Root: stateRoot})

@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
+	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
+	"github.com/pinksaucepasta/paperboat-helper/internal/observability"
 	"github.com/pinksaucepasta/paperboat-helper/internal/operation"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
 	"github.com/pinksaucepasta/paperboat-helper/internal/process"
@@ -33,35 +35,41 @@ import (
 var ErrHelperInvalid = errors.New("invalid helper runtime composition")
 
 type HelperConfig struct {
-	Runtime          helperconfig.Config
-	ListenAddress    string
-	WorkspaceRoot    string
-	HerdrPath        string
-	HerdrVersion     string
-	AgentEnvironment []string
-	OriginPatterns   []string
-	EnvironmentID    string
-	AgentTokenFile   string
-	ShutdownTimeout  time.Duration
+	Runtime            helperconfig.Config
+	ListenAddress      string
+	WorkspaceRoot      string
+	HerdrPath          string
+	HerdrVersion       string
+	AgentEnvironment   []string
+	OriginPatterns     []string
+	EnvironmentID      string
+	AgentTokenFile     string
+	ShutdownTimeout    time.Duration
+	RecoveryExitSignal string
 }
 
 type HelperDependencies struct {
-	Authorizer             server.AuthorizerFactory
-	Listener               ListenerFactory
-	Connector              Service
-	Previews               *preview.Registry
-	PreviewControl         preview.PreviewControl
-	PreviewRoutesChanged   func()
-	PreviewService         Service
-	Activity               *activity.Collector
-	ActivityService        Service
-	SignalVerifier         *activity.SignalVerifier
-	ConfigApply            configapply.Handler
-	ConfigApplyProof       bool
-	ConfigSync             Service
+	Authorizer           server.AuthorizerFactory
+	AuthorizationService Service
+	Listener             ListenerFactory
+	Connector            Service
+	Previews             *preview.Registry
+	PreviewControl       preview.PreviewControl
+	PreviewRoutesChanged func()
+	PreviewService       Service
+	Activity             *activity.Collector
+	ActivityService      Service
+	SignalVerifier       *activity.SignalVerifier
+	ConfigApply          configapply.Handler
+	ConfigApplyProof     bool
+	ConfigSync           Service
+	Updates              interface {
+		Activate(context.Context, bootstrap.ArtifactManifest, bootstrap.ArtifactManifest) (string, error)
+	}
 	Random                 io.Reader
 	HostedLifecycle        HostedLifecycle
 	SessionLauncherFactory func(*session.Manager) (server.SessionLauncher, error)
+	Metrics                *observability.Registry
 }
 
 type HostedLifecycle interface {
@@ -153,6 +161,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		MaxInputDecisions:  resources.MaxInputDecisions,
 		TerminationTimeout: 10 * time.Second, TerminationGrace: 2 * time.Second,
 		Store: durable, Activity: dependencies.Activity, EnvironmentID: config.EnvironmentID,
+		RecoveryExitSignal: config.RecoveryExitSignal,
 	})
 	if err != nil {
 		return nil, err
@@ -177,6 +186,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		WorkspaceRoot: config.WorkspaceRoot, Random: random,
 		Previews: dependencies.Previews, PreviewControl: dependencies.PreviewControl, Activity: dependencies.Activity,
 		SignalVerifier: dependencies.SignalVerifier, ConfigApply: dependencies.ConfigApply,
+		Updates: dependencies.Updates,
 	})
 	if err != nil {
 		return nil, err
@@ -204,6 +214,10 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err != nil {
 		return nil, err
 	}
+	var protocolMetrics server.MetricRecorder
+	if dependencies.Metrics != nil {
+		protocolMetrics = dependencies.Metrics
+	}
 	protocolServer, err := server.New(server.Config{
 		Negotiator: protocol.Negotiator{Profile: config.Runtime.Profile, Available: available, ConfigApplyProof: dependencies.ConfigApplyProof},
 		Journal:    journal, Authorizer: nil, Handler: dispatcher,
@@ -211,6 +225,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		HeartbeatInterval: config.Runtime.Limits.HeartbeatInterval,
 		PeerTimeout:       config.Runtime.Limits.PeerTimeout,
 		MutationDeadline:  config.Runtime.Limits.MutationDeadline,
+		Metrics:           protocolMetrics,
 	})
 	if err != nil {
 		return nil, err
@@ -238,6 +253,9 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		writer.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(writer).Encode(healthSource.Snapshot())
 	})
+	if dependencies.Metrics != nil {
+		mux.Handle("/metrics", dependencies.Metrics.Handler())
+	}
 	httpService, err := NewHTTPService(HTTPConfig{Address: config.ListenAddress, Handler: mux, Listener: dependencies.Listener})
 	if err != nil {
 		return nil, err
@@ -245,8 +263,11 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	components := make([]Component, 0, 8)
 	components = append(components,
 		Component{Capability: "storage", Required: true, Service: shutdownService{shutdown: func(context.Context) error { return durable.Close() }}},
-		Component{Capability: "sessions", Required: true, Service: shutdownService{shutdown: sessions.Shutdown}},
+		Component{Capability: "sessions", Required: true, Service: shutdownService{shutdown: sessions.ShutdownForRecovery}},
 	)
+	if dependencies.AuthorizationService != nil {
+		components = append(components, Component{Capability: "authorization", Required: false, Service: dependencies.AuthorizationService})
+	}
 	if dependencies.ConfigSync != nil {
 		components = append(components, Component{
 			Capability: "config_sync", Required: config.Runtime.Profile == helperconfig.BYOD,

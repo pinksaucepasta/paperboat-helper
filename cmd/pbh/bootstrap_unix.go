@@ -19,13 +19,15 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	"github.com/pinksaucepasta/paperboat-helper/internal/buildinfo"
 	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
-	"github.com/pinksaucepasta/paperboat-helper/internal/service"
+	"github.com/pinksaucepasta/paperboat-helper/internal/health"
+	"github.com/pinksaucepasta/paperboat-helper/internal/hostinstall"
 )
 
 func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -76,60 +78,75 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	fmt.Fprintln(stderr, "Pairing approved. Setting up the managed helper service...")
 	client, err := enrollment.NewClient(nil, 15*time.Second)
 	if err != nil {
-		return err
+		return errors.Join(err, reportInstallationFailureWithEnrollmentCredential(ctx, material, "artifact_verification"))
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return errors.Join(err, reportInstallationFailureWithEnrollmentCredential(ctx, material, "artifact_verification"))
 	}
 	executable, err = filepath.EvalSymlinks(executable)
 	if err != nil {
-		return err
+		return errors.Join(err, reportInstallationFailureWithEnrollmentCredential(ctx, material, "artifact_verification"))
 	}
 	artifactHTTP := artifactHTTPClient()
-	artifactPath, err := prepareInstallation(ctx, &material, *stateRoot, artifactHTTP, client)
+	artifactPath, hostServicePath, err := prepareInstallation(ctx, &material, *stateRoot, artifactHTTP, client)
 	if err != nil {
 		if !material.ReuseIdentity {
 			return errors.Join(err, reportInstallationFailureWithEnrollmentCredential(ctx, material, "artifact_verification"))
 		}
-		return err
+		return failBootstrapInstallation(ctx, err, material, *stateRoot, "artifact_verification")
 	}
 	executable = artifactPath
 	herdrPath, err := installHerdr(ctx, *stateRoot, runtime.GOOS, runtime.GOARCH, herdrHTTPClient())
 	if err != nil {
-		return errors.Join(err, reportInstallationFailure(ctx, material, *stateRoot, "artifact_verification"))
+		return failBootstrapInstallation(ctx, err, material, *stateRoot, "artifact_verification")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return failBootstrapInstallation(ctx, err, material, *stateRoot, "service_install")
+	}
+	account, err := user.Current()
+	if err != nil || account.Username == "" {
+		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled user"), material, *stateRoot, "service_install")
+	}
+	group, err := user.LookupGroupId(account.Gid)
+	if err != nil || group.Name == "" {
+		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled group"), material, *stateRoot, "service_install")
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil || uid < 1 {
+		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled uid"), material, *stateRoot, "service_install")
+	}
+	gid, err := strconv.Atoi(account.Gid)
+	if err != nil || gid < 1 {
+		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled gid"), material, *stateRoot, "service_install")
 	}
 	commandDirectory := filepath.Join(home, ".local", "bin")
-	if err := installHelperCommand(commandDirectory, executable); err != nil {
-		return errors.Join(err, reportInstallationFailure(ctx, material, *stateRoot, "service_install"))
-	}
 	servicePath := os.Getenv("PATH")
 	if !pathListContains(servicePath, commandDirectory) {
 		servicePath = commandDirectory + string(os.PathListSeparator) + servicePath
 	}
-	configRoot := filepath.Join(home, ".config")
-	controller := service.Controller(service.SystemdController{Runner: service.ExecRunner{}})
-	if runtime.GOOS == "darwin" {
-		configRoot, controller = home, service.LaunchdController{Runner: service.ExecRunner{}, UID: os.Getuid()}
+	installRequest := hostinstall.Request{
+		Schema: hostinstall.SchemaV1, Platform: runtime.GOOS, User: account.Username, UID: uid, Group: group.Name, GID: gid,
+		Executable: executable, Artifact: *material.Artifact, ArtifactPublicKey: material.ArtifactPublicKey,
+		HostExecutable: hostServicePath, HostArtifact: *material.HostServiceArtifact,
+		Home: home, Path: servicePath, StateRoot: *stateRoot, WorkspaceRoot: workspace, ControlURL: material.ControlURL,
+		UserMachineID: material.UserMachineID, Shell: resolvedShell, HelperListenAddress: material.HelperListenAddress,
+		HerdrPath: herdrPath, HerdrVersion: herdrVersion,
 	}
-	installer, err := service.New(service.Config{Platform: runtime.GOOS, ConfigRoot: configRoot, Executable: executable, Arguments: []string{"run"}, Environment: map[string]string{
-		"HOME": home, "PATH": servicePath, "PAPERBOAT_HELPER_PROFILE": "byod", "PAPERBOAT_HELPER_STATE_ROOT": *stateRoot,
-		"PAPERBOAT_WORKSPACE_ROOT": workspace, "PAPERBOAT_CONTROL_URL": material.ControlURL, "PAPERBOAT_USER_MACHINE_ID": material.UserMachineID,
-		"PAPERBOAT_SHELL":                 resolvedShell,
-		"PAPERBOAT_HELPER_LISTEN_ADDRESS": material.HelperListenAddress, "PAPERBOAT_HERDR_PATH": herdrPath, "PAPERBOAT_HERDR_VERSION": herdrVersion,
-	}, Controller: controller})
-	if err != nil {
-		return err
-	}
+	previousGeneration := workerGeneration(*stateRoot)
+	fmt.Fprintln(stderr, "Paperboat must run before login and while this account is logged out.")
+	fmt.Fprintln(stderr, "Paperboat will keep this machine awake by default, including on battery and with the lid closed; this can increase battery use and heat.")
+	fmt.Fprintln(stderr, "Administrator approval is required to install its durable system service.")
 	installCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	if err := installService(installCtx, installer, 3, 2*time.Second); err != nil {
-		reportErr := reportInstallationFailure(ctx, material, *stateRoot, "service_install")
-		return errors.Join(err, reportErr)
+	if err := authorizeServiceInstall(installCtx, executable, installRequest, stdin, stdout, stderr); err != nil {
+		return failBootstrapInstallation(ctx, err, material, *stateRoot, "service_install")
+	}
+	restoreHelperCommand, err := installHelperCommand(commandDirectory, systemWorkerExecutable())
+	if err != nil {
+		failureErr := errors.Join(err, authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr))
+		return failBootstrapInstallation(ctx, failureErr, material, *stateRoot, "service_install")
 	}
 	readyCtx, readyCancel := context.WithTimeout(ctx, 45*time.Second)
 	defer readyCancel()
@@ -137,21 +154,140 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	for {
 		request, _ := http.NewRequestWithContext(readyCtx, http.MethodGet, "http://"+material.HelperListenAddress+"/healthz", nil)
 		response, requestErr := healthClient.Do(request)
-		if requestErr == nil && response.StatusCode == http.StatusOK {
-			response.Body.Close()
+		if requestErr == nil && bootstrapWorkerReady(readyCtx, response, *stateRoot, material.Artifact.Version, previousGeneration) {
+			if err := authorizeServiceOperation(ctx, executable, "commit", installRequest, stdout, stderr); err != nil {
+				failureErr := errors.Join(err, authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr), restoreHelperCommand())
+				return failBootstrapInstallation(ctx, failureErr, material, *stateRoot, "service_readiness")
+			}
 			fmt.Fprintln(stdout, "Paperboat helper is ready.")
 			return nil
 		}
-		if response != nil {
+		if response != nil && response.Body != nil {
 			response.Body.Close()
 		}
 		select {
 		case <-readyCtx.Done():
-			failureErr := errors.New("helper service did not become ready")
-			return errors.Join(failureErr, reportInstallationFailure(ctx, material, *stateRoot, "service_readiness"))
+			failureErr := errors.Join(errors.New("helper service did not become ready"), authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr), restoreHelperCommand())
+			return failBootstrapInstallation(ctx, failureErr, material, *stateRoot, "service_readiness")
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func bootstrapWorkerReady(ctx context.Context, response *http.Response, stateRoot, expectedVersion string, previousGeneration uint64) bool {
+	if response == nil || response.Body == nil {
+		return false
+	}
+	defer response.Body.Close()
+	if !bootstrapHealthMatches(response, expectedVersion) || workerGeneration(stateRoot) <= previousGeneration || !serverHeartbeatReady(stateRoot, expectedVersion, previousGeneration) {
+		return false
+	}
+	_, err := systemServiceScope(ctx)
+	return err == nil
+}
+
+func serverHeartbeatReady(stateRoot, expectedVersion string, previousGeneration uint64) bool {
+	var receipt struct {
+		Schema           string    `json:"schema"`
+		WorkerGeneration uint64    `json:"worker_generation"`
+		ReporterVersion  string    `json:"reporter_version"`
+		AcceptedAt       time.Time `json:"accepted_at"`
+	}
+	if decodeStrictFile(filepath.Join(stateRoot, "runtime", "server-heartbeat.json"), 4096, &receipt) != nil {
+		return false
+	}
+	return receipt.Schema == "paperboat.server-heartbeat/v1" && receipt.WorkerGeneration > previousGeneration && receipt.ReporterVersion == expectedVersion && !receipt.AcceptedAt.IsZero()
+}
+
+func bootstrapHealthMatches(response *http.Response, expectedVersion string) bool {
+	var snapshot health.Snapshot
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
+	var extra any
+	if response.StatusCode != http.StatusOK || decoder.Decode(&snapshot) != nil || decoder.Decode(&extra) != io.EOF || !snapshot.Live || snapshot.Version != expectedVersion {
+		return false
+	}
+	return true
+}
+
+func workerGeneration(stateRoot string) uint64 {
+	var state struct {
+		Schema     string    `json:"schema"`
+		OSBootID   string    `json:"os_boot_id"`
+		Generation uint64    `json:"generation"`
+		StartedAt  time.Time `json:"started_at"`
+	}
+	if decodeStrictFile(filepath.Join(stateRoot, "runtime", "worker-boot.json"), 4096, &state) != nil || state.Schema != "paperboat.worker-boot/v1" || state.OSBootID == "" || state.Generation < 1 || state.StartedAt.IsZero() {
+		return 0
+	}
+	return state.Generation
+}
+
+type installationStageError struct {
+	Stage string
+	Cause error
+}
+
+func (e *installationStageError) Error() string {
+	return "installation stage " + e.Stage + ": " + e.Cause.Error()
+}
+func (e *installationStageError) Unwrap() error { return e.Cause }
+
+func failBootstrapInstallation(ctx context.Context, cause error, material bootstrap.Material, stateRoot, stage string) error {
+	reportErr := reportInstallationFailure(ctx, material, stateRoot, stage)
+	var cleanupErr error
+	if !material.ReuseIdentity {
+		cleanupErr = removeNewEnrollmentCredentials(stateRoot)
+	}
+	return &installationStageError{Stage: stage, Cause: errors.Join(cause, reportErr, cleanupErr)}
+}
+
+func removeNewEnrollmentCredentials(stateRoot string) error {
+	if !filepath.IsAbs(stateRoot) {
+		return bootstrap.ErrInvalid
+	}
+	info, err := os.Lstat(stateRoot)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return bootstrap.ErrInvalid
+	}
+	var result error
+	for _, name := range []string{"runtime-identity.json", "helper-identity.json"} {
+		path := filepath.Join(stateRoot, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+			result = errors.Join(result, bootstrap.ErrInvalid)
+			continue
+		}
+		result = errors.Join(result, os.Remove(path))
+	}
+	return result
+}
+
+func authorizeServiceInstall(ctx context.Context, executable string, request hostinstall.Request, stdin io.Reader, stdout, stderr io.Writer) error {
+	return authorizeServiceOperation(ctx, executable, "install", request, stdout, stderr)
+}
+
+func authorizeServiceOperation(ctx context.Context, executable, operation string, request hostinstall.Request, stdout, stderr io.Writer) error {
+	if !filepath.IsAbs(executable) {
+		return hostinstall.ErrInvalidRequest
+	}
+	if operation != "install" && operation != "commit" && operation != "uninstall" {
+		return hostinstall.ErrInvalidRequest
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, "/usr/bin/sudo", "--", executable, "service", operation)
+	command.Stdin = bytes.NewReader(payload)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("administrator approval or service installation failed: %w", err)
+	}
+	return nil
 }
 
 func artifactHTTPClient() *http.Client {
@@ -241,23 +377,51 @@ func accountLoginShell() string {
 	return fields[6]
 }
 
-func installHelperCommand(directory, artifact string) error {
+func installHelperCommand(directory, artifact string) (func() error, error) {
 	if !filepath.IsAbs(directory) || !filepath.IsAbs(artifact) {
-		return bootstrap.ErrInvalid
+		return nil, bootstrap.ErrInvalid
 	}
 	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return bootstrap.ErrInvalid
+		return nil, bootstrap.ErrInvalid
+	}
+	commandPath := filepath.Join(directory, "pbh")
+	previousTarget := ""
+	previousExists := false
+	if info, err = os.Lstat(commandPath); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return nil, bootstrap.ErrInvalid
+		}
+		previousTarget, err = os.Readlink(commandPath)
+		if err != nil {
+			return nil, err
+		}
+		previousExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	temporary := filepath.Join(directory, fmt.Sprintf(".pbh-%d", time.Now().UnixNano()))
 	if err := os.Symlink(artifact, temporary); err != nil {
-		return err
+		return nil, err
 	}
 	defer os.Remove(temporary)
-	return os.Rename(temporary, filepath.Join(directory, "pbh"))
+	if err := os.Rename(temporary, commandPath); err != nil {
+		return nil, err
+	}
+	return func() error {
+		if !previousExists {
+			return os.Remove(commandPath)
+		}
+		restorePath := filepath.Join(directory, fmt.Sprintf(".pbh-restore-%d", time.Now().UnixNano()))
+		if err := os.Symlink(previousTarget, restorePath); err != nil {
+			return err
+		}
+		defer os.Remove(restorePath)
+		return os.Rename(restorePath, commandPath)
+	}, nil
 }
 
 func pathListContains(value, want string) bool {
@@ -381,25 +545,32 @@ func installService(ctx context.Context, installer serviceInstaller, attempts in
 	return lastErr
 }
 
-func prepareInstallation(ctx context.Context, material *bootstrap.Material, stateRoot string, artifactHTTP *http.Client, client enrollmentClient) (string, error) {
+func prepareInstallation(ctx context.Context, material *bootstrap.Material, stateRoot string, artifactHTTP *http.Client, client enrollmentClient) (string, string, error) {
 	if material.ReuseIdentity {
 		identity, err := enrollment.LoadRuntimeIdentity(stateRoot, time.Now().UTC())
 		if err != nil || identity.HelperID != material.HelperID || identity.EnvironmentID != material.EnvironmentID {
-			return "", bootstrap.ErrInvalid
+			return "", "", bootstrap.ErrInvalid
 		}
 	}
 	artifactPath, err := bootstrap.FetchVerifiedArtifact(ctx, *material.Artifact, material.ArtifactPublicKey, filepath.Join(stateRoot, "artifacts"), artifactHTTP)
 	if err != nil {
-		return "", err
+		return "", "", err
+	}
+	hostServicePath, err := bootstrap.FetchVerifiedArtifact(ctx, *material.HostServiceArtifact, material.ArtifactPublicKey, filepath.Join(stateRoot, "artifacts"), artifactHTTP)
+	if err != nil {
+		_ = os.Remove(artifactPath)
+		return "", "", err
 	}
 	if material.ReuseIdentity {
-		return artifactPath, nil
+		return artifactPath, hostServicePath, nil
 	}
 	if _, err := client.Enroll(ctx, enrollment.Config{ControlURL: material.ControlURL, StateRoot: stateRoot, EnrollmentCredential: material.EnrollmentCredential}); err != nil {
-		return "", err
+		_ = os.Remove(artifactPath)
+		_ = os.Remove(hostServicePath)
+		return "", "", err
 	}
 	material.EnrollmentCredential = ""
-	return artifactPath, nil
+	return artifactPath, hostServicePath, nil
 }
 
 func promptBootstrapValue(reader *bufio.Reader, output io.Writer, label string, value *string) error {

@@ -35,18 +35,14 @@ func TestNativeSystemdInstallUpgradeAndUninstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	definitionPath := filepath.Join(home, ".config", "systemd", "user", "paperboat-helper.service")
+	definitionPath := "/etc/systemd/system/paperboat-helper.service"
 	if _, err := os.Lstat(definitionPath); err == nil {
 		t.Fatalf("refusing to replace existing service definition %s", definitionPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 	installer, err := New(Config{
-		Platform: "linux", ConfigRoot: filepath.Join(home, ".config"), Executable: executable,
+		Platform: "linux", ConfigRoot: "/", Executable: executable, User: os.Getenv("USER"), Group: os.Getenv("USER"),
 		Arguments:   []string{"-test.run=^TestNativeSystemdServiceProcess$", "-test.v"},
 		Environment: map[string]string{"PAPERBOAT_NATIVE_SERVICE_CHILD": "1"},
 		Controller:  SystemdController{Runner: ExecRunner{}},

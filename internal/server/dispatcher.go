@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
+	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/history"
@@ -30,12 +31,15 @@ type SessionLauncher interface {
 }
 
 type DispatcherConfig struct {
-	Sessions        *session.Manager
-	Previews        *preview.Registry
-	PreviewControl  preview.PreviewControl
-	Activity        *activity.Collector
-	SignalVerifier  *activity.SignalVerifier
-	ConfigApply     configapply.Handler
+	Sessions       *session.Manager
+	Previews       *preview.Registry
+	PreviewControl preview.PreviewControl
+	Activity       *activity.Collector
+	SignalVerifier *activity.SignalVerifier
+	ConfigApply    configapply.Handler
+	Updates        interface {
+		Activate(context.Context, bootstrap.ArtifactManifest, bootstrap.ArtifactManifest) (string, error)
+	}
 	Health          HealthSource
 	SessionLauncher SessionLauncher
 	WorkspaceRoot   string
@@ -74,6 +78,9 @@ func (d *Dispatcher) Capabilities() []string {
 	if d.config.ConfigApply != nil {
 		capabilities = append(capabilities, "config.apply.v1")
 	}
+	if d.config.Updates != nil {
+		capabilities = append(capabilities, "update.signed.v1")
+	}
 	return capabilities
 }
 
@@ -89,9 +96,33 @@ func (d *Dispatcher) Handle(ctx context.Context, authorization Authorization, ca
 		return result(d.config.Health.Snapshot())
 	case "config.apply.v1":
 		return d.configApply(ctx, authorization, payload)
+	case "update.signed.v1":
+		return d.update(ctx, payload)
 	default:
 		return failure("capability_required")
 	}
+}
+
+type signedUpdateRequest struct {
+	WorkerArtifact      bootstrap.ArtifactManifest `json:"worker_artifact"`
+	HostServiceArtifact bootstrap.ArtifactManifest `json:"host_service_artifact"`
+}
+
+func (d *Dispatcher) update(ctx context.Context, payload json.RawMessage) operation.Outcome {
+	if d.config.Updates == nil {
+		return failure("capability_required")
+	}
+	var request signedUpdateRequest
+	if decodeStrict(payload, &request) != nil {
+		return failure("invalid_request")
+	}
+	version, err := d.config.Updates.Activate(ctx, request.WorkerArtifact, request.HostServiceArtifact)
+	if err != nil {
+		return failure("update_activation_failed")
+	}
+	return result(struct {
+		Version string `json:"version"`
+	}{version})
 }
 
 type configApplyRequest struct {

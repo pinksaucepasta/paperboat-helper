@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +85,7 @@ type JWKSConfig struct {
 	MaxBytes        int64
 	MaxKeys         int
 	MaxRetainedKeys int
+	PersistencePath string
 }
 
 type JWKSCache struct {
@@ -117,7 +120,9 @@ func NewJWKSCache(config JWKSConfig) (*JWKSCache, error) {
 	if config.Fetcher == nil || config.Clock == nil || config.TTL <= 0 || config.RetainMissing < config.TTL || config.MaxBytes < 1 || config.MaxBytes > DefaultMaxJWKSBytes || config.MaxKeys < 1 || config.MaxKeys > 64 || config.MaxRetainedKeys < config.MaxKeys || config.MaxRetainedKeys > 256 {
 		return nil, ErrJWKSInvalid
 	}
-	return &JWKSCache{config: config, keys: make(map[string]cachedKey)}, nil
+	cache := &JWKSCache{config: config, keys: make(map[string]cachedKey)}
+	cache.loadPersisted()
+	return cache, nil
 }
 
 func (c *JWKSCache) Lookup(_ context.Context, keyID string) (ed25519.PublicKey, bool, error) {
@@ -161,6 +166,10 @@ func (c *JWKSCache) Refresh(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	now := c.config.Clock.Now()
+	if err := c.persist(encoded, now); err != nil {
+		c.mu.Unlock()
+		return err
+	}
 	keys := make(map[string]cachedKey, len(refreshed)+len(c.keys))
 	for keyID, key := range refreshed {
 		keys[keyID] = cachedKey{key: key, expiresAt: now.Add(c.config.TTL)}
@@ -184,6 +193,93 @@ func (c *JWKSCache) Refresh(ctx context.Context) error {
 	c.keys = keys
 	c.mu.Unlock()
 	return nil
+}
+
+type persistedJWKS struct {
+	Schema      string          `json:"schema"`
+	ValidatedAt time.Time       `json:"validated_at"`
+	Document    json.RawMessage `json:"document"`
+}
+
+func (c *JWKSCache) loadPersisted() {
+	path := c.config.PersistencePath
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || info.Size() < 1 || info.Size() > c.config.MaxBytes+4096 {
+		return
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var persisted persistedJWKS
+	var extra any
+	if decoder.Decode(&persisted) != nil || decoder.Decode(&extra) != io.EOF || persisted.Schema != "paperboat.jwks-cache/v1" || persisted.ValidatedAt.IsZero() {
+		return
+	}
+	now := c.config.Clock.Now()
+	if persisted.ValidatedAt.After(now.Add(time.Minute)) || !now.Before(persisted.ValidatedAt.Add(c.config.TTL)) {
+		return
+	}
+	keys, err := decodeJWKS(persisted.Document, c.config.MaxKeys)
+	if err != nil {
+		return
+	}
+	expiresAt := persisted.ValidatedAt.Add(c.config.TTL)
+	for keyID, key := range keys {
+		c.keys[keyID] = cachedKey{key: key, expiresAt: expiresAt}
+	}
+}
+
+func (c *JWKSCache) persist(document []byte, validatedAt time.Time) error {
+	path := c.config.PersistencePath
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return ErrJWKSInvalid
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrJWKSInvalid
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return err
+	}
+	body, err := json.Marshal(persistedJWKS{Schema: "paperboat.jwks-cache/v1", ValidatedAt: validatedAt.UTC(), Document: append(json.RawMessage(nil), document...)})
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".jwks-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(body); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 type jwksDocument struct {

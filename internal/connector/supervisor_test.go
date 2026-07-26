@@ -32,6 +32,20 @@ type recordingWaiter struct {
 	delays []time.Duration
 }
 
+type supervisorMetric struct {
+	mu       sync.Mutex
+	recovery float64
+}
+
+func (m *supervisorMetric) Record(name string, value float64, _ map[string]string) error {
+	if name == "paperboat_helper_connector_recovery_seconds" {
+		m.mu.Lock()
+		m.recovery = value
+		m.mu.Unlock()
+	}
+	return nil
+}
+
 func (w *recordingWaiter) Wait(ctx context.Context, delay time.Duration, wake <-chan struct{}) error {
 	w.mu.Lock()
 	w.delays = append(w.delays, delay)
@@ -71,7 +85,8 @@ func TestSupervisorFetchesFreshAdmissionWithCappedBackoffAndReconnects(t *testin
 	manager := manager(t, dialer, now)
 	source := &admissionSource{now: now, calls: make(chan uint64, 16)}
 	waits := &recordingWaiter{}
-	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source, InitialBackoff: time.Second, MaxBackoff: 2 * time.Second, Jitter: 0.1, RandomFloat: func() float64 { return 0.5 }, Waiter: waits})
+	metric := &supervisorMetric{}
+	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source, InitialBackoff: time.Second, MaxBackoff: 2 * time.Second, Jitter: 0.1, RandomFloat: func() float64 { return 0.5 }, Waiter: waits, Metrics: metric})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +108,12 @@ func TestSupervisorFetchesFreshAdmissionWithCappedBackoffAndReconnects(t *testin
 			source.mu.Unlock()
 			t.Fatalf("connector did not recover: status=%#v dial_calls=%d admissions=%d", manager.Status(), calls, generation)
 		}
+	}
+	metric.mu.Lock()
+	recovery := metric.recovery
+	metric.mu.Unlock()
+	if recovery <= 0 {
+		t.Fatalf("connector recovery metric=%v", recovery)
 	}
 	first := manager.Status().Generation
 	dialer.mu.Lock()

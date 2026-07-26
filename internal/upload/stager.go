@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -139,7 +140,7 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	if !safeSegment(request.EnvironmentID) || !safeName(request.DisplayName) {
 		return Result{}, &Error{Code: InvalidPath}
 	}
-	if _, ok := mimeExtensions[request.DeclaredMIME]; !ok {
+	if !validImageMIME(request.DeclaredMIME) {
 		return Result{}, &Error{Code: MIMEMismatch}
 	}
 	directory := filepath.Join(s.config.Root, request.EnvironmentID)
@@ -182,8 +183,8 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	if request.ExpectedSHA256 != "" && (!validSHA256(request.ExpectedSHA256) || digest != request.ExpectedSHA256) {
 		return Result{}, &Error{Code: InvalidSize, Cause: errors.New("content digest mismatch")}
 	}
-	detected := http.DetectContentType(header.bytes)
-	if detected != request.DeclaredMIME {
+	detected := detectImageMIME(header.bytes)
+	if detected != "application/octet-stream" && detected != request.DeclaredMIME {
 		return Result{}, &Error{Code: MIMEMismatch}
 	}
 	if err = temporary.Sync(); err != nil {
@@ -196,7 +197,7 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	if _, err = io.ReadFull(s.config.Random, random[:]); err != nil {
 		return Result{}, &Error{Code: StorageUnavailable, Cause: err}
 	}
-	filename := hex.EncodeToString(random[:]) + mimeExtensions[detected]
+	filename := hex.EncodeToString(random[:]) + stagedExtension(request.DisplayName)
 	publishedPath = filepath.Join(directory, filename)
 	if err = os.Link(tempPath, publishedPath); err != nil {
 		return Result{}, &Error{Code: StorageUnavailable, Cause: err}
@@ -206,7 +207,7 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 		expires = request.CredentialExpiry
 	}
 	relative := filepath.Join(request.EnvironmentID, filename)
-	result = Result{Path: relative, MIME: detected, Bytes: written, SHA256: digest, ExpiresAt: expires}
+	result = Result{Path: relative, MIME: request.DeclaredMIME, Bytes: written, SHA256: digest, ExpiresAt: expires}
 	meta := metadata{Path: relative, MIME: detected, Bytes: written, SHA256: result.SHA256, ExpiresAt: expires}
 	metaBytes, marshalErr := json.Marshal(meta)
 	if marshalErr != nil {
@@ -503,8 +504,7 @@ func rejectDuplicateJSON(data []byte) error {
 }
 
 func (s *Stager) validMetadataFile(meta metadata) bool {
-	extension, supported := mimeExtensions[meta.MIME]
-	if !supported || filepath.Ext(meta.Path) != extension || meta.Bytes < 1 || meta.Bytes > s.config.MaxBytes || !validSHA256(meta.SHA256) || meta.ExpiresAt.IsZero() {
+	if !validImageMIME(meta.MIME) || meta.Bytes < 1 || meta.Bytes > s.config.MaxBytes || !validSHA256(meta.SHA256) || meta.ExpiresAt.IsZero() {
 		return false
 	}
 	path := filepath.Join(s.config.Root, meta.Path)
@@ -527,10 +527,37 @@ func (s *Stager) validMetadataFile(meta metadata) bool {
 	hash := sha256.New()
 	header := &prefixWriter{max: 512}
 	read, err := io.Copy(io.MultiWriter(hash, header), io.LimitReader(file, s.config.MaxBytes+1))
-	return err == nil && read == meta.Bytes && read <= s.config.MaxBytes && hex.EncodeToString(hash.Sum(nil)) == meta.SHA256 && http.DetectContentType(header.bytes) == meta.MIME
+	detected := detectImageMIME(header.bytes)
+	return err == nil && read == meta.Bytes && read <= s.config.MaxBytes && hex.EncodeToString(hash.Sum(nil)) == meta.SHA256 && (detected == "application/octet-stream" || detected == meta.MIME)
 }
 
-var mimeExtensions = map[string]string{"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+func detectImageMIME(header []byte) string {
+	// TIFF is a common macOS clipboard representation but is not covered by
+	// net/http's MIME sniffer. Both byte orders have a fixed four-byte header.
+	if len(header) >= 4 && (bytes.Equal(header[:4], []byte{'I', 'I', 0x2a, 0x00}) ||
+		bytes.Equal(header[:4], []byte{'M', 'M', 0x00, 0x2a})) {
+		return "image/tiff"
+	}
+	return http.DetectContentType(header)
+}
+
+func validImageMIME(value string) bool {
+	mediaType, params, err := mime.ParseMediaType(value)
+	return err == nil && len(params) == 0 && mediaType == value && strings.HasPrefix(mediaType, "image/") && len(mediaType) > len("image/")
+}
+
+func stagedExtension(name string) string {
+	extension := strings.ToLower(filepath.Ext(name))
+	if len(extension) < 2 || len(extension) > 17 {
+		return ""
+	}
+	for _, char := range extension[1:] {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return ""
+		}
+	}
+	return extension
+}
 
 func safeName(name string) bool {
 	return name != "" && !strings.ContainsRune(name, '\x00') && !filepath.IsAbs(name) && filepath.Base(name) == name && !strings.ContainsAny(name, "/\\") && name != "." && name != ".."

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 func TestGenerateProducesManifestAcceptedByBootstrap(t *testing.T) {
 	root := t.TempDir()
 	artifactPath := filepath.Join(root, "paperboat-helper-linux-amd64")
-	if err := os.WriteFile(artifactPath, []byte("helper-binary"), 0o700); err != nil {
+	if err := os.WriteFile(artifactPath, executableHeader(runtime.GOOS, runtime.GOARCH), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -28,7 +29,7 @@ func TestGenerateProducesManifestAcceptedByBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestPath, publicPath := filepath.Join(root, "artifacts.json"), filepath.Join(root, "public-key")
-	if err := generate(artifactPath, keyPath, "0.0.0-development", runtime.GOOS, runtime.GOARCH, "https://downloads.example.test/paperboat-helper", manifestPath, publicPath); err != nil {
+	if err := generate(artifactPath, keyPath, "0.0.0-development", runtime.GOOS, runtime.GOARCH, "worker", "https://downloads.example.test/paperboat-helper", manifestPath, publicPath); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := os.ReadFile(manifestPath)
@@ -51,6 +52,42 @@ func TestGenerateProducesManifestAcceptedByBootstrap(t *testing.T) {
 	}
 }
 
+func executableHeader(platform, architecture string) []byte {
+	header := make([]byte, 32)
+	if platform == "linux" {
+		copy(header, "\x7fELF")
+		header[4], header[5] = 2, 1
+		machine := uint16(62)
+		if architecture == "arm64" {
+			machine = 183
+		}
+		binary.LittleEndian.PutUint16(header[18:20], machine)
+		return header
+	}
+	binary.LittleEndian.PutUint32(header[:4], 0xfeedfacf)
+	cpu := uint32(0x01000007)
+	if architecture == "arm64" {
+		cpu = 0x0100000c
+	}
+	binary.LittleEndian.PutUint32(header[4:8], cpu)
+	return header
+}
+
+func TestGenerateRejectsMislabeledExecutableTarget(t *testing.T) {
+	root := t.TempDir()
+	artifactPath := filepath.Join(root, "artifact")
+	if err := os.WriteFile(artifactPath, executableHeader("darwin", "arm64"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(root, "key")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SeedSize))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := generate(artifactPath, keyPath, "dev", "linux", "amd64", "worker", "https://downloads.example.test/artifact", filepath.Join(root, "manifest"), filepath.Join(root, "public")); err == nil {
+		t.Fatal("mislabeled executable target accepted")
+	}
+}
+
 func TestGenerateRejectsWeakPrivateKeyPermissions(t *testing.T) {
 	root := t.TempDir()
 	artifactPath, keyPath := filepath.Join(root, "artifact"), filepath.Join(root, "key")
@@ -60,7 +97,7 @@ func TestGenerateRejectsWeakPrivateKeyPermissions(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SeedSize))), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := generate(artifactPath, keyPath, "dev", "linux", "amd64", "https://downloads.example.test/artifact", filepath.Join(root, "manifest"), filepath.Join(root, "public")); err == nil {
+	if err := generate(artifactPath, keyPath, "dev", "linux", "amd64", "worker", "https://downloads.example.test/artifact", filepath.Join(root, "manifest"), filepath.Join(root, "public")); err == nil {
 		t.Fatal("weak private-key permissions accepted")
 	}
 }

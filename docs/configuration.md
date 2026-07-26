@@ -21,8 +21,9 @@ preview targets, eight concurrent target probes, 32 concurrent protocol operatio
 hard bounds. Startup rejects zero, partial, or excessive values; saturation returns a typed
 resource limit before side effects or unbounded body reads.
 
-The state root owns SQLite session/history/input/operation records, update journals, and
-scoped generated artifacts. Direct database edits, cross-version copying without the
+The enrolled user's state root owns SQLite session/history/input/operation records and
+scoped generated artifacts. Root-owned availability, install, and update journals live in
+`/var/lib/paperboat` on Linux or `/Library/Application Support/Paperboat` on macOS. Direct database edits, cross-version copying without the
 compatibility gate, symlinked roots, and group/world-writable executables are unsupported.
 Backups must capture SQLite database/WAL/SHM consistently while helper writes are stopped.
 
@@ -58,9 +59,10 @@ oversized responses, unknown or duplicate JSON
 fields, and trailing data fail closed.
 
 Successful enrollment atomically writes `runtime-identity.json` with mode `0600`. Runtime
-credential reads require an unexpired identity whose `key_id` still matches
-`helper-identity.json`; key rotation therefore requires a new enrollment. Neither the
-grant nor the resulting bearer credential is printed by the command.
+credential renewal uses a fresh, exactly bound Ed25519 proof and the server's active stored
+public key; it does not require an unexpired bearer credential. Revoked, replaced, or
+thumbprint-mismatched helpers remain rejected. Neither the grant nor the resulting bearer
+credential is printed by the command.
 
 `pbh run` is the production hosted daemon. On first boot it may consume the
 one-time `PAPERBOAT_ENROLLMENT_CREDENTIAL`; subsequent boots load the volume-backed runtime
@@ -69,13 +71,21 @@ verifies operation and connector credentials, waits for an admitted frp route be
 reporting ready, and removes the enrollment credential from the process environment after
 exchange. `PAPERBOAT_CONTROL_CA_FILE` may add a private TLS 1.3 trust anchor.
 
-BYOD never advertises hosted lifecycle. Config application additionally requires an active
+BYOD runs from a systemd system unit or macOS LaunchDaemon, but the worker process uses the
+enrolled UID/GID. It does not depend on linger or a GUI login. A separate root host service
+accepts only typed requests from that UID over a peer-authenticated Unix socket. BYOD never advertises hosted lifecycle. Config application additionally requires an active
 assignment and proof of the current warning consent. Optional capability failure degrades
 only that readiness entry; liveness reports only whether the process can answer.
 
 Normal diagnostics contain version/profile, safe capability states, bounded queue counts,
 and correlation IDs. They intentionally exclude tokens/claims, terminal/config bytes,
 signed URLs, filenames beyond scoped display forms, and private local paths.
+
+The same numeric loopback listener exposes Prometheus text at `GET /metrics`. It includes
+bounded-label operation/resource series plus worker generation, credential-renewal
+failures, connector retries, and the most recent connector recovery duration. It is not a
+public endpoint and must be collected on the enrolled host without proxying it through the
+Paperboat route.
 
 ## Runtime HTTP Boundaries
 

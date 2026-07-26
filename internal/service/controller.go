@@ -57,47 +57,65 @@ func (w *boundedCommandOutput) Write(data []byte) (int, error) {
 }
 func (w *boundedCommandOutput) String() string { return string(w.bytes) }
 
-type SystemdController struct{ Runner Runner }
+type SystemdController struct {
+	Runner Runner
+	Unit   string
+}
+
+func (c SystemdController) unit() string {
+	if c.Unit != "" {
+		return c.Unit
+	}
+	return "paperboat-helper.service"
+}
 
 func (c SystemdController) Apply(ctx context.Context, _ string, upgrading bool) error {
 	if c.Runner == nil {
 		return ErrInvalidDefinition
 	}
-	if err := c.Runner.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
+	if err := c.Runner.Run(ctx, "systemctl", "daemon-reload"); err != nil {
 		return err
 	}
-	if err := c.Runner.Run(ctx, "systemctl", "--user", "enable", "--now", "paperboat-helper.service"); err != nil {
+	if err := c.Runner.Run(ctx, "systemctl", "enable", "--now", c.unit()); err != nil {
 		return err
 	}
 	if upgrading {
-		if err := c.Runner.Run(ctx, "systemctl", "--user", "restart", "paperboat-helper.service"); err != nil {
+		if err := c.Runner.Run(ctx, "systemctl", "restart", c.unit()); err != nil {
 			return err
 		}
 	}
-	return c.Runner.Run(ctx, "systemctl", "--user", "is-active", "--quiet", "paperboat-helper.service")
+	return c.Runner.Run(ctx, "systemctl", "is-active", "--quiet", c.unit())
 }
 
 func (c SystemdController) Remove(ctx context.Context, _ string) error {
 	if c.Runner == nil {
 		return ErrInvalidDefinition
 	}
-	if err := c.Runner.Run(ctx, "systemctl", "--user", "disable", "--now", "paperboat-helper.service"); err != nil {
+	if err := c.Runner.Run(ctx, "systemctl", "disable", "--now", c.unit()); err != nil {
 		return err
 	}
-	return c.Runner.Run(ctx, "systemctl", "--user", "daemon-reload")
+	return c.Runner.Run(ctx, "systemctl", "daemon-reload")
 }
 
 type LaunchdController struct {
 	Runner Runner
 	UID    int
+	Label  string
+}
+
+func (c LaunchdController) label() string {
+	if c.Label != "" {
+		return c.Label
+	}
+	return Label
 }
 
 func (c LaunchdController) Apply(ctx context.Context, path string, upgrading bool) error {
 	if c.Runner == nil || c.UID < 0 {
 		return ErrInvalidDefinition
 	}
-	domain := fmt.Sprintf("gui/%d", c.UID)
-	service := domain + "/" + Label
+	domain := "system"
+	service := domain + "/" + c.label()
 	if upgrading {
 		if err := c.Runner.Run(ctx, "launchctl", "bootout", service); err != nil && !strings.Contains(err.Error(), "No such process") {
 			return err
@@ -131,7 +149,7 @@ func (c LaunchdController) Remove(ctx context.Context, _ string) error {
 	if c.Runner == nil || c.UID < 0 {
 		return ErrInvalidDefinition
 	}
-	err := c.Runner.Run(ctx, "launchctl", "bootout", fmt.Sprintf("gui/%d/%s", c.UID, Label))
+	err := c.Runner.Run(ctx, "launchctl", "bootout", "system/"+c.label())
 	if err != nil && strings.Contains(err.Error(), "No such process") {
 		return nil
 	}

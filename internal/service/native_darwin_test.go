@@ -35,18 +35,14 @@ func TestNativeLaunchdInstallUpgradeAndUninstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	definitionPath := filepath.Join(home, "Library", "LaunchAgents", Label+".plist")
+	definitionPath := filepath.Join("/Library", "LaunchDaemons", Label+".plist")
 	if _, err := os.Lstat(definitionPath); err == nil {
 		t.Fatalf("refusing to replace existing service definition %s", definitionPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 	installer, err := New(Config{
-		Platform: "darwin", ConfigRoot: home, Executable: executable,
+		Platform: "darwin", ConfigRoot: "/", Executable: executable, User: os.Getenv("USER"), Group: "staff",
 		Arguments:   []string{"-test.run=^TestNativeLaunchdServiceProcess$", "-test.v"},
 		Environment: map[string]string{"PAPERBOAT_NATIVE_SERVICE_CHILD": "1"},
 		Controller:  LaunchdController{Runner: ExecRunner{}, UID: os.Getuid()},
