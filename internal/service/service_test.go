@@ -53,7 +53,7 @@ func TestSystemdInstallUpgradeAndUninstallAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(first), "ExecStart=") || !strings.Contains(string(first), "NoNewPrivileges=true") || strings.Contains(string(first), "ProtectHome") {
+	if !strings.Contains(string(first), "ExecStart=") || !strings.Contains(string(first), "NoNewPrivileges=false") || strings.Contains(string(first), "ProtectHome") {
 		t.Fatalf("definition=%s", first)
 	}
 	info, _ := os.Stat(installer.DefinitionPath())
@@ -145,7 +145,7 @@ func TestHostServiceDefinitionsRunAsRootInBootDomain(t *testing.T) {
 			}
 			definition := string(body)
 			if platform == "linux" {
-				if !strings.HasSuffix(installer.DefinitionPath(), "/etc/systemd/system/paperboat-host-service.service") || !strings.Contains(definition, "User=root\nGroup=root") || !strings.Contains(definition, "WantedBy=multi-user.target") {
+				if !strings.HasSuffix(installer.DefinitionPath(), "/etc/systemd/system/paperboat-host-service.service") || !strings.Contains(definition, "User=root\nGroup=root") || !strings.Contains(definition, "NoNewPrivileges=true") || !strings.Contains(definition, "WantedBy=multi-user.target") {
 					t.Fatalf("path=%s definition=%s", installer.DefinitionPath(), definition)
 				}
 			} else if !strings.HasSuffix(installer.DefinitionPath(), "/Library/LaunchDaemons/"+HostLabel+".plist") || !strings.Contains(definition, "<string>"+HostLabel+"</string>") || !strings.Contains(definition, "<key>UserName</key>") {

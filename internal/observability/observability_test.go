@@ -88,8 +88,10 @@ func TestDefaultMetricVocabularyHasFixedCardinality(t *testing.T) {
 		name   string
 		labels map[string]string
 	}{
-		{"paperboat_helper_operations_total", map[string]string{"component": "activity", "result": "replayed"}},
+		{"paperboat_helper_operations_total", map[string]string{"component": "session", "result": "replayed"}},
 		{"paperboat_helper_connector_retries_total", map[string]string{"transport": "quic", "result": "connected"}},
+		{"paperboat_helper_connector_retries_total", map[string]string{"transport": "tcp_dedicated", "result": "connected"}},
+		{"paperboat_helper_connector_retries_total", map[string]string{"transport": "tcp_mux", "result": "connected"}},
 		{"paperboat_helper_terminal_events_total", map[string]string{"event": "slow_consumer"}},
 		{"paperboat_helper_delivery_total", map[string]string{"kind": "preview", "result": "failed"}},
 		{"paperboat_helper_cleanup_total", map[string]string{"kind": "upload", "result": "preserved"}},
@@ -109,8 +111,8 @@ func TestDefaultMetricVocabularyHasFixedCardinality(t *testing.T) {
 
 func TestDiagnosticsAreBoundedAndRejectPrivateFields(t *testing.T) {
 	checked := time.Now().UTC()
-	snapshot := health.Snapshot{Live: true, Version: "1.0.0", CheckedAt: checked, Capabilities: map[string]health.Capability{"terminal.v1": {State: health.Ready}}}
-	encoded, err := BuildDiagnostics("1.0.0", "byod", snapshot, map[string]uint64{"activity_events": 2}, []string{"req_1"}, 4096)
+	snapshot := health.Snapshot{Live: true, Version: "1.0.0", CheckedAt: checked, Capabilities: map[string]health.Capability{"terminal.v2": {State: health.Ready}}}
+	encoded, err := BuildDiagnostics("1.0.0", "byod", snapshot, map[string]uint64{"attachment_bytes": 2}, []string{"req_1"}, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}

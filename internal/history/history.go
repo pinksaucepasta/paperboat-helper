@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
 var (
@@ -18,6 +20,51 @@ type Event struct {
 	StartSequence uint64 `json:"start_sequence"`
 	EndSequence   uint64 `json:"end_sequence"`
 	Data          []byte `json:"bytes_base64"`
+	owner         *ownedBuffer
+}
+
+const PooledBufferSize = 32 << 10
+
+type pooledBuffer [PooledBufferSize]byte
+
+var bufferPool = sync.Pool{New: func() any { return new(pooledBuffer) }}
+var ownerPool = sync.Pool{New: func() any { return new(ownedBuffer) }}
+
+type ownedBuffer struct {
+	data []byte
+	refs atomic.Int64
+	pool bool
+}
+
+func AcquireBuffer() []byte { return bufferPool.Get().(*pooledBuffer)[:] }
+
+func ReleaseBuffer(buffer []byte) {
+	if cap(buffer) == PooledBufferSize {
+		bufferPool.Put((*pooledBuffer)(unsafe.Pointer(&buffer[:PooledBufferSize][0])))
+	}
+}
+
+// AppendBuffer transfers ownership of a buffer obtained from AcquireBuffer.
+func (h *History) AppendBuffer(channel byte, data []byte) (Event, error) {
+	return h.appendOwned(channel, data, true, true)
+}
+
+func (e Event) Retain() Event {
+	if e.owner != nil {
+		e.owner.refs.Add(1)
+	}
+	return e
+}
+
+func (e Event) Release() {
+	if e.owner != nil && e.owner.refs.Add(-1) == 0 {
+		if e.owner.pool {
+			ReleaseBuffer(e.owner.data)
+		}
+		e.owner.data = nil
+		e.owner.pool = false
+		ownerPool.Put(e.owner)
+	}
 }
 
 type GapError struct {
@@ -38,6 +85,12 @@ type Replay struct {
 	Events           []Event `json:"events"`
 }
 
+func (r Replay) Release() {
+	for _, event := range r.Events {
+		event.Release()
+	}
+}
+
 type History struct {
 	mu       sync.RWMutex
 	maxBytes uint64
@@ -45,6 +98,7 @@ type History struct {
 	earliest uint64
 	latest   uint64
 	events   []Event
+	head     int
 	acks     map[string]uint64
 }
 
@@ -77,21 +131,45 @@ func Restore(maxBytes, earliest, latest uint64, events []Event) (*History, error
 }
 
 func (h *History) Append(channel byte, data []byte) (Event, error) {
+	event, err := h.AppendOwned(channel, data)
+	return cloneEvent(event), err
+}
+
+// AppendOwned copies data once into immutable history ownership and returns a
+// reference that internal fanout and persistence consumers may share.
+func (h *History) AppendOwned(channel byte, data []byte) (Event, error) {
+	return h.appendOwned(channel, append([]byte(nil), data...), false, false)
+}
+
+func (h *History) appendOwned(channel byte, data []byte, pooled, producerReference bool) (Event, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(data) == 0 {
+		if pooled {
+			ReleaseBuffer(data)
+		}
 		return Event{Channel: channel, StartSequence: h.latest, EndSequence: h.latest}, nil
 	}
 	if uint64(len(data)) > math.MaxUint64-h.latest {
+		if pooled {
+			ReleaseBuffer(data)
+		}
 		return Event{}, ErrSequenceFull
 	}
-	owned := append([]byte(nil), data...)
-	event := Event{Channel: channel, StartSequence: h.latest, EndSequence: h.latest + uint64(len(owned)), Data: owned}
+	owner := ownerPool.Get().(*ownedBuffer)
+	owner.data = data
+	owner.pool = pooled
+	refs := int64(1)
+	if producerReference {
+		refs++
+	}
+	owner.refs.Store(refs)
+	event := Event{Channel: channel, StartSequence: h.latest, EndSequence: h.latest + uint64(len(data)), Data: data, owner: owner}
 	h.latest = event.EndSequence
-	h.bytes += uint64(len(owned))
+	h.bytes += uint64(len(data))
 	h.events = append(h.events, event)
 	h.compactLocked()
-	return cloneEvent(event), nil
+	return event, nil
 }
 
 func (h *History) SetLimit(maxBytes uint64) error {
@@ -108,13 +186,33 @@ func (h *History) SetLimit(maxBytes uint64) error {
 func (h *History) Clear() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.events = nil
+	for _, event := range h.events[h.head:] {
+		event.Release()
+	}
+	clear(h.events)
+	h.events = h.events[:0]
+	h.head = 0
 	h.bytes = 0
 	h.earliest = h.latest
 	return h.latest
 }
 
 func (h *History) Replay(fromSequence, byteLimit uint64) (Replay, error) {
+	replay, err := h.ReplayOwned(fromSequence, byteLimit)
+	if err != nil {
+		return Replay{}, err
+	}
+	for index := range replay.Events {
+		owned := replay.Events[index]
+		replay.Events[index] = cloneEvent(owned)
+		owned.Release()
+	}
+	return replay, nil
+}
+
+// ReplayOwned returns immutable references retained by history. References
+// remain valid after compaction because consumers keep the backing arrays live.
+func (h *History) ReplayOwned(fromSequence, byteLimit uint64) (Replay, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	result := Replay{FromSequence: fromSequence, ToSequence: fromSequence, EarliestSequence: h.earliest, LatestSequence: h.latest}
@@ -125,7 +223,7 @@ func (h *History) Replay(fromSequence, byteLimit uint64) (Replay, error) {
 		return Replay{}, ErrInvalidCursor
 	}
 	remaining := byteLimit
-	for _, event := range h.events {
+	for _, event := range h.events[h.head:] {
 		if event.EndSequence <= fromSequence {
 			continue
 		}
@@ -137,7 +235,11 @@ func (h *History) Replay(fromSequence, byteLimit uint64) (Replay, error) {
 		if end > start {
 			offsetStart := start - event.StartSequence
 			offsetEnd := end - event.StartSequence
-			result.Events = append(result.Events, Event{Channel: event.Channel, StartSequence: start, EndSequence: end, Data: append([]byte(nil), event.Data[offsetStart:offsetEnd]...)})
+			retained := event.Retain()
+			retained.StartSequence = start
+			retained.EndSequence = end
+			retained.Data = event.Data[offsetStart:offsetEnd]
+			result.Events = append(result.Events, retained)
 			result.ToSequence = end
 			if byteLimit > 0 {
 				remaining -= end - start
@@ -174,19 +276,23 @@ func (h *History) Bounds() (earliest, latest, retainedBytes uint64) {
 }
 
 func (h *History) compactLocked() {
-	for h.bytes > h.maxBytes && len(h.events) > 0 {
-		event := h.events[0]
+	for h.bytes > h.maxBytes && h.head < len(h.events) {
+		event := h.events[h.head]
 		h.bytes -= uint64(len(event.Data))
 		h.earliest = event.EndSequence
-		h.events[0] = Event{}
-		h.events = h.events[1:]
+		h.events[h.head] = Event{}
+		h.head++
+		event.Release()
 	}
-	if len(h.events) == 0 {
+	if h.head == len(h.events) {
 		h.earliest = h.latest
+		h.events = h.events[:0]
+		h.head = 0
 	}
 }
 
 func cloneEvent(event Event) Event {
 	event.Data = append([]byte(nil), event.Data...)
+	event.owner = nil
 	return event
 }

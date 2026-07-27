@@ -133,7 +133,7 @@ func TestRuntimeOrdersHTTPAdmissionBeforeConnectionServerShutdown(t *testing.T) 
 	connectionServer := &orderedService{name: "connection_server", order: &order}
 	httpAdmission := &orderedService{name: "http_admission", order: &order}
 	runtime, err := NewRuntime(Config{Version: "test", Clock: health.RealClock{}, Components: []Component{
-		{Capability: "terminal.v1", Required: true, Service: connectionServer},
+		{Capability: "terminal.v2", Required: true, Service: connectionServer},
 		{Capability: "health.v1", Required: true, Service: httpAdmission},
 	}})
 	if err != nil {

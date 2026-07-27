@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/history"
@@ -23,24 +25,27 @@ type Eviction struct {
 	Reason       string
 }
 
-type outputQueue struct {
-	mu           sync.Mutex
+type attachmentCursor struct {
 	state        AttachmentState
 	maxBytes     uint64
 	queuedBytes  uint64
-	events       []history.Event
-	next         uint64
-	hasNext      bool
-	notify       chan struct{}
 	evictedBytes uint64
+	cursor       uint64
+	enqueuedEnd  uint64
+	hasCursor    bool
+	notify       chan struct{}
 }
 
+// Fanout retains one ordered ring of immutable chunks. Attachments track only
+// sequence cursors and byte counts; they never own per-client event slices.
 type Fanout struct {
-	mu          sync.RWMutex
-	attachments map[string]*outputQueue
+	mu          sync.Mutex
+	attachments map[string]*attachmentCursor
+	active      sync.Map
+	ring        []history.Event
 }
 
-func NewFanout() *Fanout { return &Fanout{attachments: make(map[string]*outputQueue)} }
+func NewFanout() *Fanout { return &Fanout{attachments: make(map[string]*attachmentCursor)} }
 
 func (f *Fanout) Attach(attachmentID string, maxPendingBytes uint64) error {
 	if attachmentID == "" || maxPendingBytes == 0 {
@@ -48,176 +53,186 @@ func (f *Fanout) Attach(attachmentID string, maxPendingBytes uint64) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if existing, exists := f.attachments[attachmentID]; exists {
-		existing.mu.Lock()
-		state := existing.state
-		existing.mu.Unlock()
-		if state == Attached {
-			return ErrAttachmentExists
-		}
+	if existing := f.attachments[attachmentID]; existing != nil && existing.state == Attached {
+		return ErrAttachmentExists
 	}
-	f.attachments[attachmentID] = &outputQueue{state: Attached, maxBytes: maxPendingBytes, notify: make(chan struct{}, 1)}
+	f.attachments[attachmentID] = &attachmentCursor{state: Attached, maxBytes: maxPendingBytes, notify: make(chan struct{}, 1)}
+	f.active.Store(attachmentID, struct{}{})
 	return nil
 }
 
 func (f *Fanout) Detach(attachmentID string) error {
 	f.mu.Lock()
-	queue, ok := f.attachments[attachmentID]
+	defer f.mu.Unlock()
+	cursor, ok := f.attachments[attachmentID]
 	if !ok {
-		f.mu.Unlock()
 		return ErrAttachmentUnknown
 	}
-	queue.mu.Lock()
-	defer func() { queue.mu.Unlock(); f.mu.Unlock() }()
-	if queue.state != Attached && queue.state != Evicted {
+	if cursor.state != Attached && cursor.state != Evicted {
 		return ErrInvalidTransition
 	}
-	queue.state = Detached
-	queue.events = nil
-	queue.queuedBytes = 0
-	notify(queue.notify)
+	cursor.state = Detached
+	f.active.Delete(attachmentID)
+	notify(cursor.notify)
 	delete(f.attachments, attachmentID)
+	f.compactLocked()
 	return nil
 }
 
 func (f *Fanout) Count() int {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	count := 0
-	for _, queue := range f.attachments {
-		queue.mu.Lock()
-		if queue.state == Attached {
+	for _, cursor := range f.attachments {
+		if cursor.state == Attached {
 			count++
 		}
-		queue.mu.Unlock()
 	}
 	return count
 }
 
+// IsAttached is lock-free so terminal input never waits behind output fanout.
+func (f *Fanout) IsAttached(attachmentID string) bool {
+	_, ok := f.active.Load(attachmentID)
+	return ok
+}
+
 func (f *Fanout) Publish(event history.Event) ([]Eviction, error) {
-	if event.EndSequence < event.StartSequence || event.EndSequence-event.StartSequence != uint64(len(event.Data)) {
+	event.Data = append([]byte(nil), event.Data...)
+	return f.PublishOwned(event)
+}
+
+func (f *Fanout) PublishOwned(event history.Event) ([]Eviction, error) {
+	if !validOutputEvent(event) {
 		return nil, ErrOutputOrder
 	}
-	owned := event
-	owned.Data = append([]byte(nil), event.Data...)
-	// Publish serializes all attachment queues so every non-evicted attachment
-	// observes the same output order.
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	queues := make([]struct {
-		id string
-		q  *outputQueue
-	}, 0, len(f.attachments))
-	for id, queue := range f.attachments {
-		queue.mu.Lock()
-		queues = append(queues, struct {
-			id string
-			q  *outputQueue
-		}{id, queue})
-	}
-	defer func() {
-		for _, item := range queues {
-			item.q.mu.Unlock()
-		}
-	}()
-	for _, item := range queues {
-		if item.q.state == Attached && item.q.hasNext && item.q.next != event.StartSequence {
-			return nil, fmt.Errorf("attachment %s expected %d, got %d: %w", item.id, item.q.next, event.StartSequence, ErrOutputOrder)
+	for id, cursor := range f.attachments {
+		if cursor.state == Attached && cursor.hasCursor && cursor.enqueuedEnd != event.StartSequence {
+			return nil, fmt.Errorf("attachment %s expected %d, got %d: %w", id, cursor.enqueuedEnd, event.StartSequence, ErrOutputOrder)
 		}
 	}
+	f.insertEventLocked(event)
 	var evictions []Eviction
-	for _, item := range queues {
-		queue := item.q
-		if queue.state != Attached {
+	for id, cursor := range f.attachments {
+		if cursor.state != Attached {
 			continue
 		}
-		if uint64(len(owned.Data)) > queue.maxBytes-queue.queuedBytes {
-			evictions = append(evictions, Eviction{AttachmentID: item.id, QueuedBytes: queue.queuedBytes, Reason: "slow_consumer"})
-			queue.evictedBytes = queue.queuedBytes
-			queue.state = Evicted
-			queue.events = nil
-			queue.queuedBytes = 0
-			notify(queue.notify)
+		if uint64(len(event.Data)) > cursor.maxBytes-cursor.queuedBytes {
+			evictions = append(evictions, Eviction{AttachmentID: id, QueuedBytes: cursor.queuedBytes, Reason: "slow_consumer"})
+			cursor.evictedBytes = cursor.queuedBytes
+			cursor.queuedBytes = 0
+			cursor.state = Evicted
+			f.active.Delete(id)
+			notify(cursor.notify)
 			continue
 		}
-		queue.events = append(queue.events, owned)
-		queue.queuedBytes += uint64(len(owned.Data))
-		queue.next = owned.EndSequence
-		queue.hasNext = true
-		notify(queue.notify)
+		if !cursor.hasCursor {
+			cursor.cursor = event.StartSequence
+			cursor.hasCursor = true
+		}
+		cursor.enqueuedEnd = event.EndSequence
+		cursor.queuedBytes += uint64(len(event.Data))
+		notify(cursor.notify)
 	}
+	f.compactLocked()
 	return evictions, nil
 }
 
-// Enqueue adds replay output to one attachment without rebroadcasting it to
-// attachments that have already received the same sequence range.
 func (f *Fanout) Enqueue(attachmentID string, event history.Event) (*Eviction, error) {
-	if event.EndSequence < event.StartSequence || event.EndSequence-event.StartSequence != uint64(len(event.Data)) {
+	event.Data = append([]byte(nil), event.Data...)
+	return f.EnqueueOwned(attachmentID, event)
+}
+
+func (f *Fanout) EnqueueOwned(attachmentID string, event history.Event) (*Eviction, error) {
+	if !validOutputEvent(event) {
 		return nil, ErrOutputOrder
 	}
-	f.mu.RLock()
-	queue, ok := f.attachments[attachmentID]
-	f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cursor, ok := f.attachments[attachmentID]
 	if !ok {
 		return nil, ErrAttachmentUnknown
 	}
-	queue.mu.Lock()
-	defer queue.mu.Unlock()
-	if queue.state != Attached {
-		if queue.state == Evicted {
-			return nil, ErrAttachmentEvicted
-		}
+	if cursor.state == Evicted {
+		return nil, ErrAttachmentEvicted
+	}
+	if cursor.state != Attached {
 		return nil, ErrInvalidTransition
 	}
-	if queue.hasNext && queue.next != event.StartSequence {
+	if cursor.hasCursor && cursor.enqueuedEnd != event.StartSequence {
 		return nil, ErrOutputOrder
 	}
-	if uint64(len(event.Data)) > queue.maxBytes-queue.queuedBytes {
-		eviction := &Eviction{AttachmentID: attachmentID, QueuedBytes: queue.queuedBytes, Reason: "slow_consumer"}
-		queue.evictedBytes = queue.queuedBytes
-		queue.state = Evicted
-		queue.events = nil
-		queue.queuedBytes = 0
-		notify(queue.notify)
+	if uint64(len(event.Data)) > cursor.maxBytes-cursor.queuedBytes {
+		eviction := &Eviction{AttachmentID: attachmentID, QueuedBytes: cursor.queuedBytes, Reason: "slow_consumer"}
+		cursor.evictedBytes = cursor.queuedBytes
+		cursor.queuedBytes = 0
+		cursor.state = Evicted
+		f.active.Delete(attachmentID)
+		notify(cursor.notify)
+		f.compactLocked()
 		return eviction, nil
 	}
-	event.Data = append([]byte(nil), event.Data...)
-	queue.events = append(queue.events, event)
-	queue.queuedBytes += uint64(len(event.Data))
-	queue.next = event.EndSequence
-	queue.hasNext = true
-	notify(queue.notify)
+	f.insertEventLocked(event)
+	if !cursor.hasCursor {
+		cursor.cursor = event.StartSequence
+		cursor.hasCursor = true
+	}
+	cursor.enqueuedEnd = event.EndSequence
+	cursor.queuedBytes += uint64(len(event.Data))
+	notify(cursor.notify)
 	return nil, nil
 }
 
 func (f *Fanout) WaitNext(ctx context.Context, attachmentID string) (history.Event, error) {
+	event, err := f.WaitNextOwned(ctx, attachmentID)
+	if err != nil {
+		return history.Event{}, err
+	}
+	data := append([]byte(nil), event.Data...)
+	event.Release()
+	event.Data = data
+	return event, nil
+}
+
+func (f *Fanout) WaitNextOwned(ctx context.Context, attachmentID string) (history.Event, error) {
 	for {
-		f.mu.RLock()
-		queue, ok := f.attachments[attachmentID]
-		f.mu.RUnlock()
+		f.mu.Lock()
+		cursor, ok := f.attachments[attachmentID]
 		if !ok {
+			f.mu.Unlock()
 			return history.Event{}, ErrAttachmentUnknown
 		}
-		queue.mu.Lock()
-		if queue.state == Evicted {
-			queue.mu.Unlock()
+		if cursor.state == Evicted {
+			f.mu.Unlock()
 			return history.Event{}, ErrAttachmentEvicted
 		}
-		if queue.state != Attached {
-			queue.mu.Unlock()
+		if cursor.state != Attached {
+			f.mu.Unlock()
 			return history.Event{}, ErrInvalidTransition
 		}
-		if len(queue.events) > 0 {
-			event := queue.events[0]
-			queue.events[0] = history.Event{}
-			queue.events = queue.events[1:]
-			queue.queuedBytes -= uint64(len(event.Data))
-			queue.mu.Unlock()
-			event.Data = append([]byte(nil), event.Data...)
-			return event, nil
+		if cursor.hasCursor && cursor.cursor < cursor.enqueuedEnd {
+			event, found := f.eventAtLocked(cursor.cursor)
+			if !found {
+				f.mu.Unlock()
+				return history.Event{}, ErrOutputOrder
+			}
+			start := cursor.cursor
+			retained := event.Retain()
+			offset := start - event.StartSequence
+			retained.StartSequence = start
+			retained.Data = event.Data[offset:]
+			retained.EndSequence = event.EndSequence
+			consumed := retained.EndSequence - retained.StartSequence
+			cursor.cursor = retained.EndSequence
+			cursor.queuedBytes -= consumed
+			f.compactLocked()
+			f.mu.Unlock()
+			return retained, nil
 		}
-		notification := queue.notify
-		queue.mu.Unlock()
+		notification := cursor.notify
+		f.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return history.Event{}, ctx.Err()
@@ -226,51 +241,121 @@ func (f *Fanout) WaitNext(ctx context.Context, attachmentID string) (history.Eve
 	}
 }
 
+func (f *Fanout) Next(attachmentID string) (history.Event, bool, error) {
+	f.mu.Lock()
+	cursor, ok := f.attachments[attachmentID]
+	if !ok {
+		f.mu.Unlock()
+		return history.Event{}, false, ErrAttachmentUnknown
+	}
+	if cursor.state == Evicted {
+		f.mu.Unlock()
+		return history.Event{}, false, ErrAttachmentEvicted
+	}
+	if cursor.state != Attached {
+		f.mu.Unlock()
+		return history.Event{}, false, ErrInvalidTransition
+	}
+	if !cursor.hasCursor || cursor.cursor >= cursor.enqueuedEnd {
+		f.mu.Unlock()
+		return history.Event{}, false, nil
+	}
+	event, found := f.eventAtLocked(cursor.cursor)
+	if !found {
+		f.mu.Unlock()
+		return history.Event{}, false, ErrOutputOrder
+	}
+	start := cursor.cursor
+	data := append([]byte(nil), event.Data[start-event.StartSequence:]...)
+	end := event.EndSequence
+	cursor.cursor = end
+	cursor.queuedBytes -= end - start
+	f.compactLocked()
+	f.mu.Unlock()
+	return history.Event{Channel: event.Channel, StartSequence: start, EndSequence: end, Data: data}, true, nil
+}
+
+func (f *Fanout) Status(attachmentID string) (AttachmentState, uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cursor, ok := f.attachments[attachmentID]
+	if !ok {
+		return "", 0, ErrAttachmentUnknown
+	}
+	queued := cursor.queuedBytes
+	if cursor.state == Evicted {
+		queued = cursor.evictedBytes
+	}
+	return cursor.state, queued, nil
+}
+
+func validOutputEvent(event history.Event) bool {
+	return event.EndSequence >= event.StartSequence && event.EndSequence-event.StartSequence == uint64(len(event.Data)) && len(event.Data) != 0
+}
+
+func (f *Fanout) eventAtLocked(sequence uint64) (history.Event, bool) {
+	index := sort.Search(len(f.ring), func(i int) bool { return f.ring[i].EndSequence > sequence })
+	if index == len(f.ring) || f.ring[index].StartSequence > sequence {
+		return history.Event{}, false
+	}
+	return f.ring[index], true
+}
+
+func (f *Fanout) insertEventLocked(event history.Event) {
+	for index, existing := range f.ring {
+		if existing.StartSequence <= event.StartSequence && existing.EndSequence >= event.EndSequence && existing.Channel == event.Channel && bytes.Equal(existing.Data[event.StartSequence-existing.StartSequence:event.EndSequence-existing.StartSequence], event.Data) {
+			return
+		}
+		if event.StartSequence <= existing.StartSequence && event.EndSequence >= existing.EndSequence && event.Channel == existing.Channel && bytes.Equal(event.Data[existing.StartSequence-event.StartSequence:existing.EndSequence-event.StartSequence], existing.Data) {
+			existing.Release()
+			f.ring = append(f.ring[:index], f.ring[index+1:]...)
+			f.insertEventLocked(event)
+			return
+		}
+	}
+	f.ring = append(f.ring, event.Retain())
+	sort.Slice(f.ring, func(i, j int) bool {
+		if f.ring[i].StartSequence == f.ring[j].StartSequence {
+			return f.ring[i].EndSequence > f.ring[j].EndSequence
+		}
+		return f.ring[i].StartSequence < f.ring[j].StartSequence
+	})
+}
+
+func (f *Fanout) compactLocked() {
+	var minimum uint64
+	haveMinimum := false
+	for _, cursor := range f.attachments {
+		if cursor.state != Attached || !cursor.hasCursor {
+			continue
+		}
+		if !haveMinimum || cursor.cursor < minimum {
+			minimum = cursor.cursor
+			haveMinimum = true
+		}
+	}
+	if !haveMinimum {
+		for _, event := range f.ring {
+			event.Release()
+		}
+		f.ring = nil
+		return
+	}
+	index := 0
+	for index < len(f.ring) && f.ring[index].EndSequence <= minimum {
+		f.ring[index].Release()
+		index++
+	}
+	if index > 0 {
+		copy(f.ring, f.ring[index:])
+		clear(f.ring[len(f.ring)-index:])
+		f.ring = f.ring[:len(f.ring)-index]
+	}
+}
+
 func notify(channel chan struct{}) {
 	select {
 	case channel <- struct{}{}:
 	default:
 	}
-}
-
-func (f *Fanout) Next(attachmentID string) (history.Event, bool, error) {
-	f.mu.RLock()
-	queue, ok := f.attachments[attachmentID]
-	f.mu.RUnlock()
-	if !ok {
-		return history.Event{}, false, ErrAttachmentUnknown
-	}
-	queue.mu.Lock()
-	defer queue.mu.Unlock()
-	if queue.state == Evicted {
-		return history.Event{}, false, ErrAttachmentEvicted
-	}
-	if queue.state != Attached {
-		return history.Event{}, false, ErrInvalidTransition
-	}
-	if len(queue.events) == 0 {
-		return history.Event{}, false, nil
-	}
-	event := queue.events[0]
-	queue.events[0] = history.Event{}
-	queue.events = queue.events[1:]
-	queue.queuedBytes -= uint64(len(event.Data))
-	event.Data = append([]byte(nil), event.Data...)
-	return event, true, nil
-}
-
-func (f *Fanout) Status(attachmentID string) (AttachmentState, uint64, error) {
-	f.mu.RLock()
-	queue, ok := f.attachments[attachmentID]
-	f.mu.RUnlock()
-	if !ok {
-		return "", 0, ErrAttachmentUnknown
-	}
-	queue.mu.Lock()
-	defer queue.mu.Unlock()
-	queued := queue.queuedBytes
-	if queue.state == Evicted {
-		queued = queue.evictedBytes
-	}
-	return queue.state, queued, nil
 }

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
+	"github.com/pinksaucepasta/paperboat-helper/internal/connector"
 )
 
 type testTokenSource struct{}
@@ -25,28 +25,28 @@ func (testTokenSource) Token(context.Context) (string, error) { return "helper-i
 type testProofSource struct{ body []byte }
 
 func (p *testProofSource) Proof(_ context.Context, _ string, method, path string, body []byte) ([]byte, error) {
-	if method != http.MethodPost || path != "/v1/environment-activity-observations" {
+	if method != http.MethodPost || path != "/v1/runtime-observations" {
 		return nil, errors.New("wrong proof target")
 	}
 	p.body = append([]byte(nil), body...)
 	return []byte("proof"), nil
 }
 
-func TestHeartbeatSenderUsesRenewableIdentityAndExactBodyProof(t *testing.T) {
+func TestRuntimeObservationUsesRenewableIdentityAndExactBodyProof(t *testing.T) {
 	var gotAuth, gotProof string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := new(bytes.Buffer)
 		_, _ = body.ReadFrom(r.Body)
 		gotAuth, gotProof = r.Header.Get("Authorization"), r.Header.Get("X-Paperboat-Helper-Proof")
-		if r.URL.Path != "/v1/environment-activity-observations" || !strings.Contains(body.String(), `"environment_id":"prj_1"`) {
+		if r.URL.Path != "/v1/runtime-observations" || !strings.Contains(body.String(), `"environment_id":"prj_1"`) {
 			t.Errorf("request path/body = %s %s", r.URL.Path, body.String())
 		}
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
 	proofs := &testProofSource{}
-	sender := &heartbeatSender{endpoint: server.URL + "/v1/environment-activity-observations", tokens: testTokenSource{}, proofs: proofs, operationID: func() (string, error) { return "op-1", nil }, projectID: "prj_1", machineID: "mach_1", reporterVersion: "test", client: server.Client(), lastActivity: time.Unix(1, 0).UTC()}
-	if err := sender.Heartbeat(context.Background()); err != nil {
+	sender := &runtimeObservationSender{endpoint: server.URL + "/v1/runtime-observations", tokens: testTokenSource{}, proofs: proofs, operationID: func() (string, error) { return "op-1", nil }, environmentID: "prj_1", machineID: "mach_1", reporterVersion: "test", client: server.Client()}
+	if err := sender.Send(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer helper-identity" || gotProof != base64.RawURLEncoding.EncodeToString([]byte("proof")) {
@@ -55,7 +55,6 @@ func TestHeartbeatSenderUsesRenewableIdentityAndExactBodyProof(t *testing.T) {
 	if len(proofs.body) == 0 || !bytes.Contains(proofs.body, []byte(`"resource_id":"mach_1"`)) {
 		t.Fatalf("proof body=%s", proofs.body)
 	}
-	_ = activity.Batch{}
 }
 
 func TestProductionHelperRequiresHTTPSControl(t *testing.T) {
@@ -144,5 +143,16 @@ func TestRetryHostedControlStopsOnCancellation(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) || attempts != 1 {
 		t.Fatalf("err=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestProductionConnectorTransportDefaultsToAuto(t *testing.T) {
+	for _, value := range []string{"", "  "} {
+		if got := productionConnectorTransport(value); got != connector.Auto {
+			t.Fatalf("transport(%q) = %q", value, got)
+		}
+	}
+	if got := productionConnectorTransport("quic"); got != connector.QUIC {
+		t.Fatalf("explicit transport = %q", got)
 	}
 }

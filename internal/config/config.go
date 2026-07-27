@@ -43,10 +43,9 @@ type ResourceLimits struct {
 	MaxPreviewTargets    int
 	MaxConcurrentProbes  int
 	MaxConcurrentOps     int
-	MaxActivityEvents    int
 }
 
-var DefaultResources = ResourceLimits{MaxSessions: 64, MaxAttachments: 16, MaxInputDecisions: 10_000, HistoryBytes: 64 << 10, MaxConcurrentUploads: 2, MaxPreviewTargets: 128, MaxConcurrentProbes: 8, MaxConcurrentOps: 32, MaxActivityEvents: 1000}
+var DefaultResources = ResourceLimits{MaxSessions: 64, MaxAttachments: 16, MaxInputDecisions: 10_000, HistoryBytes: 64 << 10, MaxConcurrentUploads: 2, MaxPreviewTargets: 128, MaxConcurrentProbes: 8, MaxConcurrentOps: 32}
 
 func (c Config) Validate() error {
 	if c.Profile != Hosted && c.Profile != BYOD {
@@ -69,7 +68,7 @@ func (c Config) Validate() error {
 	if resources == (ResourceLimits{}) {
 		resources = DefaultResources
 	}
-	if resources.MaxSessions < 1 || resources.MaxSessions > 256 || resources.MaxAttachments < 1 || resources.MaxAttachments > 64 || resources.MaxInputDecisions < 1 || resources.MaxInputDecisions > 100_000 || resources.HistoryBytes < 1 || resources.HistoryBytes > 64<<20 || resources.MaxConcurrentUploads < 1 || resources.MaxConcurrentUploads > 16 || resources.MaxPreviewTargets < 1 || resources.MaxPreviewTargets > 1024 || resources.MaxConcurrentProbes < 1 || resources.MaxConcurrentProbes > 64 || resources.MaxConcurrentOps < 1 || resources.MaxConcurrentOps > 256 || resources.MaxActivityEvents < 1 || resources.MaxActivityEvents > 10_000 {
+	if resources.MaxSessions < 1 || resources.MaxSessions > 256 || resources.MaxAttachments < 1 || resources.MaxAttachments > 64 || resources.MaxInputDecisions < 1 || resources.MaxInputDecisions > 100_000 || resources.HistoryBytes < 1 || resources.HistoryBytes > 64<<20 || resources.MaxConcurrentUploads < 1 || resources.MaxConcurrentUploads > 16 || resources.MaxPreviewTargets < 1 || resources.MaxPreviewTargets > 1024 || resources.MaxConcurrentProbes < 1 || resources.MaxConcurrentProbes > 64 || resources.MaxConcurrentOps < 1 || resources.MaxConcurrentOps > 256 {
 		return fmt.Errorf("resource limits exceed runtime bounds: %w", ErrInvalid)
 	}
 	return nil

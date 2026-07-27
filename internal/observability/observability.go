@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
@@ -84,9 +85,12 @@ type Series struct {
 	Value  float64
 }
 type Registry struct {
-	mu          sync.Mutex
-	descriptors map[string]Descriptor
-	series      map[string]Series
+	mu             sync.Mutex
+	descriptors    map[string]Descriptor
+	series         map[string]Series
+	terminalFrames [2]atomic.Uint64
+	terminalBytes  [2]atomic.Uint64
+	terminalNanos  [2]atomic.Uint64
 }
 
 func NewRegistry(descriptors []Descriptor) (*Registry, error) {
@@ -167,22 +171,56 @@ func (r *Registry) Snapshot() []Series {
 		series.Labels = copyLabels
 		result = append(result, series)
 	}
+	for index, stage := range []string{"socket_to_pty", "pty_to_socket"} {
+		frames := r.terminalFrames[index].Load()
+		if frames == 0 {
+			continue
+		}
+		direction := []string{"input", "output"}[index]
+		result = append(result,
+			Series{Name: "paperboat_helper_terminal_frames_total", Labels: map[string]string{"direction": direction}, Value: float64(frames)},
+			Series{Name: "paperboat_helper_terminal_bytes_total", Labels: map[string]string{"direction": direction}, Value: float64(r.terminalBytes[index].Load())},
+			Series{Name: "paperboat_helper_terminal_stage_nanoseconds_total", Labels: map[string]string{"stage": stage}, Value: float64(r.terminalNanos[index].Load())},
+		)
+	}
 	sort.Slice(result, func(i, j int) bool { return seriesKey(result[i]) < seriesKey(result[j]) })
 	return result
 }
 
+// RecordTerminalStage is allocation-free and lock-free for the terminal hot path.
+func (r *Registry) RecordTerminalStage(stage string, duration time.Duration, bytes int) {
+	index := -1
+	switch stage {
+	case "socket_to_pty":
+		index = 0
+	case "pty_to_socket":
+		index = 1
+	}
+	if index < 0 || duration < 0 || bytes < 0 {
+		return
+	}
+	r.terminalFrames[index].Add(1)
+	r.terminalBytes[index].Add(uint64(bytes))
+	r.terminalNanos[index].Add(uint64(duration))
+}
+
 func DefaultDescriptors() []Descriptor {
 	return []Descriptor{
-		{Name: "paperboat_helper_operations_total", Kind: Counter, Labels: map[string]map[string]bool{"component": set("protocol", "auth", "session", "upload", "activity", "preview", "connector", "update", "service", "storage"), "result": set("ok", "replayed", "rejected", "conflict", "canceled", "deadline", "unavailable")}},
+		{Name: "paperboat_helper_operations_total", Kind: Counter, Labels: map[string]map[string]bool{"component": set("protocol", "auth", "session", "upload", "preview", "connector", "update", "service", "storage"), "result": set("ok", "replayed", "rejected", "conflict", "canceled", "deadline", "unavailable")}},
 		{Name: "paperboat_helper_active_resources", Kind: Gauge, Labels: map[string]map[string]bool{"kind": set("sessions", "attachments", "processes", "uploads", "previews", "connectors")}},
-		{Name: "paperboat_helper_readiness", Kind: Gauge, Labels: map[string]map[string]bool{"capability": set("terminal", "upload", "preview", "activity", "health", "connector", "update"), "state": set("ready", "degraded", "unavailable")}},
-		{Name: "paperboat_helper_connector_retries_total", Kind: Counter, Labels: map[string]map[string]bool{"transport": set("quic", "tcp_tls", "none"), "result": set("connected", "failed", "replaced", "canceled")}},
+		{Name: "paperboat_helper_readiness", Kind: Gauge, Labels: map[string]map[string]bool{"capability": set("terminal", "upload", "preview", "health", "connector", "update"), "state": set("ready", "degraded", "unavailable")}},
+		{Name: "paperboat_helper_connector_retries_total", Kind: Counter, Labels: map[string]map[string]bool{"transport": set("quic", "tcp_dedicated", "tcp_mux", "none"), "result": set("connected", "failed", "replaced", "canceled")}},
 		{Name: "paperboat_helper_restart_total", Kind: Counter},
 		{Name: "paperboat_helper_renewal_failures_total", Kind: Counter},
 		{Name: "paperboat_helper_connector_recovery_seconds", Kind: Gauge},
 		{Name: "paperboat_helper_update_rollbacks_total", Kind: Counter},
 		{Name: "paperboat_helper_terminal_events_total", Kind: Counter, Labels: map[string]map[string]bool{"event": set("replay_gap", "slow_consumer", "input_uncertain", "helper_restart")}},
-		{Name: "paperboat_helper_delivery_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("activity", "preview"), "result": set("delivered", "failed", "canceled")}},
+		{Name: "paperboat_helper_terminal_persistence_failures_total", Kind: Counter},
+		{Name: "paperboat_helper_terminal_persistence_lag_bytes", Kind: Gauge},
+		{Name: "paperboat_helper_terminal_frames_total", Kind: Counter, Labels: map[string]map[string]bool{"direction": set("input", "output")}},
+		{Name: "paperboat_helper_terminal_bytes_total", Kind: Counter, Labels: map[string]map[string]bool{"direction": set("input", "output")}},
+		{Name: "paperboat_helper_terminal_stage_nanoseconds_total", Kind: Counter, Labels: map[string]map[string]bool{"stage": set("socket_to_pty", "pty_to_socket")}},
+		{Name: "paperboat_helper_delivery_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("runtime", "preview"), "result": set("delivered", "failed", "canceled")}},
 		{Name: "paperboat_helper_cleanup_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("upload", "update", "session"), "result": set("removed", "preserved", "failed")}},
 	}
 }
@@ -231,7 +269,7 @@ func BuildDiagnostics(version, profile string, snapshot health.Snapshot, queues 
 	if !safeValue(version) || !safeValue(profile) || maxBytes < 1 {
 		return nil, ErrUnsafeValue
 	}
-	allowedQueues := map[string]bool{"activity_events": true, "attachment_bytes": true, "cleanup_backlog": true, "connector_retries": true, "update_pending": true}
+	allowedQueues := map[string]bool{"attachment_bytes": true, "cleanup_backlog": true, "connector_retries": true, "update_pending": true}
 	copyQueues := make(map[string]uint64, len(queues))
 	for key, value := range queues {
 		if !allowedQueues[key] {

@@ -41,19 +41,6 @@ with `1013` for retryable readiness failures. All responses carry
 `X-Robots-Tag: noindex, nofollow, noarchive`. First creation requires an explicit public
 access acknowledgement; no field may imply privacy.
 
-## Activity
-
-Trusted activity events carry environment ID, helper/process/session identity, source,
-wall-clock timestamp, per-source monotonic sequence, and observed freshness. Accepted
-sources are terminal input, agent user interaction, explicit CLI activity, and a signed
-agent activity signal. Open processes, PTYs, sockets, routes, previews, output-only work,
-and health checks are not activity. Events are deduplicated by source identity and sequence;
-older sequences are rejected. Batches contain at most 100 events or 64 KiB. Events older
-than five minutes are recorded for diagnostics but cannot extend idle policy.
-
-`agent_signal` uses the canonical Ed25519 activity-signal envelope and binds the exact event,
-helper identity, and key ID. A plain event with that source, a tampered envelope, wrong helper,
-unknown key, or replay is rejected before it can extend idle state.
 
 ## Config application
 

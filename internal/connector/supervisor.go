@@ -146,22 +146,18 @@ func (s *Supervisor) loop(ctx context.Context) {
 				}
 				s.recordRetry(string(result.Transport), metricResult)
 				backoff = s.config.InitialBackoff
-				refreshAt := admission.ExpiresAt.Add(-admissionRefreshMargin(time.Until(admission.ExpiresAt)))
-				waitCtx, cancelWait := context.WithDeadline(ctx, refreshAt)
+				waitCtx, cancelWait := context.WithCancel(ctx)
 				waitResult := make(chan error, 1)
 				go func() { waitResult <- s.config.Manager.WaitDisconnected(waitCtx, result.Generation) }()
 				var waitErr error
-				refreshDue := false
 				select {
 				case waitErr = <-waitResult:
-					refreshDue = errors.Is(waitErr, context.DeadlineExceeded) && ctx.Err() == nil
 				case <-s.wake:
-					refreshDue = ctx.Err() == nil
 					cancelWait()
 					waitErr = <-waitResult
 				}
 				cancelWait()
-				if refreshDue {
+				if errors.Is(waitErr, context.Canceled) && ctx.Err() == nil {
 					continue
 				}
 				if waitErr != nil && ctx.Err() == nil {
@@ -187,17 +183,6 @@ func (s *Supervisor) loop(ctx context.Context) {
 			backoff = s.config.MaxBackoff
 		}
 	}
-}
-
-func admissionRefreshMargin(lifetime time.Duration) time.Duration {
-	margin := lifetime / 5
-	if margin > 30*time.Second {
-		margin = 30 * time.Second
-	}
-	if margin < time.Second {
-		margin = time.Second
-	}
-	return margin
 }
 
 func (s *Supervisor) recordRetry(transport, result string) {

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func openStore(t *testing.T, hook func(string) error) (*Store, string) {
+func openStore(t testing.TB, hook func(string) error) (*Store, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "state")
 	store, err := Open(context.Background(), Config{Root: root, FailureHook: hook})
@@ -23,6 +23,25 @@ func openStore(t *testing.T, hook func(string) error) (*Store, string) {
 func testSession() Session {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	return Session{ID: "ses_1", Name: "default", CWD: "/workspace", Columns: 80, Rows: 24, State: "running", Generation: 1, CreatedAt: now, UpdatedAt: now}
+}
+
+func BenchmarkPersistenceFlush32KiB(b *testing.B) {
+	state, _ := openStore(b, nil)
+	b.Cleanup(func() { _ = state.Close() })
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		b.Fatal(err)
+	}
+	payload := make([]byte, 32<<10)
+	var sequence uint64
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for range b.N {
+		if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, sequence, payload, 1<<20); err != nil {
+			b.Fatal(err)
+		}
+		sequence += uint64(len(payload))
+	}
 }
 
 func TestStorePersistsSessionAndOutputAcrossReopen(t *testing.T) {
@@ -83,31 +102,6 @@ func TestAppendCompactsWholeEventsAndRollsBackInjectedFailure(t *testing.T) {
 	sessions, _ := store.Sessions(context.Background())
 	if sessions[0].LatestSequence != 6 {
 		t.Fatalf("latest=%d", sessions[0].LatestSequence)
-	}
-}
-
-func TestReplaceOutputAtomicallyStoresNewestBoundedSnapshot(t *testing.T) {
-	state, _ := openStore(t, nil)
-	defer state.Close()
-	if err := state.CreateSession(context.Background(), testSession()); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 0, []byte("old"), 64); err != nil {
-		t.Fatal(err)
-	}
-	events := []OutputEvent{
-		{Channel: 1, StartSequence: 100, EndSequence: 103, Data: []byte("new")},
-		{Channel: 1, StartSequence: 103, EndSequence: 107, Data: []byte("tail")},
-	}
-	if err := state.ReplaceOutput(context.Background(), "ses_1", 100, 107, events); err != nil {
-		t.Fatal(err)
-	}
-	got, earliest, latest, err := state.Replay(context.Background(), "ses_1", 100, 0)
-	if err != nil || earliest != 100 || latest != 107 || len(got) != 2 || string(got[0].Data) != "new" || string(got[1].Data) != "tail" {
-		t.Fatalf("events=%#v bounds=(%d,%d) err=%v", got, earliest, latest, err)
-	}
-	if err := state.ReplaceOutput(context.Background(), "ses_1", 0, 1, []OutputEvent{{Channel: 1, StartSequence: 0, EndSequence: 1, Data: []byte("x")}}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("regression err=%v", err)
 	}
 }
 
@@ -317,6 +311,62 @@ func TestProcessCrashBeforeAppendCommitPreservesAcknowledgedSequence(t *testing.
 	}
 }
 
+func TestProcessCrashAfterAppendCommitRecoversCommittedSequence(t *testing.T) {
+	if os.Getenv("PAPERBOAT_STORE_CRASH_MODE") == "append_after_commit" {
+		crashStoreAt(t, "append_after_commit")
+	}
+	state, root := openStore(t, nil)
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 0, []byte("old"), 64); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runCrashChild(t, "TestProcessCrashAfterAppendCommitRecoversCommittedSequence", "append_after_commit", root)
+
+	state, err := Open(context.Background(), Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	events, earliest, latest, err := state.Replay(context.Background(), "ses_1", 0, 0)
+	if err != nil || earliest != 0 || latest != 6 || len(events) != 2 || string(events[0].Data) != "old" || string(events[1].Data) != "new" {
+		t.Fatalf("events=%#v bounds=(%d,%d) err=%v", events, earliest, latest, err)
+	}
+}
+
+func TestProcessCrashDuringAppendCompactionRollsBackAtomically(t *testing.T) {
+	if os.Getenv("PAPERBOAT_STORE_CRASH_MODE") == "compaction" {
+		crashStoreAt(t, "append_before_commit")
+	}
+	state, root := openStore(t, nil)
+	if err := state.CreateSession(context.Background(), testSession()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 0, []byte("old"), 64); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runCrashChild(t, "TestProcessCrashDuringAppendCompactionRollsBackAtomically", "compaction", root)
+
+	state, err := Open(context.Background(), Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	events, earliest, latest, err := state.Replay(context.Background(), "ses_1", 0, 0)
+	if err != nil || earliest != 0 || latest != 3 || len(events) != 1 || string(events[0].Data) != "old" {
+		t.Fatalf("events=%#v bounds=(%d,%d) err=%v", events, earliest, latest, err)
+	}
+}
+
 func runCrashChild(t *testing.T, testName, mode, root string) {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
@@ -342,8 +392,12 @@ func crashStoreAt(t *testing.T, crashPoint string) {
 		t.Fatal(err)
 	}
 	defer state.Close()
-	if crashPoint == "append_before_commit" {
-		if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 3, []byte("new"), 64); err != nil {
+	if crashPoint == "append_before_commit" || crashPoint == "append_after_commit" {
+		maxRetained := uint64(64)
+		if os.Getenv("PAPERBOAT_STORE_CRASH_MODE") == "compaction" {
+			maxRetained = 3
+		}
+		if _, _, err := state.AppendOutput(context.Background(), "ses_1", 1, 3, []byte("new"), maxRetained); err != nil {
 			t.Fatal(err)
 		}
 	}

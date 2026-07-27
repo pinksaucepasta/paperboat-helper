@@ -22,6 +22,8 @@ func CloseCode(err error) int {
 		return CloseUnavailable
 	}
 	switch protocolError.Code {
+	case CredentialExpired:
+		return CloseUnauthorized
 	case ProtocolIncompatible, CapabilityRequired:
 		return CloseIncompatible
 	case Malformed, Oversized, UnsupportedMessage, InvalidFrame, InvalidDeadline, UnsupportedChannel:

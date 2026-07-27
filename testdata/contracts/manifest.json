@@ -6,7 +6,7 @@
       "id": "cli.behavior",
       "path": "cli/behavior.json",
       "type": "command-behavior",
-      "sha256": "fcbb3a8d63e9c54e1598a606e02ce5d93e3cd7b440d6f604ce4aab1ad84f1b95",
+      "sha256": "6710acc10156d848f119e3d5c0ee24157ac8a83d39652f9844da8d078221ef64",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [
@@ -17,7 +17,7 @@
       "id": "cli.command-tree",
       "path": "cli/command-tree.json",
       "type": "command-tree",
-      "sha256": "ecbd7ff3f82a7a9b3b7e29d05e80598dd8f4a334e1a9b12f230fc1ebde98e18a",
+      "sha256": "906e87e13cabbeb9b4a7fe51a34c4f7d490897bd228ef490798ad9f6e15a3a93",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [
@@ -39,7 +39,7 @@
       "id": "compatibility.matrix",
       "path": "compatibility/matrix.json",
       "type": "matrix",
-      "sha256": "6fd85f35ef6b0e0f589785ac2f06f73b283313732936f8cb7456193fc47ad725",
+      "sha256": "604dd2d737505325d13a6952a3768a959aae2627a254431238163d328d989353",
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
@@ -53,7 +53,7 @@
       "id": "credentials.classes",
       "path": "credentials/classes.json",
       "type": "credential-matrix",
-      "sha256": "28bde43e740d42766c5ba80e6d9f3648914e3e177ad986ee1b5c1349e506f113",
+      "sha256": "dfb8aae2cc4ba9d4a2aa35cd7bc207ab409f7a7327adae6aee771ab20c9ddbfd",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
@@ -67,7 +67,7 @@
       "id": "credentials.lifecycle",
       "path": "credentials/lifecycle.md",
       "type": "specification",
-      "sha256": "ab737a7b148ba438be870bb9890b64eede93e07c1f499b73926608ec0a55fc44",
+      "sha256": "0cb0af3e06a51b3a526fa69dde613db8eafa79a52fb5cf7472483c1d8eee2d57",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
@@ -116,7 +116,7 @@
       "id": "compatibility.pairs",
       "path": "fixtures/compatibility/pairs.ndjson",
       "type": "compatibility-vectors",
-      "sha256": "28113760edf488ad7150ab0821effc5a3ca0973ff3a816244cf7ffe223692f0b",
+      "sha256": "8ab5a539da1e0f804aff0d4e1b50e670dc1ff0c21b6cb292286e8eb812cc2e94",
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
@@ -170,7 +170,7 @@
       "id": "edge.control.vectors",
       "path": "fixtures/edge/control.ndjson",
       "type": "operation-vectors",
-      "sha256": "e68ef79a61b41756afb0c09b1fa4cde915ecc67dfc85afcb9fdf372243cb7bf9",
+      "sha256": "b3e50127c348ffd60741e43e16ab904d71df8c057d3b8eb610ac60dbf4c4f6e6",
       "owner": "tunnel",
       "review": "initial-review",
       "consumers": [
@@ -183,7 +183,7 @@
       "id": "helper.frame.vectors",
       "path": "fixtures/helper/frames.ndjson",
       "type": "wire-vectors",
-      "sha256": "3ef9a7eb96e21535214ddf53e6a6b6a70d12a884ed9771d1378b4cc3878bf8db",
+      "sha256": "df9d64c64ccb0e40e4328f254b5a657cee142148b37c53d3f1ed47284d20fbd2",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -196,7 +196,7 @@
       "id": "helper.operation.vectors",
       "path": "fixtures/helper/operations.ndjson",
       "type": "operation-vectors",
-      "sha256": "ee163fea072f6bb3834de8f3090df1a7df93168dd3d55ffe6449c62c4534dc90",
+      "sha256": "b8390e2e58daba0ffcdf161cfe6326ee35af4cbd649e66544ec8e6cc4df07742",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -206,15 +206,16 @@
       ]
     },
     {
-      "id": "helper.transport.vectors",
-      "path": "fixtures/helper/transport.json",
+      "id": "helper.terminal-v2.vectors",
+      "path": "fixtures/helper/terminal-v2.json",
       "type": "wire-vectors",
-      "sha256": "52faf0bfc321d85ee8c8c9acbb4f0690c2e23458859f05a0ce09174e7c9ffe0c",
+      "sha256": "ec3aefab299380d3e10128f96f5f537a316e778aa4e8aa6e21284811fac4e3ea",
       "owner": "helper",
-      "review": "initial-review",
+      "review": "protocol-2-review",
       "consumers": [
         "paperboat-cli",
         "paperboat-helper",
+        "paperboat-server",
         "paperboat-tunnel"
       ]
     },
@@ -236,7 +237,7 @@
       "id": "helper.handshake.negative.unknown-required-field",
       "path": "fixtures/negative/handshake-unknown-required-field.json",
       "type": "negative-fixture",
-      "sha256": "be27e5b8768470e7e8468322fd1b596641ba1df63fc9a15671e32e1a905db918",
+      "sha256": "3649cf2d3c9e3ea7c65694cefcd49702da1d990b86cb50f32ad7f35af8f8a78d",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -275,7 +276,7 @@
       "id": "helper.operations",
       "path": "helper/operations.md",
       "type": "specification",
-      "sha256": "1670d5c4f39193eb7d6818dcce8a66f615e2ed2b0460bde780189d32da851aa7",
+      "sha256": "c82e8c21cc127798e429edf458d04892678e87bb0379f56d960b19c34848718e",
       "owner": "helper",
       "review": "preview-ownership-review",
       "consumers": [
@@ -289,7 +290,7 @@
       "id": "helper.profiles",
       "path": "helper/profiles.json",
       "type": "capability-matrix",
-      "sha256": "cae6b14cfed1db625d750dc09628d2ed5aa1d05c5bfccfb301c7c07c61a91d55",
+      "sha256": "616a162e5c22e68a08add4254f612c4cb7bb9bd5394d382d22102aa5130a7eca",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -301,7 +302,7 @@
       "id": "helper.protocol",
       "path": "helper/protocol.md",
       "type": "specification",
-      "sha256": "f8ef9aed40965f866e9d779cca0ec95f5a83323332529d0fce5071f48d654965",
+      "sha256": "a5fb75276cadf50f647c1f8a46c618259a43fbea3380d444230d42bd4344ad18",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -314,7 +315,7 @@
       "id": "operations.contract",
       "path": "operations.md",
       "type": "operations-specification",
-      "sha256": "5384ab56a14feb74764dba77dbf249b26732f52e21759a08680e5d6a453784e7",
+      "sha256": "76d3e9983b95add836fa68b030bf5b83b397174efc4de93b325797d8d803691e",
       "owner": "operations",
       "review": "initial-review",
       "consumers": [
@@ -405,7 +406,7 @@
       "id": "environment.connection.v1",
       "path": "schemas/environment/connection-v1.schema.json",
       "type": "json-schema",
-      "sha256": "37c6afdbb2507cd480c6e9a707d1aa4f878f738d7198559b875adc080ecbe8c2",
+      "sha256": "94dfd82721879d81a4ed252f34f601b8911e9171f50ccb0ffaa598fc572b0a44",
       "owner": "server",
       "review": "frozen-review",
       "consumers": [
@@ -414,34 +415,10 @@
       ]
     },
     {
-      "id": "helper.activity-signal",
-      "path": "schemas/helper/activity-signal.schema.json",
-      "type": "json-schema",
-      "sha256": "9f873715890f53a86b5a7dd599927d1f6a09958555cba558c225c53d42191362",
-      "owner": "helper",
-      "review": "approved-review",
-      "consumers": [
-        "paperboat-helper",
-        "paperboat-server"
-      ]
-    },
-    {
-      "id": "helper.activity",
-      "path": "schemas/helper/activity.schema.json",
-      "type": "json-schema",
-      "sha256": "c0689f1aba5965ca64de6ffdf343ce508759be6b02ca9089f44104e541e596c7",
-      "owner": "helper",
-      "review": "initial-review",
-      "consumers": [
-        "paperboat-helper",
-        "paperboat-server"
-      ]
-    },
-    {
       "id": "helper.frame",
       "path": "schemas/helper/frame.schema.json",
       "type": "json-schema",
-      "sha256": "2eb89b949c3bf8b34c1264030d7ed1c18127ffcdefa5d8c5f2b844c6a79c1ad8",
+      "sha256": "daa997b4b9e850e7953a3445e2d31fb98e282eafa8108c5047e85bf9b1b5f413",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -454,7 +431,7 @@
       "id": "helper.handshake",
       "path": "schemas/helper/handshake.schema.json",
       "type": "json-schema",
-      "sha256": "bfe38e20d3e5a56c75dd42281f6fc2dd9128eed100dfb7a291b90e31c7f1713b",
+      "sha256": "f3211309f9c1668776b41648706647bac6bbc07809c5e652ed3a1a76051b5b53",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -493,7 +470,7 @@
       "id": "security.threat-model",
       "path": "security/threat-model.md",
       "type": "security-specification",
-      "sha256": "7b8032aff8b556cdff604133c399ce56f37abbd6f1b6b253fbb659a0906b31ae",
+      "sha256": "01cbd03a87203eb62b7f3a048e457f73e847d06bcb017ee35353c7c6be669fe7",
       "owner": "security",
       "review": "initial-review",
       "consumers": [
@@ -545,7 +522,7 @@
       "id": "cli.command.transcripts",
       "path": "transcripts/cli/commands.json",
       "type": "transcripts",
-      "sha256": "90c7787976fcef7d2c2c8f543c43a1cd3c698b12df6a988c36789290ac0b1323",
+      "sha256": "588d412a9c58cea6f5e8e455b18faec651fc6c9e8976100428a281d02eccd268",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [

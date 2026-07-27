@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -47,63 +46,63 @@ func TestProductionFrameValidationMatchesCopiedVectors(t *testing.T) {
 }
 
 func TestProductionDecodersMatchCopiedTransportVectors(t *testing.T) {
-	data, err := os.ReadFile("../../testdata/contracts/fixtures/helper/transport.json")
+	data, err := os.ReadFile("../../testdata/contracts/fixtures/helper/terminal-v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var fixture struct {
 		Cases []struct {
-			Case           string   `json:"case"`
-			WireChunks     []string `json:"wire_chunks_base64"`
-			Count          int      `json:"expected_count"`
-			DeclaredLength uint32   `json:"declared_length"`
+			Case  string `json:"case"`
+			Valid bool   `json:"valid"`
+			Wire  string `json:"wire_base64"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
 	for _, vector := range fixture.Cases {
-		wire := decodeWire(t, vector.WireChunks)
+		wire, err := base64.StdEncoding.DecodeString(vector.Wire)
+		if vector.Wire == "" {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", vector.Case, err)
+		}
 		switch vector.Case {
-		case "structured-fragmented":
-			frame, err := ReadFrame(&fragmented{data: wire, chunk: 2})
-			if err != nil || frame.Type != "heartbeat" {
+		case "input":
+			frame, err := DecodeTerminalInput(wire)
+			if err != nil || frame.StreamID != 7 || frame.Sequence != 9 || !bytes.Equal(frame.Data, []byte{0, 1, 0xff}) {
 				t.Fatalf("%s: frame=%#v err=%v", vector.Case, frame, err)
 			}
-		case "structured-coalesced":
-			reader := bytes.NewReader(wire)
-			for index := 0; index < vector.Count; index++ {
-				if _, err := ReadFrame(reader); err != nil {
-					t.Fatalf("%s frame %d: %v", vector.Case, index, err)
-				}
-			}
-		case "binary-fragmented":
-			frame, err := ReadBinaryFrame(&fragmented{data: wire, chunk: 2})
-			if err != nil || frame.Channel != Stdout || frame.StartSequence != 42 || string(frame.Data) != "abc" {
+		case "output-stderr":
+			frame, err := DecodeTerminalOutput(wire)
+			if err != nil || frame.Channel != TerminalStderr || frame.StreamID != 8 || frame.StartSequence != 10 || string(frame.Data) != "err" {
 				t.Fatalf("%s: frame=%#v err=%v", vector.Case, frame, err)
 			}
-		case "malformed-short-binary-length":
-			assertProtocolCode(t, readBinaryFrameError(wire), InvalidFrame)
-		case "invalid-structured-utf8":
-			_, err := ReadFrame(bytes.NewReader(wire))
-			assertProtocolCode(t, err, Malformed)
-		case "oversized-structured-frame":
-			if len(wire) == 0 {
-				wire = make([]byte, 4)
-				binary.BigEndian.PutUint32(wire, vector.DeclaredLength)
+		case "ack":
+			frame, err := DecodeTerminalACK(wire)
+			if err != nil || frame.StreamID != 9 || frame.NextSequence != 123 {
+				t.Fatalf("%s: frame=%#v err=%v", vector.Case, frame, err)
 			}
-			_, err := ReadFrame(bytes.NewReader(wire))
-			assertProtocolCode(t, err, Oversized)
-		case "unknown-binary-channel":
-			assertProtocolCode(t, readBinaryFrameError(wire), UnsupportedChannel)
+		case "resize":
+			frame, err := DecodeTerminalResize(wire)
+			if err != nil || frame.StreamID != 10 || frame.Columns != 120 || frame.Rows != 40 || frame.Sequence != 2 {
+				t.Fatalf("%s: frame=%#v err=%v", vector.Case, frame, err)
+			}
+		case "zero-stream-id":
+			if _, err := DecodeTerminalInput(wire); err == nil {
+				t.Fatalf("%s accepted", vector.Case)
+			}
+		case "unknown-opcode":
+			assertProtocolCode(t, func() error { _, err := TerminalOpcode(wire); return err }(), UnsupportedChannel)
 		}
 	}
 }
 
 func TestFrameRejectsDuplicateTopLevelAndNestedKeys(t *testing.T) {
 	for _, body := range []string{
-		`{"type":"heartbeat","type":"heartbeat","request_id":"req","version":"1.0"}`,
-		`{"type":"hello","request_id":"req","version":"1.0","payload":{"min_version":"1.0","min_version":"1.0"}}`,
+		`{"type":"heartbeat","type":"heartbeat","request_id":"req","version":"2.0"}`,
+		`{"type":"hello","request_id":"req","version":"2.0","payload":{"min_version":"2.0","min_version":"2.0"}}`,
 	} {
 		wire := makeStructuredWire([]byte(body))
 		_, err := ReadFrame(bytes.NewReader(wire))
@@ -117,6 +116,9 @@ func TestCloseCodeUsesFrozenTransportCategories(t *testing.T) {
 	}
 	if got := CloseCode(&Error{Code: Oversized}); got != CloseMalformed {
 		t.Fatalf("oversized close=%d", got)
+	}
+	if got := CloseCode(&Error{Code: CredentialExpired}); got != CloseUnauthorized {
+		t.Fatalf("expired credential close=%d", got)
 	}
 	if got := CloseCode(errors.New("unknown")); got != CloseUnavailable {
 		t.Fatalf("unknown close=%d", got)

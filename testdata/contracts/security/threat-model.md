@@ -17,7 +17,7 @@
 ## Required Negative Cases
 
 - Downgrade: no mutual version or missing required capability fails before mutation.
-- Confused deputy: credentials for terminal, upload, preview, activity, config, connector,
+- Confused deputy: credentials for terminal, upload, preview, config, connector,
   edge control, usage, or update are rejected at every other audience and operation.
 - Cross-environment: every resource and credential binding is checked together; errors do
   not distinguish another owner's resource from an unknown resource.

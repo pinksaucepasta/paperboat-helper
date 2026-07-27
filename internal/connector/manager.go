@@ -11,8 +11,11 @@ import (
 type Transport string
 
 const (
-	QUIC   Transport = "quic"
-	TCPTLS Transport = "tcp_tls"
+	Auto         Transport = "auto"
+	QUIC         Transport = "quic"
+	TCPDedicated Transport = "tcp_dedicated"
+	TCPMux       Transport = "tcp_mux"
+	TCPTLS       Transport = TCPMux
 )
 
 var (
@@ -78,6 +81,7 @@ type Config struct {
 	Dialer        Dialer
 	Clock         Clock
 	DrainTimeout  time.Duration
+	Transport     Transport
 }
 type Result struct {
 	Generation     uint64
@@ -98,14 +102,15 @@ type activeConnection struct {
 }
 
 type Manager struct {
-	opMu     sync.Mutex
-	mu       sync.RWMutex
-	config   Config
-	ctx      context.Context
-	cancel   context.CancelFunc
-	used     map[string]time.Time
-	active   *activeConnection
-	stopping bool
+	opMu          sync.Mutex
+	mu            sync.RWMutex
+	config        Config
+	ctx           context.Context
+	cancel        context.CancelFunc
+	used          map[string]time.Time
+	active        *activeConnection
+	autoTransport Transport
+	stopping      bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -118,11 +123,14 @@ func New(config Config) (*Manager, error) {
 	if config.DrainTimeout == 0 {
 		config.DrainTimeout = 10 * time.Second
 	}
-	if config.DrainTimeout <= 0 {
+	if config.Transport == "" {
+		config.Transport = Auto
+	}
+	if config.DrainTimeout <= 0 || config.Transport != Auto && config.Transport != QUIC && config.Transport != TCPDedicated && config.Transport != TCPMux {
 		return nil, ErrAdmissionInvalid
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{config: config, ctx: ctx, cancel: cancel, used: make(map[string]time.Time)}, nil
+	return &Manager{config: config, ctx: ctx, cancel: cancel, used: make(map[string]time.Time), autoTransport: QUIC}, nil
 }
 
 func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, error) {
@@ -178,29 +186,36 @@ func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, erro
 }
 
 func (m *Manager) dial(ctx context.Context, admission Admission) (Connection, Transport, error) {
-	// QUIC may be filtered by an upstream network. Keep its probe bounded so a
-	// successful TCP fallback still has the caller's remaining readiness budget.
-	quicCtx, cancelQUIC := context.WithTimeout(ctx, 5*time.Second)
-	connection, err := m.config.Dialer.Dial(quicCtx, QUIC, admission)
-	cancelQUIC()
+	transport := m.config.Transport
+	if transport == Auto {
+		m.mu.RLock()
+		transport = m.autoTransport
+		m.mu.RUnlock()
+	}
+	connection, err := m.config.Dialer.Dial(ctx, transport, admission)
 	if err == nil && connection != nil {
-		return connection, QUIC, nil
+		return connection, transport, nil
 	}
 	if connection != nil {
 		_ = connection.Close()
 	}
-	if ctx.Err() != nil {
-		return nil, "", ctx.Err()
+	firstErr := fmt.Errorf("%s: %w", transport, err)
+	if m.config.Transport != Auto || transport != QUIC || ctx.Err() != nil {
+		return nil, "", fmt.Errorf("%w: %w", ErrUnavailable, firstErr)
 	}
-	quicErr := err
-	connection, err = m.config.Dialer.Dial(ctx, TCPTLS, admission)
+	// Keep the fallback sticky for later admissions. A failed QUIC attempt may
+	// have consumed its replay-protected credential before readiness failed.
+	m.mu.Lock()
+	m.autoTransport = TCPMux
+	m.mu.Unlock()
+	connection, err = m.config.Dialer.Dial(ctx, TCPMux, admission)
 	if err == nil && connection != nil {
-		return connection, TCPTLS, nil
+		return connection, TCPMux, nil
 	}
 	if connection != nil {
 		_ = connection.Close()
 	}
-	return nil, "", fmt.Errorf("%w: quic: %v; tcp_tls: %v", ErrUnavailable, quicErr, err)
+	return nil, "", fmt.Errorf("%w: %w; %s: %w", ErrUnavailable, firstErr, TCPMux, err)
 }
 
 func (m *Manager) Status() Status {

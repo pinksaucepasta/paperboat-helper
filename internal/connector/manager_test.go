@@ -85,12 +85,15 @@ func manager(t *testing.T, dialer Dialer, now time.Time) *Manager {
 	return m
 }
 
-func TestQUICFirstAndTCPFallback(t *testing.T) {
+func TestSelectedTerminalTransportIsTheOnlyDialedMode(t *testing.T) {
 	now := time.Now()
-	dialer := &fakeDialer{quicErr: errors.New("quic down")}
-	m := manager(t, dialer, now)
+	dialer := &fakeDialer{}
+	m, err := New(Config{EnvironmentID: "env", HelperID: "helper", EdgePool: "default", Dialer: dialer, Clock: fixedClock{now}, DrainTimeout: time.Second, Transport: TCPDedicated})
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := m.Accept(context.Background(), admission(1, "jti_0001", now))
-	if err != nil || result.Transport != TCPTLS {
+	if err != nil || result.Transport != TCPDedicated {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	if got := m.ResourceCounts()["connectors"]; got != 1 {
@@ -98,11 +101,50 @@ func TestQUICFirstAndTCPFallback(t *testing.T) {
 	}
 	dialer.mu.Lock()
 	defer dialer.mu.Unlock()
-	if len(dialer.calls) != 2 || dialer.calls[0] != QUIC || dialer.calls[1] != TCPTLS {
+	if len(dialer.calls) != 1 || dialer.calls[0] != TCPDedicated {
 		t.Fatalf("calls=%v", dialer.calls)
 	}
-	if dialer.admissions[1].Credential != "test-only-connector-admission-credential" {
+	if dialer.admissions[0].Credential != "test-only-connector-admission-credential" {
 		t.Fatal("admission credential was not carried to transport")
+	}
+}
+
+func TestAutomaticTransportPrefersQUICAndFallsBackToTCPMux(t *testing.T) {
+	now := time.Now()
+	dialer := &fakeDialer{quicErr: errors.New("udp unavailable")}
+	m := manager(t, dialer, now)
+	result, err := m.Accept(context.Background(), admission(1, "jti_0001", now))
+	if err != nil || result.Transport != TCPMux {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := m.Accept(context.Background(), admission(2, "jti_0002", now)); err != nil {
+		t.Fatal(err)
+	}
+	dialer.mu.Lock()
+	defer dialer.mu.Unlock()
+	want := []Transport{QUIC, TCPMux, TCPMux}
+	if len(dialer.calls) != len(want) {
+		t.Fatalf("calls=%v want=%v", dialer.calls, want)
+	}
+	for i := range want {
+		if dialer.calls[i] != want[i] {
+			t.Fatalf("calls=%v want=%v", dialer.calls, want)
+		}
+	}
+}
+
+func TestAutomaticTransportDoesNotFallbackWhenQUICConnects(t *testing.T) {
+	now := time.Now()
+	dialer := &fakeDialer{}
+	m := manager(t, dialer, now)
+	result, err := m.Accept(context.Background(), admission(1, "jti_0001", now))
+	if err != nil || result.Transport != QUIC {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	dialer.mu.Lock()
+	defer dialer.mu.Unlock()
+	if len(dialer.calls) != 1 || dialer.calls[0] != QUIC {
+		t.Fatalf("calls=%v", dialer.calls)
 	}
 }
 

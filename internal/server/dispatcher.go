@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
@@ -34,8 +32,6 @@ type DispatcherConfig struct {
 	Sessions       *session.Manager
 	Previews       *preview.Registry
 	PreviewControl preview.PreviewControl
-	Activity       *activity.Collector
-	SignalVerifier *activity.SignalVerifier
 	ConfigApply    configapply.Handler
 	Updates        interface {
 		Activate(context.Context, bootstrap.ArtifactManifest, bootstrap.ArtifactManifest) (string, error)
@@ -68,12 +64,9 @@ func NewDispatcher(config DispatcherConfig) (*Dispatcher, error) {
 }
 
 func (d *Dispatcher) Capabilities() []string {
-	capabilities := []string{"terminal.v1", "terminal.input-stream.v1", "health.v1"}
+	capabilities := []string{"terminal.v2", "health.v1"}
 	if d.config.Previews != nil {
 		capabilities = append(capabilities, "preview.public.v1")
-	}
-	if d.config.Activity != nil {
-		capabilities = append(capabilities, "activity.v1")
 	}
 	if d.config.ConfigApply != nil {
 		capabilities = append(capabilities, "config.apply.v1")
@@ -86,12 +79,10 @@ func (d *Dispatcher) Capabilities() []string {
 
 func (d *Dispatcher) Handle(ctx context.Context, authorization Authorization, capability string, payload json.RawMessage) operation.Outcome {
 	switch capability {
-	case "terminal.v1":
+	case "terminal.v2":
 		return d.terminal(ctx, authorization, payload)
 	case "preview.public.v1":
 		return d.preview(ctx, authorization, payload)
-	case "activity.v1":
-		return d.recordActivity(authorization, payload)
 	case "health.v1":
 		return result(d.config.Health.Snapshot())
 	case "config.apply.v1":
@@ -153,27 +144,25 @@ type attachmentControl struct {
 	NextSequence uint64 `json:"next_sequence,omitempty"`
 }
 
-type terminalStreamInput struct {
-	Sequence     uint64 `json:"sequence"`
-	SessionID    string `json:"session_id"`
-	AttachmentID string `json:"attachment_id"`
-	Generation   uint64 `json:"generation"`
-	BytesBase64  string `json:"bytes_base64"`
+func (d *Dispatcher) HandleTerminalInput(_ context.Context, authorization Authorization, sessionID, attachmentID string, generation uint64, data []byte) error {
+	if authorization.ClientID == "" || sessionID == "" || attachmentID == "" || generation == 0 || (authorization.SessionID != "" && authorization.SessionID != sessionID) {
+		return session.ErrInvalidInput
+	}
+	return d.config.Sessions.WriteStream(sessionID, attachmentID, generation, data)
 }
 
-func (d *Dispatcher) HandleInput(_ context.Context, authorization Authorization, payload json.RawMessage) error {
-	var input terminalStreamInput
-	if decodeStrict(payload, &input) != nil || input.Sequence == 0 || input.SessionID == "" || input.AttachmentID == "" || input.Generation == 0 || authorization.ClientID == "" {
+func (d *Dispatcher) HandleTerminalACK(_ context.Context, authorization Authorization, sessionID, attachmentID string, nextSequence uint64) error {
+	if authorization.ClientID == "" || sessionID == "" || attachmentID == "" || (authorization.SessionID != "" && authorization.SessionID != sessionID) {
 		return session.ErrInvalidInput
 	}
-	if authorization.SessionID != "" && authorization.SessionID != input.SessionID {
+	return d.config.Sessions.Acknowledge(sessionID, attachmentID, nextSequence)
+}
+
+func (d *Dispatcher) HandleTerminalResize(_ context.Context, authorization Authorization, sessionID, attachmentID string, columns, rows uint16) error {
+	if authorization.ClientID == "" || sessionID == "" || attachmentID == "" || columns == 0 || rows == 0 || (authorization.SessionID != "" && authorization.SessionID != sessionID) {
 		return session.ErrInvalidInput
 	}
-	data, err := base64.StdEncoding.Strict().DecodeString(input.BytesBase64)
-	if err != nil {
-		return session.ErrInvalidInput
-	}
-	return d.config.Sessions.WriteStream(input.SessionID, input.AttachmentID, input.Generation, data)
+	return d.config.Sessions.Resize(sessionID, attachmentID, pty.Dimensions{Columns: columns, Rows: rows}, d.config.Now())
 }
 
 func (d *Dispatcher) HandleControl(_ context.Context, authorization Authorization, frame protocol.Frame) operation.Outcome {
@@ -197,7 +186,7 @@ func (d *Dispatcher) HandleControl(_ context.Context, authorization Authorizatio
 }
 
 func (d *Dispatcher) OpenStream(_ context.Context, _ Authorization, capability string, payload json.RawMessage, outcome operation.Outcome, replay bool) (OutputStream, bool, error) {
-	if capability != "terminal.v1" || outcome.ErrorCode != "" {
+	if capability != "terminal.v2" || outcome.ErrorCode != "" {
 		return nil, false, nil
 	}
 	var request terminalRequest
@@ -230,7 +219,7 @@ func (s *terminalOutputStream) Next(ctx context.Context) (protocol.BinaryFrame, 
 		event, err := s.manager.WaitNext(waitCtx, s.sessionID, s.attachmentID)
 		cancel()
 		if err == nil {
-			return protocol.BinaryFrame{Channel: event.Channel, StartSequence: event.StartSequence, Data: event.Data}, nil
+			return protocol.BinaryFrame{Channel: event.Channel, StartSequence: event.StartSequence, Data: event.Data, Release: event.Release}, nil
 		}
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			snapshot, snapshotErr := s.manager.Snapshot(s.sessionID)
@@ -269,23 +258,24 @@ func (s *terminalOutputStream) Next(ctx context.Context) (protocol.BinaryFrame, 
 func (s *terminalOutputStream) Close() error { return s.manager.Detach(s.sessionID, s.attachmentID) }
 
 type terminalRequest struct {
-	Action         string `json:"action"`
-	OperationID    string `json:"operation_id,omitempty"`
-	Name           string `json:"name,omitempty"`
-	CWD            string `json:"cwd,omitempty"`
-	SessionID      string `json:"session_id,omitempty"`
-	AttachmentID   string `json:"attachment_id,omitempty"`
-	FromSequence   uint64 `json:"from_sequence,omitempty"`
-	AtLiveBoundary bool   `json:"at_live_boundary,omitempty"`
-	Generation     uint64 `json:"generation,omitempty"`
-	InputID        string `json:"input_id,omitempty"`
-	BytesBase64    string `json:"bytes_base64,omitempty"`
-	Columns        uint16 `json:"columns,omitempty"`
-	Rows           uint16 `json:"rows,omitempty"`
-	Signal         string `json:"signal,omitempty"`
+	Action         string            `json:"action"`
+	OperationID    string            `json:"operation_id,omitempty"`
+	Name           string            `json:"name,omitempty"`
+	CWD            string            `json:"cwd,omitempty"`
+	SessionID      string            `json:"session_id,omitempty"`
+	AttachmentID   string            `json:"attachment_id,omitempty"`
+	FromSequence   uint64            `json:"from_sequence,omitempty"`
+	AtLiveBoundary bool              `json:"at_live_boundary,omitempty"`
+	Generation     uint64            `json:"generation,omitempty"`
+	Columns        uint16            `json:"columns,omitempty"`
+	Rows           uint16            `json:"rows,omitempty"`
+	TerminalMode   string            `json:"terminal_mode,omitempty"`
+	Environment    map[string]string `json:"environment,omitempty"`
+	Signal         string            `json:"signal,omitempty"`
 }
 
 type terminalAttachResponse struct {
+	StreamID     uint32 `json:"stream_id,omitempty"`
 	AttachmentID string `json:"attachment_id"`
 	Session      struct {
 		Snapshot session.Snapshot `json:"snapshot"`
@@ -341,7 +331,13 @@ func (d *Dispatcher) terminal(ctx context.Context, authorization Authorization, 
 		if !ok || request.Columns == 0 || request.Rows == 0 {
 			return failure("invalid_request")
 		}
-		value, err := d.config.SessionLauncher.Launch(ctx, process.LaunchRequest{ID: request.SessionID, Name: request.Name, CWD: cwd, Dimensions: pty.Dimensions{Columns: request.Columns, Rows: request.Rows}})
+		if request.TerminalMode == "" {
+			request.TerminalMode = "herdr"
+		}
+		if request.TerminalMode != "herdr" && request.TerminalMode != "shell" {
+			return failure("invalid_request")
+		}
+		value, err := d.config.SessionLauncher.Launch(ctx, process.LaunchRequest{ID: request.SessionID, Name: request.Name, CWD: cwd, Dimensions: pty.Dimensions{Columns: request.Columns, Rows: request.Rows}, Mode: request.TerminalMode, Environment: request.Environment})
 		return domainResult(value, err)
 	case "attach", "replay":
 		attachmentID := request.AttachmentID
@@ -367,16 +363,6 @@ func (d *Dispatcher) terminal(ctx context.Context, authorization Authorization, 
 		return result(newTerminalAttachResponse(attachmentID, value))
 	case "detach":
 		return domainResult(struct{}{}, d.config.Sessions.Detach(request.SessionID, request.AttachmentID))
-	case "input":
-		data, err := base64.StdEncoding.Strict().DecodeString(request.BytesBase64)
-		if err != nil || len(data) == 0 || len(data) > 256<<10 {
-			return failure("invalid_request")
-		}
-		value, err := d.config.Sessions.Write(request.SessionID, session.InputKey{ClientID: authorization.ClientID, AttachmentID: request.AttachmentID, Generation: request.Generation, InputID: request.InputID}, data)
-		return domainResult(value, err)
-	case "query_input":
-		value, err := d.config.Sessions.QueryInput(request.SessionID, session.InputKey{ClientID: authorization.ClientID, AttachmentID: request.AttachmentID, Generation: request.Generation, InputID: request.InputID})
-		return domainResult(value, err)
 	case "resize":
 		err := d.config.Sessions.Resize(request.SessionID, request.AttachmentID, pty.Dimensions{Columns: request.Columns, Rows: request.Rows}, d.config.Now())
 		return domainResult(struct{}{}, err)
@@ -471,29 +457,6 @@ func (d *Dispatcher) preview(ctx context.Context, authorization Authorization, p
 	}
 }
 
-func (d *Dispatcher) recordActivity(authorization Authorization, payload json.RawMessage) operation.Outcome {
-	if d.config.Activity == nil || authorization.EnvironmentID == "" {
-		return failure("capability_required")
-	}
-	var event activity.Event
-	if decodeStrict(payload, &event) == nil {
-		if event.EnvironmentID != authorization.EnvironmentID {
-			return failure("not_found_or_forbidden")
-		}
-		if event.Source == activity.AgentSignal {
-			return failure("unauthorized")
-		}
-		value, err := d.config.Activity.Record(event, true)
-		return domainResult(value, err)
-	}
-	var envelope activity.SignalEnvelope
-	if d.config.SignalVerifier == nil || decodeStrict(payload, &envelope) != nil || envelope.Event.EnvironmentID != authorization.EnvironmentID {
-		return failure("not_found_or_forbidden")
-	}
-	value, err := d.config.SignalVerifier.Record(d.config.Activity, envelope)
-	return domainResult(value, err)
-}
-
 func (d *Dispatcher) cwd(value string) (string, bool) {
 	if value == "" {
 		value = d.config.WorkspaceRoot
@@ -578,13 +541,7 @@ func domainResult(value any, err error) operation.Outcome {
 		return failure("input_id_conflict")
 	case errors.Is(err, session.ErrInputUnknown):
 		return failure("input_unknown")
-	case errors.Is(err, activity.ErrInvalidSource):
-		return failure("invalid_activity_source")
-	case errors.Is(err, activity.ErrSignalInvalid), errors.Is(err, activity.ErrUnauthenticated):
-		return failure("unauthorized")
-	case errors.Is(err, activity.ErrInvalidSequence):
-		return failure("activity_replayed")
-	case errors.Is(err, activity.ErrQueueFull), errors.Is(err, preview.ErrResourceLimit):
+	case errors.Is(err, preview.ErrResourceLimit):
 		return failure("resource_limit")
 	case errors.Is(err, session.ErrResourceLimit), errors.Is(err, session.ErrInputJournalFull):
 		return failure("resource_limit")

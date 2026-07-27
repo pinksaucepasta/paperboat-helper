@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
@@ -34,8 +35,17 @@ type FramedConnection interface {
 	WriteBinary(protocol.BinaryFrame) error
 }
 
+type ApplicationConnection interface {
+	ReadApplication() (protocol.Frame, []byte, error)
+	WriteTerminalOutput(uint32, protocol.BinaryFrame) error
+}
+
 type ProtocolCloser interface {
 	CloseProtocol(int, string) error
+}
+
+type ConnectionRevocation interface {
+	RevocationFlag() *atomic.Bool
 }
 
 // Authorizer must validate the operation credential and all applicable bindings.
@@ -54,8 +64,12 @@ type Authorization struct {
 	SessionID      string
 	ResourceID     string
 	ExpiresAt      time.Time
+	Revoked        *atomic.Bool
+	RevokedSignal  <-chan struct{}
 	Value          any
 }
+
+type AuthorizationCloser interface{ CloseAuthorization() }
 
 type Handler interface {
 	Handle(context.Context, Authorization, string, json.RawMessage) operation.Outcome
@@ -88,8 +102,38 @@ type ControlHandler interface {
 	HandleControl(context.Context, Authorization, protocol.Frame) operation.Outcome
 }
 
-type InputHandler interface {
-	HandleInput(context.Context, Authorization, json.RawMessage) error
+type TerminalDataHandler interface {
+	HandleTerminalInput(context.Context, Authorization, string, string, uint64, []byte) error
+	HandleTerminalACK(context.Context, Authorization, string, string, uint64) error
+	HandleTerminalResize(context.Context, Authorization, string, string, uint16, uint16) error
+}
+
+type terminalStreamBinding struct {
+	authorization  Authorization
+	sessionID      string
+	attachmentID   string
+	generation     uint64
+	inputSequence  uint64
+	resizeSequence uint64
+	revoked        *atomic.Bool
+}
+
+type terminalConnectionState struct {
+	mu         sync.RWMutex
+	nextID     uint32
+	streams    map[uint32]*terminalStreamBinding
+	revoked    *atomic.Bool
+	expired    chan struct{}
+	expireOnce sync.Once
+	done       <-chan struct{}
+}
+
+func newTerminalConnectionState(revoked ...*atomic.Bool) *terminalConnectionState {
+	flag := new(atomic.Bool)
+	if len(revoked) != 0 && revoked[0] != nil {
+		flag = revoked[0]
+	}
+	return &terminalConnectionState{streams: make(map[uint32]*terminalStreamBinding), expired: make(chan struct{}), revoked: flag}
 }
 
 type Config struct {
@@ -106,6 +150,10 @@ type Config struct {
 
 type MetricRecorder interface {
 	Record(string, float64, map[string]string) error
+}
+
+type terminalMetricRecorder interface {
+	RecordTerminalStage(string, time.Duration, int)
 }
 
 type Server struct {
@@ -170,6 +218,9 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 	s.conns[conn] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
+		if closer, ok := authorizer.(AuthorizationCloser); ok {
+			closer.CloseAuthorization()
+		}
 		s.mu.Lock()
 		delete(s.conns, conn)
 		s.mu.Unlock()
@@ -180,15 +231,19 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 		}
 	}()
 
-	writer := &lockedWriter{writer: conn, connection: conn}
+	writer := newLockedWriter(conn)
+	defer writer.close()
 	connectionCtx, cancelConnection := context.WithCancel(s.ctx)
 	defer cancelConnection()
-	first, err := protocol.ReadFrame(conn)
+	first, binaryMessage, err := readApplication(conn)
 	if err != nil {
 		return err
 	}
-	if first.Type != "hello" {
+	if len(binaryMessage) != 0 || first.Type != "hello" {
 		_ = writer.write(errorFrame(first.RequestID, "protocol_incompatible", "hello required", false))
+		if len(binaryMessage) != 0 {
+			return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("hello must be a structured frame")}
+		}
 		return ErrHandshakeRequired
 	}
 	var hello helloPayload
@@ -213,7 +268,12 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 	for _, capability := range welcome.Capabilities {
 		selected[capability] = true
 	}
-	var lastInputSequence uint64
+	var revocationFlag *atomic.Bool
+	if revocation, ok := conn.(ConnectionRevocation); ok {
+		revocationFlag = revocation.RevocationFlag()
+	}
+	terminalState := newTerminalConnectionState(revocationFlag)
+	terminalState.done = connectionCtx.Done()
 
 	frames := make(chan readResult, 1)
 	readerDone := make(chan struct{})
@@ -227,6 +287,8 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 		select {
 		case <-s.ctx.Done():
 			return ErrServerStopped
+		case <-terminalState.expired:
+			return &protocol.Error{Code: protocol.CredentialExpired, Cause: errors.New("terminal credential expired")}
 		case <-timeout.C:
 			return context.DeadlineExceeded
 		case <-heartbeat.C:
@@ -239,23 +301,17 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 				return result.err
 			}
 			resetTimer(timeout, s.config.PeerTimeout)
+			if len(result.binary) != 0 {
+				if err := s.handleTerminalData(connectionCtx, result.binary, terminalState); err != nil {
+					return err
+				}
+				continue
+			}
 			switch result.frame.Type {
 			case "heartbeat":
 				continue
 			case "ack", "detach":
 				s.handleControl(result.frame, writer, authorizer)
-			case "input":
-				if !selected["terminal.v1"] {
-					return ErrCapabilityUnavailable
-				}
-				var input terminalStreamInput
-				if decodePayload(result.frame.Payload, &input) != nil || input.Sequence != lastInputSequence+1 {
-					return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input sequence is invalid")}
-				}
-				if err := s.handleInput(result.frame, authorizer); err != nil {
-					return err
-				}
-				lastInputSequence = input.Sequence
 			case "cancel":
 				cancelCtx, cancel := context.WithTimeout(s.ctx, min(s.config.MutationDeadline, 5*time.Second))
 				authorization, authErr := authorizer.Authorize(cancelCtx, result.frame)
@@ -271,7 +327,7 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 					_ = writer.write(errorFrame(result.frame.RequestID, "capability_required", "capability was not negotiated", false))
 					continue
 				}
-				s.startRequest(result.frame, writer, authorizer, connectionCtx, conn)
+				s.startRequest(result.frame, writer, authorizer, connectionCtx, conn, terminalState)
 			default:
 				_ = writer.write(errorFrame(result.frame.RequestID, "invalid_request", "unexpected frame", false))
 			}
@@ -279,18 +335,113 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 	}
 }
 
-func (s *Server) handleInput(frame protocol.Frame, authorizer Authorizer) error {
-	handler, ok := s.config.Handler.(InputHandler)
+func (s *Server) handleTerminalData(ctx context.Context, message []byte, state *terminalConnectionState) error {
+	handler, ok := s.config.Handler.(TerminalDataHandler)
 	if !ok {
 		return ErrCapabilityUnavailable
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, min(s.config.MutationDeadline, 5*time.Second))
-	defer cancel()
-	authorization, err := authorizer.Authorize(ctx, frame)
-	if err != nil || authorization.ClientID == "" {
-		return ErrCapabilityUnavailable
+	opcode, err := protocol.TerminalOpcode(message)
+	if err != nil {
+		return err
 	}
-	return handler.HandleInput(ctx, authorization, frame.Payload)
+	var streamID uint32
+	switch opcode {
+	case protocol.TerminalInputOpcode:
+		started := time.Now()
+		frame, decodeErr := protocol.DecodeTerminalInput(message)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		streamID = frame.StreamID
+		binding, bindErr := state.binding(streamID)
+		if bindErr != nil {
+			return bindErr
+		}
+		if frame.Sequence != binding.inputSequence+1 {
+			return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input sequence is not contiguous")}
+		}
+		if err := validateTerminalBinding(binding); err != nil {
+			return err
+		}
+		if err := handler.HandleTerminalInput(ctx, binding.authorization, binding.sessionID, binding.attachmentID, binding.generation, frame.Data); err != nil {
+			return err
+		}
+		if metrics, ok := s.config.Metrics.(terminalMetricRecorder); ok {
+			metrics.RecordTerminalStage("socket_to_pty", time.Since(started), len(frame.Data))
+		}
+		state.mu.Lock()
+		if current := state.streams[streamID]; current == binding {
+			current.inputSequence = frame.Sequence
+		}
+		state.mu.Unlock()
+		return nil
+	case protocol.TerminalACKOpcode:
+		frame, decodeErr := protocol.DecodeTerminalACK(message)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		binding, bindErr := state.binding(frame.StreamID)
+		if bindErr != nil {
+			return bindErr
+		}
+		if err := validateTerminalBinding(binding); err != nil {
+			return err
+		}
+		return handler.HandleTerminalACK(ctx, binding.authorization, binding.sessionID, binding.attachmentID, frame.NextSequence)
+	case protocol.TerminalResizeOpcode:
+		frame, decodeErr := protocol.DecodeTerminalResize(message)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		streamID = frame.StreamID
+		binding, bindErr := state.binding(streamID)
+		if bindErr != nil {
+			return bindErr
+		}
+		if frame.Sequence != binding.resizeSequence+1 {
+			return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal resize sequence is not contiguous")}
+		}
+		if err := validateTerminalBinding(binding); err != nil {
+			return err
+		}
+		if err := handler.HandleTerminalResize(ctx, binding.authorization, binding.sessionID, binding.attachmentID, frame.Columns, frame.Rows); err != nil {
+			return err
+		}
+		state.mu.Lock()
+		if current := state.streams[streamID]; current == binding {
+			current.resizeSequence = frame.Sequence
+		}
+		state.mu.Unlock()
+		return nil
+	default:
+		return &protocol.Error{Code: protocol.InvalidFrame}
+	}
+}
+
+func validateTerminalBinding(binding *terminalStreamBinding) error {
+	if binding == nil || binding.authorization.ClientID == "" || binding.sessionID == "" || binding.attachmentID == "" || binding.generation == 0 {
+		return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal stream is not bound")}
+	}
+	if !binding.authorization.ExpiresAt.IsZero() && !time.Now().UTC().Before(binding.authorization.ExpiresAt) {
+		return &protocol.Error{Code: protocol.CredentialExpired, Cause: errors.New("terminal credential expired")}
+	}
+	if binding.revoked != nil && binding.revoked.Load() {
+		return &protocol.Error{Code: protocol.CredentialExpired, Cause: errors.New("terminal credential revoked")}
+	}
+	return nil
+}
+
+func (s *terminalConnectionState) binding(streamID uint32) (*terminalStreamBinding, error) {
+	if streamID == 0 {
+		return nil, &protocol.Error{Code: protocol.InvalidFrame}
+	}
+	s.mu.RLock()
+	binding := s.streams[streamID]
+	s.mu.RUnlock()
+	if binding == nil {
+		return nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("unknown terminal stream")}
+	}
+	return binding, nil
 }
 
 func (s *Server) handleControl(frame protocol.Frame, writer *lockedWriter, authorizer Authorizer) {
@@ -337,7 +488,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *Server) startRequest(frame protocol.Frame, writer *lockedWriter, authorizer Authorizer, connectionCtx context.Context, conn Connection) {
+func (s *Server) startRequest(frame protocol.Frame, writer *lockedWriter, authorizer Authorizer, connectionCtx context.Context, conn Connection, terminalState *terminalConnectionState) {
 	select {
 	case s.sem <- struct{}{}:
 	default:
@@ -397,27 +548,112 @@ func (s *Server) startRequest(frame protocol.Frame, writer *lockedWriter, author
 			_ = writer.write(errorFrameWithDetails(frame.RequestID, outcome.ErrorCode, "operation failed", false, outcome.Result))
 			return
 		}
-		responsePayload, _ := json.Marshal(struct {
-			Result json.RawMessage `json:"result"`
-			Replay bool            `json:"replay"`
-		}{Result: outcome.Result, Replay: replay})
 		stream, hasStream, streamErr := s.openStream(connectionCtx, authorization, frame, outcome, replay)
 		if streamErr != nil {
 			_ = writer.write(errorFrame(frame.RequestID, "unavailable", "output stream could not be opened", true))
 			return
 		}
 		s.recordOperation(componentForCapability(frame.Capability), metricResult("", replay))
+		var streamID uint32
+		if hasStream {
+			streamID, streamErr = terminalState.bind(authorization, frame, outcome)
+			if streamErr != nil {
+				_ = stream.Close()
+				_ = writer.write(errorFrame(frame.RequestID, "invalid_request", "terminal stream could not be bound", false))
+				return
+			}
+			outcome.Result, streamErr = addStreamID(outcome.Result, streamID)
+			if streamErr != nil {
+				terminalState.remove(streamID)
+				_ = stream.Close()
+				_ = writer.write(errorFrame(frame.RequestID, "unavailable", "terminal stream could not be opened", true))
+				return
+			}
+		}
+		responsePayload, _ := json.Marshal(struct {
+			Result json.RawMessage `json:"result"`
+			Replay bool            `json:"replay"`
+		}{Result: outcome.Result, Replay: replay})
 		if err := writer.write(protocol.Frame{Type: "response", RequestID: frame.RequestID, Version: protocol.ProtocolVersion, OperationID: frame.OperationID, Payload: responsePayload}); err != nil {
 			if hasStream {
+				terminalState.remove(streamID)
 				_ = stream.Close()
 			}
 			return
 		}
 		if hasStream {
 			s.wg.Add(1)
-			go s.stream(connectionCtx, writer, conn, stream)
+			go s.stream(connectionCtx, writer, conn, stream, terminalState, streamID)
 		}
 	}()
+}
+
+func (s *terminalConnectionState) bind(authorization Authorization, frame protocol.Frame, outcome operation.Outcome) (uint32, error) {
+	var request terminalRequest
+	var response terminalAttachResponse
+	if frame.Capability != "terminal.v2" || decodeStrict(frame.Payload, &request) != nil || request.Action != "attach" || json.Unmarshal(outcome.Result, &response) != nil || request.SessionID == "" || response.AttachmentID == "" || response.Session.Snapshot.Generation == 0 {
+		return 0, errors.New("invalid terminal attachment binding")
+	}
+	if !authorization.ExpiresAt.IsZero() && !time.Now().UTC().Before(authorization.ExpiresAt) {
+		return 0, &protocol.Error{Code: protocol.CredentialExpired}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for attempts := uint64(0); attempts < uint64(^uint32(0)); attempts++ {
+		s.nextID++
+		if s.nextID == 0 {
+			s.nextID++
+		}
+		if s.streams[s.nextID] != nil {
+			continue
+		}
+		streamID := s.nextID
+		revoked := authorization.Revoked
+		if revoked == nil {
+			revoked = s.revoked
+		}
+		binding := &terminalStreamBinding{authorization: authorization, sessionID: request.SessionID, attachmentID: response.AttachmentID, generation: response.Session.Snapshot.Generation, revoked: revoked}
+		s.streams[streamID] = binding
+		if authorization.RevokedSignal != nil {
+			go func(signal <-chan struct{}) {
+				select {
+				case <-signal:
+					s.expireOnce.Do(func() { close(s.expired) })
+				case <-s.done:
+				}
+			}(authorization.RevokedSignal)
+		}
+		if !authorization.ExpiresAt.IsZero() {
+			delay := time.Until(authorization.ExpiresAt)
+			time.AfterFunc(delay, func() { s.expire(streamID, binding) })
+		}
+		return streamID, nil
+	}
+	return 0, errors.New("terminal stream id space exhausted")
+}
+
+func (s *terminalConnectionState) expire(streamID uint32, binding *terminalStreamBinding) {
+	s.mu.RLock()
+	active := s.streams[streamID] == binding
+	s.mu.RUnlock()
+	if active {
+		s.expireOnce.Do(func() { close(s.expired) })
+	}
+}
+
+func (s *terminalConnectionState) remove(streamID uint32) {
+	s.mu.Lock()
+	delete(s.streams, streamID)
+	s.mu.Unlock()
+}
+
+func addStreamID(result json.RawMessage, streamID uint32) (json.RawMessage, error) {
+	var value map[string]any
+	if streamID == 0 || json.Unmarshal(result, &value) != nil || value == nil {
+		return nil, errors.New("invalid terminal attachment response")
+	}
+	value["stream_id"] = streamID
+	return json.Marshal(value)
 }
 
 func (s *Server) openStream(ctx context.Context, authorization Authorization, frame protocol.Frame, outcome operation.Outcome, replay bool) (OutputStream, bool, error) {
@@ -428,15 +664,16 @@ func (s *Server) openStream(ctx context.Context, authorization Authorization, fr
 	return handler.OpenStream(ctx, authorization, frame.Capability, frame.Payload, outcome, replay)
 }
 
-func (s *Server) stream(ctx context.Context, writer *lockedWriter, conn Connection, stream OutputStream) {
+func (s *Server) stream(ctx context.Context, writer *lockedWriter, conn Connection, stream OutputStream, state *terminalConnectionState, streamID uint32) {
 	defer s.wg.Done()
+	defer state.remove(streamID)
 	defer stream.Close()
 	for {
 		frame, err := stream.Next(ctx)
 		if err != nil {
 			var streamEnd *StreamEnd
 			if errors.As(err, &streamEnd) {
-				_ = writer.write(protocol.Frame{Type: "event", RequestID: "stream", Version: protocol.ProtocolVersion, Capability: "terminal.v1", Payload: streamEnd.Payload})
+				_ = writer.write(protocol.Frame{Type: "event", RequestID: "stream", Version: protocol.ProtocolVersion, Capability: "terminal.v2", Payload: streamEnd.Payload})
 				return
 			}
 			var streamError *StreamError
@@ -454,9 +691,17 @@ func (s *Server) stream(ctx context.Context, writer *lockedWriter, conn Connecti
 			}
 			return
 		}
-		if err := writer.writeBinary(frame); err != nil {
+		started := time.Now()
+		writeErr := writer.writeTerminalOutput(streamID, frame)
+		if frame.Release != nil {
+			frame.Release()
+		}
+		if writeErr != nil {
 			_ = conn.Close()
 			return
+		}
+		if metrics, ok := s.config.Metrics.(terminalMetricRecorder); ok {
+			metrics.RecordTerminalStage("pty_to_socket", time.Since(started), len(frame.Data))
 		}
 	}
 }
@@ -517,15 +762,24 @@ type welcomePayload struct {
 }
 
 type readResult struct {
-	frame protocol.Frame
-	err   error
+	frame  protocol.Frame
+	binary []byte
+	err    error
 }
 
-func readFrames(reader io.Reader, results chan<- readResult, done <-chan struct{}) {
+func readApplication(reader Connection) (protocol.Frame, []byte, error) {
+	if application, ok := reader.(ApplicationConnection); ok {
+		return application.ReadApplication()
+	}
+	frame, err := protocol.ReadFrame(reader)
+	return frame, nil, err
+}
+
+func readFrames(reader Connection, results chan<- readResult, done <-chan struct{}) {
 	for {
-		frame, err := protocol.ReadFrame(reader)
+		frame, binary, err := readApplication(reader)
 		select {
-		case results <- readResult{frame: frame, err: err}:
+		case results <- readResult{frame: frame, binary: binary, err: err}:
 		case <-done:
 			return
 		}
@@ -536,27 +790,98 @@ func readFrames(reader io.Reader, results chan<- readResult, done <-chan struct{
 }
 
 type lockedWriter struct {
-	mu         sync.Mutex
 	writer     io.Writer
 	connection Connection
+	requests   chan writerRequest
+	stop       chan struct{}
+	done       chan struct{}
+	startOnce  sync.Once
+	stopOnce   sync.Once
+}
+
+type writerRequest struct {
+	write  func() error
+	result chan error
+}
+
+func newLockedWriter(connection Connection) *lockedWriter {
+	w := &lockedWriter{writer: connection, connection: connection}
+	w.start()
+	return w
+}
+
+func (w *lockedWriter) start() {
+	w.startOnce.Do(func() {
+		w.requests = make(chan writerRequest, 256)
+		w.stop = make(chan struct{})
+		w.done = make(chan struct{})
+		go w.run()
+	})
+}
+
+func (w *lockedWriter) run() {
+	defer close(w.done)
+	for {
+		select {
+		case request := <-w.requests:
+			err := request.write()
+			request.result <- err
+			if err != nil {
+				return
+			}
+		case <-w.stop:
+			return
+		}
+	}
+}
+
+func (w *lockedWriter) enqueue(write func() error) error {
+	w.start()
+	request := writerRequest{write: write, result: make(chan error, 1)}
+	select {
+	case w.requests <- request:
+	case <-w.done:
+		return io.ErrClosedPipe
+	}
+	select {
+	case err := <-request.result:
+		return err
+	case <-w.done:
+		return io.ErrClosedPipe
+	}
+}
+
+func (w *lockedWriter) close() {
+	w.start()
+	w.stopOnce.Do(func() { close(w.stop) })
+	<-w.done
 }
 
 func (w *lockedWriter) write(frame protocol.Frame) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if connection, ok := w.connection.(FramedConnection); ok {
-		return connection.WriteStructured(frame)
-	}
-	return protocol.WriteFrame(w.writer, frame)
+	return w.enqueue(func() error {
+		if connection, ok := w.connection.(FramedConnection); ok {
+			return connection.WriteStructured(frame)
+		}
+		return protocol.WriteFrame(w.writer, frame)
+	})
 }
 
 func (w *lockedWriter) writeBinary(frame protocol.BinaryFrame) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if connection, ok := w.connection.(FramedConnection); ok {
-		return connection.WriteBinary(frame)
-	}
-	return protocol.WriteBinaryFrame(w.writer, frame)
+	return w.enqueue(func() error {
+		if connection, ok := w.connection.(FramedConnection); ok {
+			return connection.WriteBinary(frame)
+		}
+		return protocol.WriteBinaryFrame(w.writer, frame)
+	})
+}
+
+func (w *lockedWriter) writeTerminalOutput(streamID uint32, frame protocol.BinaryFrame) error {
+	return w.enqueue(func() error {
+		if connection, ok := w.connection.(ApplicationConnection); ok {
+			return connection.WriteTerminalOutput(streamID, frame)
+		}
+		return protocol.WriteBinaryFrame(w.writer, frame)
+	})
 }
 
 func closeReason(err error) string {
@@ -701,12 +1026,10 @@ func (s *Server) recordOperation(component, result string) {
 
 func componentForCapability(capability string) string {
 	switch capability {
-	case "terminal.v1":
+	case "terminal.v2":
 		return "session"
 	case "upload.v1":
 		return "upload"
-	case "activity.v1":
-		return "activity"
 	case "preview.public.v1":
 		return "preview"
 	case "update.signed.v1":

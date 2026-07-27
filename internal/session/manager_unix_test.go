@@ -114,6 +114,38 @@ func TestManagerStreamInputPreservesBytesWithoutIdempotencyRows(t *testing.T) {
 	_, _ = manager.Close(context.Background(), created.ID)
 }
 
+func TestManagerStreamInputDoesNotWaitForLifecycleLock(t *testing.T) {
+	manager, root, shell := realManager(t)
+	created, err := manager.Create(context.Background(), CreateRequest{Name: "unlocked-input", Command: shellCommand(shell, root, "read line; read line")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Attach(created.ID, "att", 0); err != nil {
+		t.Fatal(err)
+	}
+	session, err := manager.get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.opMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.WriteStream(created.ID, "att", created.Generation, []byte("one\n"))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("stream input waited for lifecycle lock")
+	}
+	session.opMu.Unlock()
+	if _, err := manager.Close(context.Background(), created.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagerAttachUsesLatestWindowWhenReplayExceedsQueue(t *testing.T) {
 	manager, root, shell := realManager(t)
 	manager.config.AttachmentBytes = 8

@@ -25,6 +25,50 @@ func (f authorizerFunc) Authorize(ctx context.Context, frame protocol.Frame) (Au
 	return f(ctx, frame)
 }
 
+func TestTerminalBindingExpiryClosesOnlyAnActiveStream(t *testing.T) {
+	attach := protocol.Frame{Type: "request", RequestID: "req_attach", Version: "2.0", OperationID: "op_attach_0001", Capability: "terminal.v2", DeadlineMS: 1000, Payload: json.RawMessage(`{"action":"attach","session_id":"ses_1"}`)}
+	outcome := operation.Outcome{Result: json.RawMessage(`{"attachment_id":"att_1","session":{"snapshot":{"generation":1}}}`)}
+
+	active := newTerminalConnectionState()
+	if _, err := active.bind(Authorization{ClientID: "cli_1", ExpiresAt: time.Now().Add(10 * time.Millisecond)}, attach, outcome); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-active.expired:
+	case <-time.After(time.Second):
+		t.Fatal("active terminal binding did not expire")
+	}
+
+	removed := newTerminalConnectionState()
+	streamID, err := removed.bind(Authorization{ClientID: "cli_1", ExpiresAt: time.Now().Add(30 * time.Millisecond)}, attach, outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed.remove(streamID)
+	select {
+	case <-removed.expired:
+		t.Fatal("removed terminal binding closed the connection")
+	case <-time.After(60 * time.Millisecond):
+	}
+}
+
+func TestTerminalBindingRevocationClosesConnectionImmediately(t *testing.T) {
+	attach := protocol.Frame{Type: "request", RequestID: "req_attach", Version: "2.0", OperationID: "op_attach_0001", Capability: "terminal.v2", DeadlineMS: 1000, Payload: json.RawMessage(`{"action":"attach","session_id":"ses_1"}`)}
+	outcome := operation.Outcome{Result: json.RawMessage(`{"attachment_id":"att_1","session":{"snapshot":{"generation":1}}}`)}
+	revoked := make(chan struct{})
+	state := newTerminalConnectionState()
+	state.done = make(chan struct{})
+	if _, err := state.bind(Authorization{ClientID: "cli_1", RevokedSignal: revoked}, attach, outcome); err != nil {
+		t.Fatal(err)
+	}
+	close(revoked)
+	select {
+	case <-state.expired:
+	case <-time.After(time.Second):
+		t.Fatal("revoked terminal binding did not close the connection")
+	}
+}
+
 type handlerFunc func(context.Context, Authorization, string, json.RawMessage) operation.Outcome
 
 func (f handlerFunc) Handle(ctx context.Context, authorization Authorization, capability string, payload json.RawMessage) operation.Outcome {
@@ -38,7 +82,7 @@ func testServer(t *testing.T, authorize authorizerFunc, handle handlerFunc, maxC
 		t.Fatal(err)
 	}
 	server, err := New(Config{
-		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v1": true, "health.v1": true}},
+		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v2": true, "health.v1": true}},
 		Journal:    journal, Authorizer: authorize, Handler: handle, MaxConcurrent: maxConcurrent,
 		HeartbeatInterval: time.Hour, PeerTimeout: 2 * time.Hour, MutationDeadline: 5 * time.Minute,
 	})
@@ -57,8 +101,8 @@ func testServer(t *testing.T, authorize authorizerFunc, handle handlerFunc, maxC
 
 func hello(t *testing.T, conn net.Conn) protocol.Frame {
 	t.Helper()
-	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
-	if err := protocol.WriteFrame(conn, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload}); err != nil {
+	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
+	if err := protocol.WriteFrame(conn, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := protocol.ReadFrame(conn)
@@ -72,7 +116,7 @@ func hello(t *testing.T, conn net.Conn) protocol.Frame {
 }
 
 func request(id, operationID string, payload json.RawMessage) protocol.Frame {
-	return protocol.Frame{Type: "request", RequestID: id, Version: "1.0", OperationID: operationID, Capability: "terminal.v1", DeadlineMS: 30_000, Payload: payload}
+	return protocol.Frame{Type: "request", RequestID: id, Version: "2.0", OperationID: operationID, Capability: "terminal.v2", DeadlineMS: 30_000, Payload: payload}
 }
 
 func TestServeRequiresHelloBeforeMutation(t *testing.T) {
@@ -175,12 +219,37 @@ func (s errorOutputStream) Next(context.Context) (protocol.BinaryFrame, error) {
 }
 func (errorOutputStream) Close() error { return nil }
 
+type releasingOutputStream struct {
+	released *atomic.Int64
+	sent     bool
+}
+
+func (s *releasingOutputStream) Next(context.Context) (protocol.BinaryFrame, error) {
+	if s.sent {
+		return protocol.BinaryFrame{}, io.EOF
+	}
+	s.sent = true
+	return protocol.BinaryFrame{Channel: protocol.Stdout, Data: []byte("x"), Release: func() { s.released.Add(1) }}, nil
+}
+func (*releasingOutputStream) Close() error { return nil }
+
+func TestTerminalStreamReleasesOutputAfterWrite(t *testing.T) {
+	connection := &streamTestConnection{}
+	server := &Server{}
+	var released atomic.Int64
+	server.wg.Add(1)
+	server.stream(context.Background(), &lockedWriter{writer: connection, connection: connection}, connection, &releasingOutputStream{released: &released}, newTerminalConnectionState(), 1)
+	if got := released.Load(); got != 1 {
+		t.Fatalf("release calls = %d", got)
+	}
+}
+
 func TestSlowConsumerStreamSendsBoundedErrorBefore4408Close(t *testing.T) {
 	details, _ := json.Marshal(map[string]any{"queued_bytes": float64(1 << 20), "secret": "discard"})
 	connection := &streamTestConnection{}
 	server := &Server{}
 	server.wg.Add(1)
-	server.stream(context.Background(), &lockedWriter{writer: connection, connection: connection}, connection, errorOutputStream{&StreamError{Code: "slow_consumer", Details: details, CloseCode: protocol.CloseSlowConsumer}})
+	server.stream(context.Background(), &lockedWriter{writer: connection, connection: connection}, connection, errorOutputStream{&StreamError{Code: "slow_consumer", Details: details, CloseCode: protocol.CloseSlowConsumer}}, newTerminalConnectionState(), 1)
 	if connection.closeCode != protocol.CloseSlowConsumer || len(connection.structured) != 1 {
 		t.Fatalf("code=%d frames=%#v", connection.closeCode, connection.structured)
 	}
@@ -201,12 +270,12 @@ func TestTerminalStreamEndEmitsStructuredEvent(t *testing.T) {
 	connection := &streamTestConnection{}
 	server := &Server{}
 	server.wg.Add(1)
-	server.stream(context.Background(), &lockedWriter{writer: connection, connection: connection}, connection, errorOutputStream{&StreamEnd{Payload: payload}})
+	server.stream(context.Background(), &lockedWriter{writer: connection, connection: connection}, connection, errorOutputStream{&StreamEnd{Payload: payload}}, newTerminalConnectionState(), 1)
 	if connection.closeCode != 0 || len(connection.structured) != 1 {
 		t.Fatalf("code=%d frames=%#v", connection.closeCode, connection.structured)
 	}
 	frame := connection.structured[0]
-	if frame.Type != "event" || frame.Capability != "terminal.v1" || frame.RequestID != "stream" || string(frame.Payload) != string(payload) {
+	if frame.Type != "event" || frame.Capability != "terminal.v2" || frame.RequestID != "stream" || string(frame.Payload) != string(payload) {
 		t.Fatalf("frame=%#v", frame)
 	}
 }
@@ -220,8 +289,8 @@ func TestHelloRejectsDuplicateCapabilities(t *testing.T) {
 	client, peer := net.Pipe()
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(peer) }()
-	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","terminal.v1","health.v1"]}`)
-	if err := protocol.WriteFrame(client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload}); err != nil {
+	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","terminal.v2","health.v1"]}`)
+	if err := protocol.WriteFrame(client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	response, err := protocol.ReadFrame(client)
@@ -327,7 +396,7 @@ func TestExplicitCancellationStopsOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	if err := protocol.WriteFrame(client, protocol.Frame{Type: "cancel", RequestID: "req_cancel", Version: "1.0", OperationID: "op_00000001"}); err != nil {
+	if err := protocol.WriteFrame(client, protocol.Frame{Type: "cancel", RequestID: "req_cancel", Version: "2.0", OperationID: "op_00000001"}); err != nil {
 		t.Fatal(err)
 	}
 	seenCancel, seenResult := false, false
@@ -367,7 +436,7 @@ func TestCancellationCannotCrossAuthorizationBinding(t *testing.T) {
 		return Authorization{JournalBinding: "principal-b"}, nil
 	}))
 	hello(t, clientB)
-	if response := sendRequest(t, clientB, protocol.Frame{Type: "cancel", RequestID: "req_cancel_b", Version: "1.0", OperationID: "op_00000001"}); response.Type != "response" {
+	if response := sendRequest(t, clientB, protocol.Frame{Type: "cancel", RequestID: "req_cancel_b", Version: "2.0", OperationID: "op_00000001"}); response.Type != "response" {
 		t.Fatalf("cancel b=%#v", response)
 	}
 	select {
@@ -375,7 +444,7 @@ func TestCancellationCannotCrossAuthorizationBinding(t *testing.T) {
 		t.Fatal("different principal canceled operation")
 	case <-time.After(20 * time.Millisecond):
 	}
-	if err := protocol.WriteFrame(clientA, protocol.Frame{Type: "cancel", RequestID: "req_cancel_a", Version: "1.0", OperationID: "op_00000001"}); err != nil {
+	if err := protocol.WriteFrame(clientA, protocol.Frame{Type: "cancel", RequestID: "req_cancel_a", Version: "2.0", OperationID: "op_00000001"}); err != nil {
 		t.Fatal(err)
 	}
 	for {

@@ -8,14 +8,13 @@ import (
 )
 
 var (
-	errProtocol       = errors.New("protocol_incompatible")
-	errCapability     = errors.New("capability_required")
-	errReplayGap      = errors.New("replay_gap")
-	errInvalidPath    = errors.New("invalid_path")
-	errActivityReplay = errors.New("activity_replayed")
-	errUnauthorized   = errors.New("not_found_or_forbidden")
-	errCanceled       = errors.New("operation_canceled")
-	errSlowConsumer   = errors.New("slow_consumer")
+	errProtocol     = errors.New("protocol_incompatible")
+	errCapability   = errors.New("capability_required")
+	errReplayGap    = errors.New("replay_gap")
+	errInvalidPath  = errors.New("invalid_path")
+	errUnauthorized = errors.New("not_found_or_forbidden")
+	errCanceled     = errors.New("operation_canceled")
+	errSlowConsumer = errors.New("slow_consumer")
 )
 
 type fakePeer struct {
@@ -23,7 +22,6 @@ type fakePeer struct {
 	capabilities     map[string]bool
 	earliestSequence uint64
 	latestSequence   uint64
-	activitySequence map[string]uint64
 	revoked          bool
 	canceled         map[string]bool
 	queueBytes       int
@@ -33,12 +31,11 @@ func newFakePeer() *fakePeer {
 	return &fakePeer{
 		version: "1.0",
 		capabilities: map[string]bool{
-			"terminal.v1": true, "upload.v1": true, "preview.public.v1": true,
-			"activity.v1": true, "config.apply.v1": true, "health.v1": true,
+			"terminal.v2": true, "upload.v1": true, "preview.public.v1": true,
+			"config.apply.v1": true, "health.v1": true,
 		},
 		earliestSequence: 1024,
 		latestSequence:   2048,
-		activitySequence: map[string]uint64{},
 		canceled:         map[string]bool{},
 	}
 }
@@ -90,17 +87,6 @@ func (p *fakePeer) preview(private bool) error {
 	return nil
 }
 
-func (p *fakePeer) activity(source string, sequence uint64) error {
-	if p.revoked {
-		return errUnauthorized
-	}
-	if sequence <= p.activitySequence[source] {
-		return errActivityReplay
-	}
-	p.activitySequence[source] = sequence
-	return nil
-}
-
 func (p *fakePeer) config(hasScope, hasAssignment, hasConsent bool) error {
 	if p.revoked || !hasScope || !hasAssignment || !hasConsent {
 		return errUnauthorized
@@ -123,7 +109,7 @@ func (p *fakePeer) enqueue(bytes int) error {
 
 func TestFakePeerVerticalContract(t *testing.T) {
 	peer := newFakePeer()
-	if err := peer.negotiate([]string{"1.0"}, []string{"terminal.v1", "health.v1"}); err != nil {
+	if err := peer.negotiate([]string{"1.0"}, []string{"terminal.v2", "health.v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.negotiate([]string{"2.0"}, nil); !errors.Is(err, errProtocol) {
@@ -147,12 +133,6 @@ func TestFakePeerVerticalContract(t *testing.T) {
 	}
 	if err := peer.preview(true); !errors.Is(err, errUnauthorized) {
 		t.Fatalf("private preview: %v", err)
-	}
-	if err := peer.activity("terminal_input:att_1", 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := peer.activity("terminal_input:att_1", 1); !errors.Is(err, errActivityReplay) {
-		t.Fatalf("activity replay: %v", err)
 	}
 	if err := peer.config(true, true, true); err != nil {
 		t.Fatal(err)

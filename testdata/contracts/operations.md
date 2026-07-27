@@ -19,7 +19,7 @@ not bypass redaction. Trace payloads follow the 30-day log policy.
 Required counters/histograms cover negotiation, incompatibility, capability rejection,
 authentication/authorization rejection, revocation latency, reconnect, replay gaps,
 uncertain writes, slow-consumer eviction, upload rejection/cleanup, preview readiness and
-route/target failure, activity freshness, config conflict, connector admission/replacement,
+route/target failure freshness, config conflict, connector admission/replacement,
 route attachment, and monotonic usage reconciliation.
 
 Liveness means the process answers. Readiness is per capability and uses stable reasons:

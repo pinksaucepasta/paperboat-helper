@@ -275,7 +275,13 @@ func renderSystemd(config Config) []byte {
 		output.WriteString(systemdEscape(key + "=" + config.Environment[key]))
 		output.WriteByte('\n')
 	}
-	output.WriteString("Restart=always\nRestartSec=5s\nTimeoutStopSec=60s\nKillMode=mixed\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=multi-user.target\n")
+	output.WriteString("Restart=always\nRestartSec=5s\nTimeoutStopSec=60s\nKillMode=mixed\nUMask=0077\n")
+	if config.Kind == HostKind {
+		output.WriteString("NoNewPrivileges=true\n")
+	} else {
+		output.WriteString("NoNewPrivileges=false\n")
+	}
+	output.WriteString("PrivateTmp=true\n\n[Install]\nWantedBy=multi-user.target\n")
 	return []byte(output.String())
 }
 

@@ -7,9 +7,11 @@ import (
 	"context"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pinksaucepasta/paperboat-helper/internal/history"
 	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
 	"github.com/pinksaucepasta/paperboat-helper/internal/store"
 )
@@ -90,7 +92,7 @@ func TestManagerLiveOutputDoesNotWaitForSQLitePersistence(t *testing.T) {
 	releasePersistence := func() { releaseOnce.Do(func() { close(release) }) }
 	defer releasePersistence()
 	state, err := store.Open(context.Background(), store.Config{Root: filepath.Join(t.TempDir(), "state"), FailureHook: func(point string) error {
-		if point == "replace_output_before_commit" {
+		if point == "append_before_commit" {
 			select {
 			case entered <- struct{}{}:
 			default:
@@ -145,6 +147,67 @@ func TestManagerLiveOutputDoesNotWaitForSQLitePersistence(t *testing.T) {
 	releasePersistence()
 	if _, err := manager.Close(context.Background(), created.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManagerPersistenceBacklogRetainsOnlyBoundedHistory(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var commits atomic.Int64
+	state, err := store.Open(context.Background(), store.Config{Root: filepath.Join(t.TempDir(), "state"), FailureHook: func(point string) error {
+		if point != "append_before_commit" {
+			return nil
+		}
+		if commits.Add(1) == 1 {
+			entered <- struct{}{}
+			<-release
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	now := time.Now().UTC()
+	if err := state.CreateSession(context.Background(), store.Session{ID: "ses_backlog", Name: "backlog", CWD: t.TempDir(), CommandPath: "/bin/sh", CommandArgs: []string{"-c", "exit"}, CommandEnv: []string{"PATH=/bin"}, Columns: 80, Rows: 24, State: "running", Generation: 1, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := history.New(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{config: ManagerConfig{Store: state, HistoryBytes: 64}}
+	session := &managedSession{id: "ses_backlog", history: retained}
+	manager.startOutputPersistence(session)
+	appendByte := func(value byte) {
+		buffer := history.AcquireBuffer()
+		buffer[0] = value
+		event, err := retained.AppendBuffer(1, buffer[:1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager.queueOutputPersistence(session, event)
+		event.Release()
+	}
+	appendByte(0)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("persistence worker did not enter blocked commit")
+	}
+	for index := 1; index <= 1000; index++ {
+		appendByte(byte(index))
+	}
+	close(release)
+	if err := manager.stopOutputPersistence(session); err != nil {
+		t.Fatal(err)
+	}
+	earliest, latest, err := state.OutputBounds(context.Background(), session.id)
+	if err != nil || earliest != latest-64 || latest != 1001 {
+		t.Fatalf("bounds=[%d,%d) err=%v", earliest, latest, err)
+	}
+	if got := commits.Load(); got > 65 {
+		t.Fatalf("persisted %d events for a 64-byte retained tail", got)
 	}
 }
 

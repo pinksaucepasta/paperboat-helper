@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/history"
@@ -54,6 +55,137 @@ func TestWaitNextWakesForOutputDetachEvictionAndCancellation(t *testing.T) {
 	}
 }
 
+func TestPublishOwnedSharesPayloadAcrossAttachments(t *testing.T) {
+	for _, attachmentCount := range []int{1, 4, 16} {
+		t.Run(fmt.Sprintf("attachments_%d", attachmentCount), func(t *testing.T) {
+			f := NewFanout()
+			ids := make([]string, attachmentCount)
+			for index := range ids {
+				ids[index] = fmt.Sprintf("att_%d", index)
+				if err := f.Attach(ids[index], 4096); err != nil {
+					t.Fatal(err)
+				}
+			}
+			payload := []byte("shared")
+			if _, err := f.PublishOwned(history.Event{Channel: 1, StartSequence: 0, EndSequence: uint64(len(payload)), Data: payload}); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.ring) != 1 {
+				t.Fatalf("ring events=%d want=1", len(f.ring))
+			}
+			for _, id := range ids {
+				event, err := f.WaitNextOwned(context.Background(), id)
+				if err != nil || &event.Data[0] != &payload[0] {
+					t.Fatalf("%s payload was cloned: event=%p source=%p err=%v", id, event.Data, payload, err)
+				}
+				event.Release()
+			}
+			if len(f.ring) != 0 {
+				t.Fatalf("drained ring events=%d want=0", len(f.ring))
+			}
+		})
+	}
+}
+
+func TestFanoutCompactsBehindSlowestAttachedCursor(t *testing.T) {
+	f := NewFanout()
+	for _, id := range []string{"fast", "slow"} {
+		if err := f.Attach(id, 16); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for sequence, value := range []byte("abc") {
+		start := uint64(sequence)
+		if _, err := f.PublishOwned(history.Event{StartSequence: start, EndSequence: start + 1, Data: []byte{value}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 3 {
+		event, err := f.WaitNextOwned(context.Background(), "fast")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.Release()
+	}
+	if len(f.ring) != 3 {
+		t.Fatalf("ring compacted ahead of slow cursor: events=%d", len(f.ring))
+	}
+	for remaining := 2; remaining >= 0; remaining-- {
+		event, err := f.WaitNextOwned(context.Background(), "slow")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.Release()
+		if len(f.ring) != remaining {
+			t.Fatalf("ring events=%d want=%d", len(f.ring), remaining)
+		}
+	}
+}
+
+func BenchmarkPublishOwnedAttachments(b *testing.B) {
+	for _, attachments := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("%d", attachments), func(b *testing.B) {
+			f := NewFanout()
+			ids := make([]string, attachments)
+			for index := 0; index < attachments; index++ {
+				ids[index] = fmt.Sprintf("att_%d", index)
+				if err := f.Attach(ids[index], 1<<20); err != nil {
+					b.Fatal(err)
+				}
+			}
+			payload := make([]byte, 4096)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(payload) * attachments))
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				start := uint64(index * len(payload))
+				if _, err := f.PublishOwned(history.Event{Channel: 1, StartSequence: start, EndSequence: start + uint64(len(payload)), Data: payload}); err != nil {
+					b.Fatal(err)
+				}
+				for attachment := 0; attachment < attachments; attachment++ {
+					if _, err := f.WaitNextOwned(context.Background(), ids[attachment]); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkOutputBurst1MiB(b *testing.B) {
+	const chunkSize = 32 << 10
+	payload := make([]byte, chunkSize)
+	for _, attachments := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("attachments_%d", attachments), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(1 << 20)
+			for range b.N {
+				fanout := NewFanout()
+				ids := make([]string, attachments)
+				for index := range ids {
+					ids[index] = fmt.Sprintf("att_%d", index)
+					if err := fanout.Attach(ids[index], 1<<20); err != nil {
+						b.Fatal(err)
+					}
+				}
+				for start := uint64(0); start < 1<<20; start += chunkSize {
+					event := history.Event{Channel: 1, StartSequence: start, EndSequence: start + chunkSize, Data: payload}
+					if _, err := fanout.PublishOwned(event); err != nil {
+						b.Fatal(err)
+					}
+				}
+				for _, id := range ids {
+					for range (1 << 20) / chunkSize {
+						if _, err := fanout.WaitNextOwned(context.Background(), id); err != nil {
+							b.Fatal(err)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestFanoutMirrorsOrderedOutput(t *testing.T) {
 	f := NewFanout()
 	for _, id := range []string{"att_1", "att_2"} {
@@ -92,6 +224,9 @@ func TestSlowConsumerEvictsOnlyFullAttachment(t *testing.T) {
 	if state, queued, statusErr := f.Status("slow"); statusErr != nil || state != Evicted || queued != 3 {
 		t.Fatalf("slow state=%s queued=%d err=%v", state, queued, statusErr)
 	}
+	if f.IsAttached("slow") || !f.IsAttached("fast") {
+		t.Fatalf("lock-free attachment index slow=%v fast=%v", f.IsAttached("slow"), f.IsAttached("fast"))
+	}
 	got, ok, err := f.Next("fast")
 	if err != nil || !ok || string(got.Data) != "d" {
 		t.Fatalf("fast=%#v ok=%v err=%v", got, ok, err)
@@ -124,11 +259,17 @@ func TestDetachReleasesAttachmentIdentityAndCapacity(t *testing.T) {
 	if fanout.Count() != 1 {
 		t.Fatalf("count=%d", fanout.Count())
 	}
+	if !fanout.IsAttached("att") {
+		t.Fatal("attached identity missing from lock-free index")
+	}
 	if err := fanout.Detach("att"); err != nil {
 		t.Fatal(err)
 	}
 	if fanout.Count() != 0 {
 		t.Fatalf("detached count=%d", fanout.Count())
+	}
+	if fanout.IsAttached("att") {
+		t.Fatal("detached identity remained active")
 	}
 	if err := fanout.Attach("att", 8); err != nil {
 		t.Fatalf("reuse err=%v", err)

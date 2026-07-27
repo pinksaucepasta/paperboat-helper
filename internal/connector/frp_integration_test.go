@@ -22,7 +22,7 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 	if os.Getenv("PAPERBOAT_REAL_FRP_TEST") != "1" {
 		t.Skip("set PAPERBOAT_REAL_FRP_TEST=1 in an isolated network namespace")
 	}
-	for index, transport := range []Transport{TCPTLS, QUIC} {
+	for index, transport := range []Transport{TCPMux, TCPDedicated, QUIC} {
 		t.Run(string(transport), func(t *testing.T) {
 			controlPort := 17070 + index
 			vhostPort := 18080 + index
@@ -33,6 +33,9 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 			}
 			if transport == QUIC {
 				serverConfig.QUICBindPort = controlPort
+			} else {
+				tcpMux := transport == TCPMux
+				serverConfig.Transport.TCPMux = &tcpMux
 			}
 			if err := serverConfig.Complete(); err != nil {
 				t.Fatal(err)

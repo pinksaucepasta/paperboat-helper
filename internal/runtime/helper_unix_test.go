@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/preview"
@@ -109,10 +108,6 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	activityCollector, err := activity.New(activity.Config{MaxQueued: 16, MaxDiagnostics: 16})
-	if err != nil {
-		t.Fatal(err)
-	}
 	helper, err := NewHelper(context.Background(), HelperConfig{
 		Runtime: config, ListenAddress: "127.0.0.1:0", WorkspaceRoot: root,
 		EnvironmentID: "env_test",
@@ -123,8 +118,8 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 			}
 			return helperAuthorizer{}, nil
 		},
-		Listener: func() (net.Listener, error) { return listener, nil },
-		Previews: previews, Activity: activityCollector,
+		Listener:    func() (net.Listener, error) { return listener, nil },
+		Previews:    previews,
 		ConfigApply: configapply.ConformanceHandler{}, ConfigApplyProof: true,
 		SessionLauncherFactory: testSessionLauncherFactory("/bin/sh", []string{"-l"}, []string{"PATH=/usr/bin:/bin"}),
 	})
@@ -148,11 +143,11 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 	}
 	writeFrame := func(frame protocol.Frame) {
 		t.Helper()
-		var encoded bytes.Buffer
-		if err := protocol.WriteFrame(&encoded, frame); err != nil {
+		encoded, err := json.Marshal(frame)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := connection.Write(context.Background(), websocket.MessageText, encoded.Bytes()); err != nil {
+		if err := connection.Write(context.Background(), websocket.MessageText, encoded); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -162,17 +157,17 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 		if err != nil || messageType != websocket.MessageText {
 			t.Fatalf("read type=%v err=%v", messageType, err)
 		}
-		frame, err := protocol.ReadFrame(bytes.NewReader(encoded))
-		if err != nil {
+		var frame protocol.Frame
+		if err := json.Unmarshal(encoded, &frame); err != nil {
 			t.Fatal(err)
 		}
 		return frame
 	}
-	writeFrame(protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1","preview.public.v1","activity.v1","config.apply.v1"]}`)})
-	if welcome := readFrame(); welcome.Type != "welcome" || !bytes.Contains(welcome.Payload, []byte(`"preview.public.v1"`)) || !bytes.Contains(welcome.Payload, []byte(`"activity.v1"`)) || !bytes.Contains(welcome.Payload, []byte(`"config.apply.v1"`)) {
+	writeFrame(protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1","preview.public.v1","config.apply.v1"]}`)})
+	if welcome := readFrame(); welcome.Type != "welcome" || !bytes.Contains(welcome.Payload, []byte(`"preview.public.v1"`)) || !bytes.Contains(welcome.Payload, []byte(`"config.apply.v1"`)) {
 		t.Fatalf("welcome=%#v", welcome)
 	}
-	writeFrame(protocol.Frame{Type: "request", RequestID: "req_health", Version: "1.0", OperationID: "op_health_0001", Capability: "health.v1", DeadlineMS: 5_000, Payload: json.RawMessage(`{}`)})
+	writeFrame(protocol.Frame{Type: "request", RequestID: "req_health", Version: "2.0", OperationID: "op_health_0001", Capability: "health.v1", DeadlineMS: 5_000, Payload: json.RawMessage(`{}`)})
 	responseFrame := readFrame()
 	if responseFrame.Type != "response" || !bytes.Contains(responseFrame.Payload, []byte(`"live":true`)) {
 		t.Fatalf("response=%#v", responseFrame)

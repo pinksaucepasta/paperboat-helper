@@ -27,6 +27,7 @@ type CredentialAuthConfig struct {
 	EnvironmentID string
 	HelperID      string
 	Verifier      server.CredentialVerifier
+	Revocations   server.CredentialRevocationWatcher
 }
 
 func NewCredentialAuthorizer(config CredentialAuthConfig) (server.AuthorizerFactory, error) {
@@ -38,7 +39,7 @@ func NewCredentialAuthorizer(config CredentialAuthConfig) (server.AuthorizerFact
 		if token == "" || len(token) > 16<<10 {
 			return nil, ErrStaticAuthInvalid
 		}
-		return server.CredentialAuthorizer{Verifier: config.Verifier, Resolver: resolver, Token: token}, nil
+		return &server.CredentialAuthorizer{Verifier: config.Verifier, Resolver: resolver, Token: token, Revocations: config.Revocations}, nil
 	}, nil
 }
 
@@ -66,7 +67,7 @@ func NewStaticAuthorizer(config StaticAuthConfig) (server.AuthorizerFactory, err
 		if token == "" || len(token) > 16<<10 {
 			return nil, ErrStaticAuthInvalid
 		}
-		return server.CredentialAuthorizer{Verifier: verifier, Resolver: resolver, Token: token}, nil
+		return &server.CredentialAuthorizer{Verifier: verifier, Resolver: resolver, Token: token}, nil
 	}, nil
 }
 
@@ -91,7 +92,7 @@ type staticPolicyResolver struct {
 func (r staticPolicyResolver) Policy(frame protocol.Frame) (auth.Policy, error) {
 	base := auth.Policy{Issuer: r.issuer, Audience: "paperboat-helper", EnvironmentID: r.environmentID}
 	switch frame.Capability {
-	case "terminal.v1", "health.v1", "preview.public.v1", "activity.v1":
+	case "terminal.v2", "health.v1", "preview.public.v1":
 		base.CredentialClass = "terminal_operation"
 		base.Scopes = []string{"terminal:operate"}
 		base.MaxLifetime = 5 * time.Minute

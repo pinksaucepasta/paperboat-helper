@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
@@ -40,6 +39,7 @@ type HelperConfig struct {
 	WorkspaceRoot      string
 	HerdrPath          string
 	HerdrVersion       string
+	ShellPath          string
 	AgentEnvironment   []string
 	OriginPatterns     []string
 	EnvironmentID      string
@@ -49,21 +49,19 @@ type HelperConfig struct {
 }
 
 type HelperDependencies struct {
-	Authorizer           server.AuthorizerFactory
-	AuthorizationService Service
-	Listener             ListenerFactory
-	Connector            Service
-	Previews             *preview.Registry
-	PreviewControl       preview.PreviewControl
-	PreviewRoutesChanged func()
-	PreviewService       Service
-	Activity             *activity.Collector
-	ActivityService      Service
-	SignalVerifier       *activity.SignalVerifier
-	ConfigApply          configapply.Handler
-	ConfigApplyProof     bool
-	ConfigSync           Service
-	Updates              interface {
+	Authorizer                server.AuthorizerFactory
+	AuthorizationService      Service
+	Listener                  ListenerFactory
+	Connector                 Service
+	Previews                  *preview.Registry
+	PreviewControl            preview.PreviewControl
+	PreviewRoutesChanged      func()
+	PreviewService            Service
+	RuntimeObservationService Service
+	ConfigApply               configapply.Handler
+	ConfigApplyProof          bool
+	ConfigSync                Service
+	Updates                   interface {
 		Activate(context.Context, bootstrap.ArtifactManifest, bootstrap.ArtifactManifest) (string, error)
 	}
 	Random                 io.Reader
@@ -88,7 +86,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err := config.Runtime.Validate(); err != nil || !LoopbackAddress(config.ListenAddress) || !filepath.IsAbs(config.WorkspaceRoot) || dependencies.Authorizer == nil {
 		return nil, errors.Join(ErrHelperInvalid, err)
 	}
-	if dependencies.SessionLauncherFactory == nil && (config.HerdrPath == "" || config.HerdrVersion == "") {
+	if dependencies.SessionLauncherFactory == nil && (config.HerdrPath == "" || config.HerdrVersion == "" || config.ShellPath == "") {
 		return nil, ErrHelperInvalid
 	}
 	if config.ShutdownTimeout == 0 {
@@ -107,16 +105,10 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT=http://"+config.ListenAddress+"/v1/preview-registrations",
 		"PAPERBOAT_HELPER_AGENT_TOKEN_FILE="+config.AgentTokenFile,
 	)
-	invalidActivity := dependencies.Activity != nil && config.EnvironmentID == "" ||
-		dependencies.SignalVerifier != nil && dependencies.Activity == nil ||
-		dependencies.ActivityService != nil && dependencies.Activity == nil
 	invalidPreview := dependencies.PreviewService != nil && dependencies.Previews == nil
 	invalidConfigApply := dependencies.ConfigApplyProof && dependencies.ConfigApply == nil
 	invalidHosted := config.Runtime.Profile == helperconfig.Hosted && dependencies.HostedLifecycle == nil ||
 		config.Runtime.Profile == helperconfig.BYOD && dependencies.HostedLifecycle != nil
-	if invalidActivity {
-		return nil, errors.Join(ErrHelperInvalid, errors.New("invalid activity dependencies"))
-	}
 	if invalidPreview {
 		return nil, errors.Join(ErrHelperInvalid, errors.New("invalid preview dependencies"))
 	}
@@ -160,7 +152,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		MaxSessions:     resources.MaxSessions, MaxAttachments: resources.MaxAttachments,
 		MaxInputDecisions:  resources.MaxInputDecisions,
 		TerminationTimeout: 10 * time.Second, TerminationGrace: 2 * time.Second,
-		Store: durable, Activity: dependencies.Activity, EnvironmentID: config.EnvironmentID,
+		Store:              durable,
 		RecoveryExitSignal: config.RecoveryExitSignal,
 	})
 	if err != nil {
@@ -170,7 +162,11 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if dependencies.SessionLauncherFactory != nil {
 		sessionLauncher, err = dependencies.SessionLauncherFactory(sessions)
 	} else {
-		sessionLauncher, err = process.NewSupervisor(ctx, process.Config{Executable: config.HerdrPath, ExpectedVersion: config.HerdrVersion, Environment: append([]string(nil), config.AgentEnvironment...), StateRoot: filepath.Join(config.Runtime.StateRoot, "herdr"), Sessions: sessions})
+		var herdr *process.Supervisor
+		herdr, err = process.NewSupervisor(ctx, process.Config{Executable: config.HerdrPath, ExpectedVersion: config.HerdrVersion, Environment: append([]string(nil), config.AgentEnvironment...), StateRoot: filepath.Join(config.Runtime.StateRoot, "herdr"), Sessions: sessions})
+		if err == nil {
+			sessionLauncher, err = process.NewModeLauncher(herdr, config.ShellPath, config.AgentEnvironment, sessions)
+		}
 	}
 	if err != nil || sessionLauncher == nil {
 		return nil, errors.Join(ErrHelperInvalid, err)
@@ -184,9 +180,9 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	dispatcher, err := server.NewDispatcher(server.DispatcherConfig{
 		Sessions: sessions, Health: healthSource, SessionLauncher: sessionLauncher,
 		WorkspaceRoot: config.WorkspaceRoot, Random: random,
-		Previews: dependencies.Previews, PreviewControl: dependencies.PreviewControl, Activity: dependencies.Activity,
-		SignalVerifier: dependencies.SignalVerifier, ConfigApply: dependencies.ConfigApply,
-		Updates: dependencies.Updates,
+		Previews: dependencies.Previews, PreviewControl: dependencies.PreviewControl,
+		ConfigApply: dependencies.ConfigApply,
+		Updates:     dependencies.Updates,
 	})
 	if err != nil {
 		return nil, err
@@ -278,14 +274,14 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if dependencies.PreviewService != nil {
 		components = append(components, Component{Capability: "target", Required: false, Service: dependencies.PreviewService})
 	}
-	if dependencies.ActivityService != nil {
-		components = append(components, Component{Capability: "activity_delivery", Required: false, Service: dependencies.ActivityService})
+	if dependencies.RuntimeObservationService != nil {
+		components = append(components, Component{Capability: "runtime_observation", Required: false, Service: dependencies.RuntimeObservationService})
 	}
 	if dependencies.Connector != nil {
 		components = append(components, Component{Capability: "edge", Required: true, Service: dependencies.Connector})
 	}
 	// Start hosted preparation after transport dependencies. Reverse shutdown then
-	// flushes hosted state before connector drain and the final activity report.
+	// flushes hosted state before connector drain and the final runtime observation.
 	if dependencies.HostedLifecycle != nil {
 		components = append(components, Component{Capability: "hosted_lifecycle", Required: true, Service: dependencies.HostedLifecycle})
 	}

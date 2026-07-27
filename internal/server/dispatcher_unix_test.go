@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
 	"github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/operation"
@@ -36,11 +35,11 @@ func (l testSessionLauncher) Launch(ctx context.Context, request process.LaunchR
 	return l.sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: pty.Command{Path: "/bin/sh", Args: append([]string(nil), l.args...), Env: []string{"PATH=/usr/bin:/bin", "TERM=xterm"}, CWD: request.CWD, Dimensions: request.Dimensions}})
 }
 
-func verticalServer(t *testing.T) (*Server, *activity.Collector) {
+func verticalServer(t *testing.T) *Server {
 	return verticalServerCommand(t, []string{"-c", "printf stream-data; read line"})
 }
 
-func verticalServerCommand(t *testing.T, shellArgs []string) (*Server, *activity.Collector) {
+func verticalServerCommand(t *testing.T, shellArgs []string) *Server {
 	t.Helper()
 	root := t.TempDir()
 	adapter, err := pty.NewAdapter(root)
@@ -51,19 +50,15 @@ func verticalServerCommand(t *testing.T, shellArgs []string) (*Server, *activity
 	if err != nil {
 		t.Fatal(err)
 	}
-	collector, err := activity.New(activity.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
 	previews, err := preview.New(preview.Config{Prober: healthyProber{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	readiness := health.New("test", []string{"terminal.v1", "health.v1", "preview.public.v1", "activity.v1"}, nil)
-	readiness.Set("terminal.v1", health.Ready, "", 0)
+	readiness := health.New("test", []string{"terminal.v2", "health.v1", "preview.public.v1"}, nil)
+	readiness.Set("terminal.v2", health.Ready, "", 0)
 	readiness.Set("health.v1", health.Ready, "", 0)
 	dispatcher, err := NewDispatcher(DispatcherConfig{
-		Sessions: sessions, Previews: previews, Activity: collector, Health: readiness,
+		Sessions: sessions, Previews: previews, Health: readiness,
 		SessionLauncher: testSessionLauncher{sessions: sessions, args: shellArgs}, WorkspaceRoot: root,
 		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 256)),
 	})
@@ -72,7 +67,7 @@ func verticalServerCommand(t *testing.T, shellArgs []string) (*Server, *activity
 	}
 	journal, _ := operation.NewJournal(32)
 	server, err := New(Config{
-		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v1": true, "health.v1": true, "preview.public.v1": true, "activity.v1": true}},
+		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v2": true, "health.v1": true, "preview.public.v1": true}},
 		Journal:    journal,
 		Authorizer: authorizerFunc(func(context.Context, protocol.Frame) (Authorization, error) {
 			return Authorization{JournalBinding: "env:env_test_01:user:usr_1", EnvironmentID: "env_test_01", UserID: "usr_1", ClientID: "cli_1", ResourceID: "p-abcdefghijklmnopqrstuvwxyz"}, nil
@@ -88,7 +83,7 @@ func verticalServerCommand(t *testing.T, shellArgs []string) (*Server, *activity
 		_ = server.Shutdown(ctx)
 		_ = sessions.Shutdown(ctx)
 	})
-	return server, collector
+	return server
 }
 
 func TestTerminalStreamEndFollowsOutputWithExactExit(t *testing.T) {
@@ -106,11 +101,11 @@ func TestTerminalStreamEndFollowsOutputWithExactExit(t *testing.T) {
 		{name: "signal", command: "printf final-output; kill -TERM $$", code: 143, signal: "terminated"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server, _ := verticalServerCommand(t, []string{"-c", test.command})
+			server := verticalServerCommand(t, []string{"-c", test.command})
 			client, peer := net.Pipe()
 			go server.Serve(peer)
-			hello := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
-			_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: hello})
+			hello := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
+			_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: hello})
 			created := sendRequest(t, client, request("req_create", "op_create_exit", json.RawMessage(`{"action":"create","name":"exit-test","columns":80,"rows":24}`)))
 			var createResponse struct {
 				Result struct {
@@ -129,7 +124,7 @@ func TestTerminalStreamEndFollowsOutputWithExactExit(t *testing.T) {
 				t.Fatalf("output=%q err=%v", output.Data, err)
 			}
 			end, err := protocol.ReadFrame(client)
-			if err != nil || end.Type != "event" || end.Capability != "terminal.v1" {
+			if err != nil || end.Type != "event" || end.Capability != "terminal.v2" {
 				t.Fatalf("end=%#v err=%v", end, err)
 			}
 			var payload struct {
@@ -154,11 +149,11 @@ func TestAttachStreamsReplayAndLiveOutputAsBinaryFrames(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("requires /bin/sh")
 	}
-	server, _ := verticalServer(t)
+	server := verticalServer(t)
 	client, peer := net.Pipe()
 	go server.Serve(peer)
-	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
-	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload})
+	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload})
 	response := sendRequest(t, client, request("req_create", "op_create_0001", json.RawMessage(`{"action":"create","name":"stream","columns":80,"rows":24}`)))
 	var created struct {
 		Result struct {
@@ -188,12 +183,8 @@ func TestAttachStreamsReplayAndLiveOutputAsBinaryFrames(t *testing.T) {
 	if binary.Channel != protocol.Stdout || binary.StartSequence != 0 || string(binary.Data) != "stream-data" {
 		t.Fatalf("binary=%#v", binary)
 	}
-	control, _ := json.Marshal(map[string]any{"session_id": created.Result.ID, "attachment_id": attached.Result.AttachmentID, "next_sequence": len(binary.Data)})
-	if response = sendRequest(t, client, protocol.Frame{Type: "ack", RequestID: "req_ack", Version: "1.0", Payload: control}); response.Type != "response" {
-		t.Fatalf("ack=%s", response.Payload)
-	}
-	control, _ = json.Marshal(map[string]any{"session_id": created.Result.ID, "attachment_id": attached.Result.AttachmentID})
-	if response = sendRequest(t, client, protocol.Frame{Type: "detach", RequestID: "req_detach", Version: "1.0", Payload: control}); response.Type != "response" {
+	control, _ := json.Marshal(map[string]any{"session_id": created.Result.ID, "attachment_id": attached.Result.AttachmentID})
+	if response = sendRequest(t, client, protocol.Frame{Type: "detach", RequestID: "req_detach", Version: "2.0", Payload: control}); response.Type != "response" {
 		t.Fatalf("detach=%s", response.Payload)
 	}
 	// A health request proves explicit detach left the connection usable.
@@ -209,11 +200,11 @@ func TestAttachLargeReplayUsesBinaryStreamNotStructuredResponse(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("requires /bin/sh")
 	}
-	server, _ := verticalServerCommand(t, []string{"-c", "dd if=/dev/zero bs=65536 count=1 2>/dev/null; read line"})
+	server := verticalServerCommand(t, []string{"-c", "dd if=/dev/zero bs=65536 count=1 2>/dev/null; read line"})
 	client, peer := net.Pipe()
 	go server.Serve(peer)
-	hello := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
-	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: hello})
+	hello := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: hello})
 	response := sendRequest(t, client, request("req_create", "op_create_large", json.RawMessage(`{"action":"create","name":"large-replay","columns":80,"rows":24}`)))
 	var created struct {
 		Result struct {
@@ -249,16 +240,16 @@ func sendRequest(t *testing.T, conn net.Conn, frame protocol.Frame) protocol.Fra
 	return response
 }
 
-func TestVerticalFramedTerminalPreviewActivityAndReadiness(t *testing.T) {
+func TestVerticalFramedTerminalPreviewAndReadiness(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("requires /bin/sh")
 	}
-	server, collector := verticalServer(t)
+	server := verticalServer(t)
 	client, peer := net.Pipe()
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(peer) }()
-	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1","preview.public.v1","activity.v1"]}`)
-	response := sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload})
+	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1","preview.public.v1"]}`)
+	response := sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload})
 	if response.Type != "welcome" {
 		t.Fatalf("welcome=%#v", response)
 	}
@@ -283,16 +274,6 @@ func TestVerticalFramedTerminalPreviewActivityAndReadiness(t *testing.T) {
 		t.Fatalf("preview=%s", response.Payload)
 	}
 
-	activityFrame := request("req_activity", "op_activity_0001", json.RawMessage(`{"environment_id":"env_test_01","source_id":"cli_1","source":"cli_activity","sequence":1,"occurred_at":"2026-01-01T00:00:00Z","observed_at":"2026-01-01T00:00:01Z"}`))
-	activityFrame.Capability = "activity.v1"
-	if response = sendRequest(t, client, activityFrame); response.Type != "response" {
-		t.Fatalf("activity=%s", response.Payload)
-	}
-	if collector.LastActivity().IsZero() == false {
-		// The fixture timestamp is intentionally stale and must not extend idle state.
-		t.Fatalf("stale activity extended idle: %s", collector.LastActivity())
-	}
-
 	healthFrame := request("req_health", "op_health_0001", json.RawMessage(`{}`))
 	healthFrame.Capability = "health.v1"
 	if response = sendRequest(t, client, healthFrame); response.Type != "response" {
@@ -307,18 +288,13 @@ func TestVerticalFramedTerminalPreviewActivityAndReadiness(t *testing.T) {
 	<-serveDone
 }
 
-func TestDispatcherRejectsCrossEnvironmentActivityAndEscapedCWD(t *testing.T) {
-	server, _ := verticalServer(t)
+func TestDispatcherRejectsEscapedCWDAndOverriddenPreviewIdentity(t *testing.T) {
+	server := verticalServer(t)
 	client, peer := net.Pipe()
 	go server.Serve(peer)
-	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1","activity.v1"]}`)
-	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload})
+	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload})
 
-	activityFrame := request("req_activity", "op_activity_0001", json.RawMessage(`{"environment_id":"env_other","source_id":"cli_1","source":"cli_activity","sequence":1,"occurred_at":"2026-01-01T00:00:00Z"}`))
-	activityFrame.Capability = "activity.v1"
-	if response := sendRequest(t, client, activityFrame); response.Type != "error" {
-		t.Fatalf("cross-environment activity=%#v", response)
-	}
 	previewFrame := request("req_preview", "op_preview_0001", json.RawMessage(`{"action":"register","identity":"p-attacker-controlled-identity","logical_name":"web","target_host":"127.0.0.1","target_port":3000,"public_acknowledgement":true}`))
 	previewFrame.Capability = "preview.public.v1"
 	if response := sendRequest(t, client, previewFrame); response.Type != "error" {

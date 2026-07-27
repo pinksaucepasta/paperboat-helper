@@ -26,7 +26,6 @@ func TestValidateResourceLimitsAreCompleteAndBounded(t *testing.T) {
 		func(value *ResourceLimits) { value.MaxPreviewTargets = 1025 },
 		func(value *ResourceLimits) { value.MaxConcurrentProbes = 65 },
 		func(value *ResourceLimits) { value.MaxConcurrentOps = 257 },
-		func(value *ResourceLimits) { value.MaxActivityEvents = 10_001 },
 	}
 	for index, mutate := range cases {
 		candidate := base

@@ -93,3 +93,88 @@ func TestConcurrentAppendAndReplay(t *testing.T) {
 		t.Fatalf("to=%d err=%v", replay.ToSequence, err)
 	}
 }
+
+func BenchmarkHistoryCompaction(b *testing.B) {
+	const chunkSize = 32 << 10
+	payload := make([]byte, chunkSize)
+	history, err := New(1 << 20)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for range (1 << 20) / chunkSize {
+		if _, err := history.AppendOwned(1, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+	b.SetBytes(chunkSize)
+	b.ResetTimer()
+	for range b.N {
+		if _, err := history.AppendOwned(1, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestPooledBufferProducerSurvivesImmediateHistoryCompaction(t *testing.T) {
+	history, _ := New(1)
+	buffer := AcquireBuffer()
+	copy(buffer, "abc")
+	event, err := history.AppendBuffer(1, buffer[:3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.owner == nil {
+		t.Fatal("pooled event has no owner")
+	}
+	if refs := event.owner.refs.Load(); refs != 1 {
+		t.Fatalf("producer refs after compaction = %d", refs)
+	}
+	if got := string(event.Data); got != "abc" {
+		t.Fatalf("data after compaction = %q", got)
+	}
+	event.Release()
+}
+
+func TestReplayOwnedRetainsCompactedBuffer(t *testing.T) {
+	history, _ := New(PooledBufferSize)
+	buffer := AcquireBuffer()
+	copy(buffer, "abc")
+	event, err := history.AppendBuffer(1, buffer[:3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Release()
+	replay, err := history.ReplayOwned(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := replay.Events[0].owner.refs.Load(); refs != 2 {
+		t.Fatalf("history and replay refs = %d", refs)
+	}
+	if err := history.SetLimit(1); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(replay.Events[0].Data); got != "abc" {
+		t.Fatalf("replay data after compaction = %q", got)
+	}
+	replay.Release()
+}
+
+func BenchmarkPooledHistoryCompaction(b *testing.B) {
+	history, _ := New(1)
+	buffer := AcquireBuffer()
+	event, _ := history.AppendBuffer(1, buffer[:1])
+	event.Release()
+	b.ReportAllocs()
+	b.SetBytes(PooledBufferSize)
+	b.ResetTimer()
+	for range b.N {
+		buffer := AcquireBuffer()
+		event, err := history.AppendBuffer(1, buffer)
+		if err != nil {
+			b.Fatal(err)
+		}
+		event.Release()
+	}
+}

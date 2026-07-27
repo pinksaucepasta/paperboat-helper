@@ -24,7 +24,7 @@ type frameCase struct {
 
 func classifyFrame(c frameCase) string {
 	switch c.Frame.Type {
-	case "hello", "welcome", "response", "error", "heartbeat", "ack", "detach":
+	case "hello", "welcome", "response", "error", "heartbeat", "detach":
 	case "request":
 		if c.Frame.OperationID == "" {
 			return "invalid_frame"
@@ -45,7 +45,7 @@ func classifyFrame(c frameCase) string {
 	default:
 		return "unsupported_message_type"
 	}
-	if c.Frame.RequestID == "" || c.Frame.Version != "1.0" {
+	if c.Frame.RequestID == "" || c.Frame.Version != "2.0" {
 		return "invalid_frame"
 	}
 	return ""

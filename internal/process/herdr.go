@@ -40,10 +40,12 @@ type Config struct {
 	VersionTimeout  time.Duration
 }
 type LaunchRequest struct {
-	ID         string
-	Name       string
-	CWD        string
-	Dimensions pty.Dimensions
+	ID          string
+	Name        string
+	CWD         string
+	Dimensions  pty.Dimensions
+	Mode        string
+	Environment map[string]string
 }
 type Supervisor struct {
 	config Config
@@ -81,8 +83,25 @@ func NewSupervisor(ctx context.Context, config Config) (*Supervisor, error) {
 
 var allowedEnvironment = map[string]bool{
 	"HOME": true, "XDG_CONFIG_HOME": true, "PATH": true, "SHELL": true,
-	"TERM": true, "COLORTERM": true, "LANG": true, "LC_ALL": true, "NO_COLOR": true,
+	"TERM": true, "COLORTERM": true, "TERM_PROGRAM": true, "TERM_PROGRAM_VERSION": true,
+	"LANG": true, "LC_ALL": true, "LC_CTYPE": true, "NO_COLOR": true,
 	"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT": true, "PAPERBOAT_HELPER_AGENT_TOKEN_FILE": true,
+}
+
+var allowedClientEnvironment = map[string]bool{
+	"TERM": true, "COLORTERM": true, "TERM_PROGRAM": true, "TERM_PROGRAM_VERSION": true,
+	"LANG": true, "LC_ALL": true, "LC_CTYPE": true,
+}
+
+func mergeClientEnvironment(base []string, overrides map[string]string) ([]string, bool) {
+	result := append([]string(nil), base...)
+	for key, value := range overrides {
+		if !allowedClientEnvironment[key] || value == "" || len(value) > 8192 || strings.ContainsRune(value, '\x00') {
+			return nil, false
+		}
+		result = replaceEnvironment(result, key, value)
+	}
+	return result, validEnvironment(result)
 }
 
 func validEnvironment(environment []string) bool {
@@ -116,7 +135,11 @@ func (s *Supervisor) Launch(ctx context.Context, request LaunchRequest) (session
 	if len(serverSocket) > maxUnixSocketPathBytes || len(clientSocket) > maxUnixSocketPathBytes {
 		return session.Snapshot{}, fmt.Errorf("Herdr session socket path is too long: %w", ErrLaunchRejected)
 	}
-	environment := replaceEnvironment(s.config.Environment, "XDG_CONFIG_HOME", stateRoot)
+	environment, ok := mergeClientEnvironment(s.config.Environment, request.Environment)
+	if !ok {
+		return session.Snapshot{}, ErrLaunchRejected
+	}
+	environment = replaceEnvironment(environment, "XDG_CONFIG_HOME", stateRoot)
 	environment = replaceEnvironment(environment, "HERDR_SOCKET_PATH", serverSocket)
 	environment = replaceEnvironment(environment, "HERDR_CLIENT_SOCKET_PATH", clientSocket)
 	command := pty.Command{Path: s.config.Executable, Args: []string{"--no-session"}, Env: environment, CWD: request.CWD, Dimensions: request.Dimensions}

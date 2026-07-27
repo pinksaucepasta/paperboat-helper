@@ -22,6 +22,7 @@ type BinaryFrame struct {
 	Channel       byte
 	StartSequence uint64
 	Data          []byte
+	Release       func()
 }
 
 func (f BinaryFrame) EndSequence() (uint64, error) {

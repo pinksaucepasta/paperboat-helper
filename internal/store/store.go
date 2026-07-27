@@ -173,7 +173,9 @@ func (s *Store) Sessions(ctx context.Context) ([]Session, error) {
 }
 
 func (s *Store) UpdateSession(ctx context.Context, id, expectedState string, next Session) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET cwd=?,columns=?,rows=?,state=?,generation=?,exit_code=?,exit_signal=?,exited_at=?,earliest_sequence=?,latest_sequence=?,updated_at=? WHERE id=? AND state=?`, next.CWD, next.Columns, next.Rows, next.State, next.Generation, next.ExitCode, nullableString(next.ExitSignal), nullableTime(next.ExitedAt), next.EarliestSequence, next.LatestSequence, time.Now().UTC().UnixNano(), id, expectedState)
+	// Output bounds are owned by AppendOutput and ClearOutput. Updating them
+	// here can expose a cursor whose output rows have not committed yet.
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET cwd=?,columns=?,rows=?,state=?,generation=?,exit_code=?,exit_signal=?,exited_at=?,updated_at=? WHERE id=? AND state=?`, next.CWD, next.Columns, next.Rows, next.State, next.Generation, next.ExitCode, nullableString(next.ExitSignal), nullableTime(next.ExitedAt), time.Now().UTC().UnixNano(), id, expectedState)
 	if err != nil {
 		return err
 	}
@@ -182,6 +184,61 @@ func (s *Store) UpdateSession(ctx context.Context, id, expectedState string, nex
 		return ErrConflict
 	}
 	return nil
+}
+
+func (s *Store) ClearOutput(ctx context.Context, sessionID string, nextSequence uint64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var latest uint64
+	if err := tx.QueryRowContext(ctx, `SELECT latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&latest); err != nil {
+		return err
+	}
+	if latest != nextSequence {
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM output_events WHERE session_id=?`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET earliest_sequence=?,latest_sequence=?,updated_at=? WHERE id=?`, nextSequence, nextSequence, time.Now().UTC().UnixNano(), sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) OutputBounds(ctx context.Context, sessionID string) (earliest, latest uint64, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT earliest_sequence,latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&earliest, &latest)
+	return earliest, latest, err
+}
+
+// AdvanceOutput drops a persistence tail that has already fallen behind the
+// bounded live history. The expected cursor prevents concurrent writers from
+// skipping an unseen committed range.
+func (s *Store) AdvanceOutput(ctx context.Context, sessionID string, expectedLatest, nextSequence uint64) error {
+	if nextSequence < expectedLatest {
+		return ErrConflict
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var latest uint64
+	if err := tx.QueryRowContext(ctx, `SELECT latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&latest); err != nil {
+		return err
+	}
+	if latest != expectedLatest {
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM output_events WHERE session_id=?`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET earliest_sequence=?,latest_sequence=?,updated_at=? WHERE id=?`, nextSequence, nextSequence, time.Now().UTC().UnixNano(), sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
@@ -251,55 +308,12 @@ func (s *Store) AppendOutput(ctx context.Context, sessionID string, channel byte
 	if err := tx.Commit(); err != nil {
 		return OutputEvent{}, 0, err
 	}
-	return OutputEvent{Channel: channel, StartSequence: start, EndSequence: end, Data: append([]byte(nil), data...)}, earliest, nil
-}
-
-// ReplaceOutput stores one complete bounded in-memory history snapshot. It is
-// intended for a coalescing background writer, keeping SQLite transactions out
-// of the PTY read and live fan-out path.
-func (s *Store) ReplaceOutput(ctx context.Context, sessionID string, earliest, latest uint64, events []OutputEvent) error {
-	if earliest > latest {
-		return ErrConflict
-	}
-	next := earliest
-	for _, event := range events {
-		if event.StartSequence != next || event.EndSequence < event.StartSequence || event.EndSequence-event.StartSequence != uint64(len(event.Data)) {
-			return ErrConflict
-		}
-		next = event.EndSequence
-	}
-	if next != latest {
-		return ErrConflict
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var persistedLatest uint64
-	if err := tx.QueryRowContext(ctx, `SELECT latest_sequence FROM sessions WHERE id=?`, sessionID).Scan(&persistedLatest); err != nil {
-		return err
-	}
-	if latest < persistedLatest {
-		return ErrConflict
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM output_events WHERE session_id=?`, sessionID); err != nil {
-		return err
-	}
-	for _, event := range events {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO output_events(session_id,start_sequence,end_sequence,channel,data) VALUES(?,?,?,?,?)`, sessionID, event.StartSequence, event.EndSequence, event.Channel, append([]byte(nil), event.Data...)); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET earliest_sequence=?,latest_sequence=?,updated_at=? WHERE id=?`, earliest, latest, time.Now().UTC().UnixNano(), sessionID); err != nil {
-		return err
-	}
 	if s.hook != nil {
-		if err := s.hook("replace_output_before_commit"); err != nil {
-			return err
+		if err := s.hook("append_after_commit"); err != nil {
+			return OutputEvent{}, 0, err
 		}
 	}
-	return tx.Commit()
+	return OutputEvent{Channel: channel, StartSequence: start, EndSequence: end, Data: append([]byte(nil), data...)}, earliest, nil
 }
 
 func (s *Store) Replay(ctx context.Context, sessionID string, from, limit uint64) ([]OutputEvent, uint64, uint64, error) {

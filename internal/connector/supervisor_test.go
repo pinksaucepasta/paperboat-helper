@@ -228,3 +228,35 @@ func TestRouteChangeRefreshesActiveAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAdmissionExpiryDoesNotReplaceHealthyConnector(t *testing.T) {
+	now := time.Now()
+	dialer := &recoveringDialer{}
+	manager := manager(t, dialer, now)
+	// The admission authorizes login for only another 100ms. Once connected,
+	// that expiry must not rotate and terminate healthy data-plane streams.
+	source := &admissionSource{now: now.Add(-59*time.Second - 900*time.Millisecond), calls: make(chan uint64, 4)}
+	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.calls:
+	case <-time.After(time.Second):
+		t.Fatal("initial admission was not requested")
+	}
+	time.Sleep(250 * time.Millisecond)
+	select {
+	case generation := <-source.calls:
+		t.Fatalf("healthy connector was replaced at admission expiry: generation=%d", generation)
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := supervisor.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

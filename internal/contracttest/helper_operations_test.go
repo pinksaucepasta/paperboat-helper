@@ -11,7 +11,6 @@ func TestNonTerminalOperationVectorCoverage(t *testing.T) {
 	required := map[string]bool{
 		"upload-valid": false, "upload-traversal": false, "upload-mime-mismatch": false,
 		"preview-register": false, "preview-private-request": false,
-		"activity-valid": false, "activity-open-pty": false,
 		"config-stale-revision": false, "readiness-degraded": false,
 	}
 	f, err := os.Open("../../testdata/contracts/fixtures/helper/operations.ndjson")

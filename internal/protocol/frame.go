@@ -21,6 +21,7 @@ const (
 	InvalidFrame       Code = "invalid_frame"
 	CapabilityRequired Code = "capability_required"
 	InvalidDeadline    Code = "invalid_deadline"
+	CredentialExpired  Code = "credential_expired"
 )
 
 type Error struct {
@@ -46,14 +47,14 @@ type Frame struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
-var allowedTypes = map[string]bool{"hello": true, "welcome": true, "request": true, "response": true, "error": true, "event": true, "cancel": true, "heartbeat": true, "ack": true, "detach": true, "input": true}
+var allowedTypes = map[string]bool{"hello": true, "welcome": true, "request": true, "response": true, "error": true, "event": true, "cancel": true, "heartbeat": true, "detach": true}
 var capabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{1,63}$`)
 
 func (f Frame) Validate() error {
 	if !allowedTypes[f.Type] {
 		return &Error{Code: UnsupportedMessage}
 	}
-	if len(f.RequestID) < 1 || len(f.RequestID) > 128 || f.Version != "1.0" {
+	if len(f.RequestID) < 1 || len(f.RequestID) > 128 || f.Version != ProtocolVersion {
 		return &Error{Code: InvalidFrame}
 	}
 	if f.OperationID != "" && (len(f.OperationID) < 8 || len(f.OperationID) > 128) {
@@ -87,10 +88,6 @@ func (f Frame) Validate() error {
 		}
 	case "cancel":
 		if f.OperationID == "" {
-			return &Error{Code: InvalidFrame}
-		}
-	case "input":
-		if f.Capability != "terminal.v1" || f.Payload == nil || f.OperationID != "" {
 			return &Error{Code: InvalidFrame}
 		}
 	}

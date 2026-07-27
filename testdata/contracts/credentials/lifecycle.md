@@ -20,7 +20,7 @@ leave their owning service. Algorithms other than EdDSA and Ed25519 keys are rej
 
 Revocation is keyed by token ID, parent session, user, environment, helper generation, and
 signing key as applicable. Environment compromise revokes enrollment, helper identity,
-connector, operation, preview, activity, config, and update descendants, replaces the
+connector, operation, preview, config, and update descendants, replaces the
 helper key, and advances connector generation. Connector replacement invalidates the prior
 generation before route attachment. Authorization failures return the same `not_found_or_forbidden`
 classification for missing and other-owner resources.

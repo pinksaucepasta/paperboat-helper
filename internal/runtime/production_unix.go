@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pinksaucepasta/paperboat-helper/internal/activity"
 	"github.com/pinksaucepasta/paperboat-helper/internal/auth"
 	"github.com/pinksaucepasta/paperboat-helper/internal/availability"
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
@@ -159,9 +158,14 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = cache.Refresh(refreshCtx)
 	cancel()
-	authorizationRefresh := &jwksRefreshService{cache: cache, interval: time.Minute}
-	verifier := auth.Verifier{Keys: cache, Clock: productionClock{}, Replays: auth.NewReplayCache(4096, productionClock{}), ClockSkew: 30 * time.Second, RefreshTimeout: 2 * time.Second}
-	authorizer, err := NewCredentialAuthorizer(CredentialAuthConfig{Issuer: issuer, EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, Verifier: verifier})
+	revocations := auth.NewRevocationCache()
+	revocationRefresh, err := newRevocationRefreshService(controlURL.ResolveReference(&url.URL{Path: "/v1/helper-trust/revocations"}).String(), renewingTokens, enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID, revocations, transport, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	authorizationRefresh := serviceGroup{&jwksRefreshService{cache: cache, interval: time.Minute}, revocationRefresh}
+	verifier := auth.Verifier{Keys: cache, Clock: productionClock{}, Replays: auth.NewReplayCache(4096, productionClock{}), Revocations: revocations, ClockSkew: 30 * time.Second, RefreshTimeout: 2 * time.Second}
+	authorizer, err := NewCredentialAuthorizer(CredentialAuthConfig{Issuer: issuer, EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, Verifier: verifier, Revocations: revocations})
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +181,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	manager, err := connector.New(connector.Config{EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, EdgePool: valueOrRuntime(environ("PAPERBOAT_EDGE_POOL"), "default"), Dialer: dialer, DrainTimeout: 10 * time.Second})
+	manager, err := connector.New(connector.Config{EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, EdgePool: valueOrRuntime(environ("PAPERBOAT_EDGE_POOL"), "default"), Dialer: dialer, DrainTimeout: 10 * time.Second, Transport: productionConnectorTransport(environ("PAPERBOAT_CONNECTOR_TERMINAL_TRANSPORT"))})
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +194,6 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		return nil, err
 	}
 	connectorService := &connectorReadinessService{supervisor: supervisor, manager: manager, networkChanges: networkChanges}
-	collector, err := activity.New(activity.Config{MaxQueued: runtimeConfig.Resources.MaxActivityEvents, MaxDiagnostics: 128})
-	if err != nil {
-		return nil, err
-	}
 	previews, err := preview.New(preview.Config{Prober: preview.TCPProber{Dialer: net.Dialer{Timeout: 2 * time.Second}}, MaxTargets: runtimeConfig.Resources.MaxPreviewTargets, MaxConcurrentProbes: runtimeConfig.Resources.MaxConcurrentProbes})
 	if err != nil {
 		return nil, err
@@ -218,7 +218,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	var activityDelivery *activity.Delivery
+	var runtimeObservation *runtimeObservationService
 	var availabilityService *availability.Service
 	var updateClient *hostservice.Client
 	machineID := environ("PAPERBOAT_USER_MACHINE_ID")
@@ -247,16 +247,13 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		}
 	}
 	{
-		activityEndpoint := controlURL.ResolveReference(&url.URL{Path: "/v1/environment-activity-observations"}).String()
+		runtimeEndpoint := controlURL.ResolveReference(&url.URL{Path: "/v1/runtime-observations"}).String()
 		scope := environ("PAPERBOAT_HELPER_SERVICE_SCOPE")
 		if scope != "system" && scope != "user" {
 			scope = "unknown"
 		}
-		sender := &heartbeatSender{endpoint: activityEndpoint, tokens: renewingTokens, proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID: operationID, projectID: identity.EnvironmentID, machineID: machineID, reporterVersion: version, client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, lastActivity: time.Now().UTC(), availability: availabilityService, receiptPath: filepath.Join(runtimeConfig.StateRoot, "runtime", "server-heartbeat.json"), workerGeneration: bootState.Generation, osBootID: bootState.OSBootID, serviceScope: scope, connector: manager}
-		activityDelivery, err = activity.NewDelivery(activity.DeliveryConfig{Collector: collector, Sender: sender, Interval: runtimeConfig.Limits.HeartbeatInterval, Timeout: 10 * time.Second})
-		if err != nil {
-			return nil, err
-		}
+		sender := &runtimeObservationSender{endpoint: runtimeEndpoint, tokens: renewingTokens, proofs: enrollment.ProofSource{StateRoot: runtimeConfig.StateRoot}, operationID: operationID, environmentID: identity.EnvironmentID, machineID: machineID, reporterVersion: version, client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, availability: availabilityService, receiptPath: filepath.Join(runtimeConfig.StateRoot, "runtime", "server-heartbeat.json"), workerGeneration: bootState.Generation, osBootID: bootState.OSBootID, serviceScope: scope, connector: manager}
+		runtimeObservation = &runtimeObservationService{sender: sender, interval: runtimeConfig.Limits.HeartbeatInterval, timeout: 10 * time.Second}
 	}
 	var hostedLifecycle *hosted.Lifecycle
 	workspaceRoot := environ("PAPERBOAT_WORKSPACE_ROOT")
@@ -316,17 +313,17 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	}
 	herdrPath := valueOrRuntime(environ("PAPERBOAT_HERDR_PATH"), "/usr/local/bin/herdr")
 	herdrVersion := valueOrRuntime(environ("PAPERBOAT_HERDR_VERSION"), "0.7.4")
-	activityService := Service(activityDelivery)
+	runtimeService := Service(runtimeObservation)
 	if availabilityService != nil {
-		activityService = serviceGroup{availabilityService, activityDelivery}
+		runtimeService = serviceGroup{availabilityService, runtimeObservation}
 	}
-	dependencies := HelperDependencies{Authorizer: authorizer, AuthorizationService: authorizationRefresh, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, Activity: collector, ActivityService: activityService, ConfigSync: configSyncService, Updates: updateClient, Metrics: metrics}
+	dependencies := HelperDependencies{Authorizer: authorizer, AuthorizationService: authorizationRefresh, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, RuntimeObservationService: runtimeService, ConfigSync: configSyncService, Updates: updateClient, Metrics: metrics}
 	if runtimeConfig.Profile == helperconfig.Hosted {
 		dependencies.HostedLifecycle = hostedLifecycle
 		dependencies.ConfigApply = configapply.SyncHandler{Apply: configSyncService.Apply}
 		dependencies.ConfigApplyProof = true
 	}
-	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal}, dependencies)
+	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, ShellPath: agentShell, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal}, dependencies)
 }
 
 func writeWorkerLocal(stateRoot, listenAddress string) error {
@@ -419,9 +416,75 @@ func validateBYODWorkspace(root string) error {
 	return nil
 }
 
-type heartbeatSender struct {
-	endpoint, projectID, machineID, reporterVersion string
-	tokens                                          interface {
+type runtimeObservationService struct {
+	mu       sync.Mutex
+	sender   *runtimeObservationSender
+	interval time.Duration
+	timeout  time.Duration
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+func (s *runtimeObservationService) Start(ctx context.Context) error {
+	if s.sender == nil || s.interval <= 0 || s.timeout <= 0 {
+		return ErrProductionInvalid
+	}
+	initial, cancel := context.WithTimeout(ctx, s.timeout)
+	err := s.sender.Send(initial)
+	cancel()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return ErrProductionInvalid
+	}
+	runCtx, stop := context.WithCancel(context.Background())
+	s.cancel, s.done = stop, make(chan struct{})
+	go s.loop(runCtx, s.done)
+	return nil
+}
+
+func (s *runtimeObservationService) loop(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(s.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sendCtx, cancel := context.WithTimeout(ctx, s.timeout)
+			_ = s.sender.Send(sendCtx)
+			cancel()
+		}
+	}
+}
+
+func (s *runtimeObservationService) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	cancel, done := s.cancel, s.done
+	s.cancel, s.done = nil, nil
+	s.mu.Unlock()
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	final, stop := context.WithTimeout(ctx, s.timeout)
+	err := s.sender.Send(final)
+	stop()
+	return err
+}
+
+type runtimeObservationSender struct {
+	endpoint, environmentID, machineID, reporterVersion string
+	tokens                                              interface {
 		Token(context.Context) (string, error)
 	}
 	proofs interface {
@@ -429,8 +492,6 @@ type heartbeatSender struct {
 	}
 	operationID  func() (string, error)
 	client       *http.Client
-	mu           sync.Mutex
-	lastActivity time.Time
 	availability interface {
 		Observation() *availability.Observation
 	}
@@ -441,41 +502,16 @@ type heartbeatSender struct {
 	connector        interface{ Status() connector.Status }
 }
 
-func (s *heartbeatSender) Send(ctx context.Context, batch activity.Batch) error {
-	if len(batch.Events) == 0 {
-		return errors.New("activity batch is empty")
-	}
-	return s.send(ctx, batch.Events)
-}
-
-func (s *heartbeatSender) Heartbeat(ctx context.Context) error { return s.send(ctx, nil) }
-
-func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) error {
+func (s *runtimeObservationSender) Send(ctx context.Context) error {
 	now := time.Now().UTC()
-	signals := make(map[string]string)
-	s.mu.Lock()
-	for _, event := range events {
-		occurred := event.OccurredAt.UTC()
-		if occurred.After(s.lastActivity) {
-			s.lastActivity = occurred
-		}
-		key := string(event.Source)
-		if previous, ok := signals[key]; !ok || occurred.After(parseActivityTime(previous)) {
-			signals[key] = occurred.Format(time.RFC3339Nano)
-		}
-	}
-	last := s.lastActivity
-	s.mu.Unlock()
 	body, err := json.Marshal(struct {
 		EnvironmentID      string                         `json:"environment_id"`
 		ResourceID         string                         `json:"resource_id"`
-		LastActivityAt     time.Time                      `json:"last_activity_at"`
-		Signals            map[string]string              `json:"signals"`
 		ReporterVersion    string                         `json:"reporter_version"`
 		SampledAt          time.Time                      `json:"sampled_at"`
 		Availability       *availability.Observation      `json:"availability,omitempty"`
 		RuntimeDiagnostics *runtimeDiagnosticsObservation `json:"runtime_diagnostics,omitempty"`
-	}{s.projectID, s.machineID, last, signals, s.reporterVersion, now, availabilityObservation(s.availability), s.runtimeDiagnostics(now)})
+	}{s.environmentID, s.machineID, s.reporterVersion, now, availabilityObservation(s.availability), s.runtimeDiagnostics(now)})
 	if err != nil {
 		return err
 	}
@@ -491,7 +527,7 @@ func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) err
 	if err != nil {
 		return err
 	}
-	proof, err := s.proofs.Proof(ctx, operationID, http.MethodPost, "/v1/environment-activity-observations", body)
+	proof, err := s.proofs.Proof(ctx, operationID, http.MethodPost, "/v1/runtime-observations", body)
 	if err != nil {
 		return err
 	}
@@ -505,7 +541,7 @@ func (s *heartbeatSender) send(ctx context.Context, events []activity.Event) err
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("activity heartbeat rejected with status %d", response.StatusCode)
+		return fmt.Errorf("runtime observation rejected with status %d", response.StatusCode)
 	}
 	if s.receiptPath == "" {
 		return nil
@@ -522,7 +558,7 @@ type runtimeDiagnosticsObservation struct {
 	ObservedAt          time.Time `json:"observed_at"`
 }
 
-func (s *heartbeatSender) runtimeDiagnostics(observedAt time.Time) *runtimeDiagnosticsObservation {
+func (s *runtimeObservationSender) runtimeDiagnostics(observedAt time.Time) *runtimeDiagnosticsObservation {
 	if s.workerGeneration < 1 || s.osBootID == "" || s.connector == nil {
 		return nil
 	}
@@ -581,11 +617,6 @@ func writeServerHeartbeatReceipt(path string, receipt serverHeartbeatReceipt) er
 		return err
 	}
 	return os.Rename(name, path)
-}
-
-func parseActivityTime(value string) time.Time {
-	parsed, _ := time.Parse(time.RFC3339Nano, value)
-	return parsed
 }
 
 func availabilityObservation(source interface {
@@ -717,6 +748,9 @@ func valueOrRuntime(value, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(value)
+}
+func productionConnectorTransport(value string) connector.Transport {
+	return connector.Transport(valueOrRuntime(value, string(connector.Auto)))
 }
 func durationRuntime(value string, fallback time.Duration) time.Duration {
 	if value == "" {

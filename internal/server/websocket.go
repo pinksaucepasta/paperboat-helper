@@ -1,24 +1,22 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/coder/websocket"
 	"github.com/pinksaucepasta/paperboat-helper/internal/protocol"
 )
 
 const (
-	DefaultWebSocketSubprotocol = "paperboat.helper.v1"
+	DefaultWebSocketSubprotocol = "paperboat.terminal.v2"
 	DefaultMaxWebSocketMessage  = 1 << 20
 )
 
@@ -82,7 +80,7 @@ func (h *WebSocketHandler) ServeHTTP(writer http.ResponseWriter, request *http.R
 		return
 	}
 	connection.SetReadLimit(h.config.MaxMessageBytes)
-	wrapped := newWebSocketConnection(connection)
+	wrapped := newWebSocketConnection(request.Context(), connection)
 	_ = h.config.Server.ServeAuthenticated(wrapped, authorizer)
 }
 
@@ -102,79 +100,43 @@ type webSocketConnection struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	readMu     sync.Mutex
-	reader     io.Reader
 	closeOnce  sync.Once
+	revoked    atomic.Bool
 }
 
-func newWebSocketConnection(connection *websocket.Conn) *webSocketConnection {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &webSocketConnection{connection: connection, ctx: ctx, cancel: cancel}
+func newWebSocketConnection(parent context.Context, connection *websocket.Conn) *webSocketConnection {
+	ctx, cancel := context.WithCancel(parent)
+	wrapped := &webSocketConnection{connection: connection, ctx: ctx, cancel: cancel}
+	context.AfterFunc(ctx, func() { wrapped.revoked.Store(true) })
+	return wrapped
 }
+
+func (c *webSocketConnection) RevocationFlag() *atomic.Bool { return &c.revoked }
 
 func (c *webSocketConnection) Read(buffer []byte) (int, error) {
-	c.readMu.Lock()
-	defer c.readMu.Unlock()
-	for {
-		if c.reader != nil {
-			n, err := c.reader.Read(buffer)
-			if err == io.EOF {
-				c.reader = nil
-			}
-			if n > 0 {
-				return n, nil
-			}
-			if err != nil && err != io.EOF {
-				return 0, err
-			}
-		}
-		messageType, reader, err := c.connection.Reader(c.ctx)
-		if err != nil {
-			return 0, classifyWebSocketRead(err)
-		}
-		if messageType == websocket.MessageBinary {
-			binaryFrame, binaryErr := protocol.ReadBinaryFrame(reader)
-			if binaryErr != nil || binaryFrame.Channel != protocol.TerminalInput {
-				return 0, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("invalid terminal input frame")}
-			}
-			payload, payloadErr := decodeTerminalInput(binaryFrame)
-			if payloadErr != nil {
-				return 0, payloadErr
-			}
-			var encoded bytes.Buffer
-			frame := protocol.Frame{Type: "input", RequestID: "input_" + strconv.FormatUint(binaryFrame.StartSequence, 10), Version: protocol.ProtocolVersion, Capability: "terminal.v1", Payload: payload}
-			if writeErr := protocol.WriteFrame(&encoded, frame); writeErr != nil {
-				return 0, writeErr
-			}
-			c.reader = bytes.NewReader(encoded.Bytes())
-			continue
-		}
-		if messageType != websocket.MessageText {
-			return 0, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("unsupported client message type")}
-		}
-		c.reader = reader
-	}
+	return 0, errors.New("stream reads are unavailable for terminal protocol 2.0")
 }
 
-func decodeTerminalInput(frame protocol.BinaryFrame) (json.RawMessage, error) {
-	if len(frame.Data) < 12 {
-		return nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input binding is truncated")}
-	}
-	sessionLength := int(binary.BigEndian.Uint16(frame.Data[:2]))
-	attachmentLength := int(binary.BigEndian.Uint16(frame.Data[2:4]))
-	generation := binary.BigEndian.Uint64(frame.Data[4:12])
-	headerEnd := 12 + sessionLength + attachmentLength
-	if sessionLength < 1 || sessionLength > 128 || attachmentLength < 1 || attachmentLength > 128 || generation == 0 || headerEnd >= len(frame.Data) {
-		return nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal input binding is invalid")}
-	}
-	payload, err := json.Marshal(terminalStreamInput{
-		Sequence: frame.StartSequence, SessionID: string(frame.Data[12 : 12+sessionLength]),
-		AttachmentID: string(frame.Data[12+sessionLength : headerEnd]), Generation: generation,
-		BytesBase64: base64.StdEncoding.EncodeToString(frame.Data[headerEnd:]),
-	})
+func (c *webSocketConnection) ReadApplication() (protocol.Frame, []byte, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	messageType, data, err := c.connection.Read(c.ctx)
 	if err != nil {
-		return nil, err
+		return protocol.Frame{}, nil, classifyWebSocketRead(err)
 	}
-	return payload, nil
+	if messageType == websocket.MessageBinary {
+		return protocol.Frame{}, data, nil
+	}
+	if messageType != websocket.MessageText || len(data) == 0 || len(data) > protocol.MaxStructuredFrame {
+		return protocol.Frame{}, nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("invalid structured message")}
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var frame protocol.Frame
+	if err := decoder.Decode(&frame); err != nil || frame.Type == "" || frame.RequestID == "" || frame.Version != protocol.ProtocolVersion {
+		return protocol.Frame{}, nil, &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("invalid structured message")}
+	}
+	return frame, nil, nil
 }
 
 func (c *webSocketConnection) Write(data []byte) (int, error) {
@@ -185,19 +147,37 @@ func (c *webSocketConnection) Write(data []byte) (int, error) {
 }
 
 func (c *webSocketConnection) WriteStructured(frame protocol.Frame) error {
-	var encoded bytes.Buffer
-	if err := protocol.WriteFrame(&encoded, frame); err != nil {
+	encoded, err := json.Marshal(frame)
+	if err != nil || len(encoded) > protocol.MaxStructuredFrame {
 		return err
 	}
-	return c.connection.Write(c.ctx, websocket.MessageText, encoded.Bytes())
+	return c.connection.Write(c.ctx, websocket.MessageText, encoded)
 }
 
 func (c *webSocketConnection) WriteBinary(frame protocol.BinaryFrame) error {
-	var encoded bytes.Buffer
-	if err := protocol.WriteBinaryFrame(&encoded, frame); err != nil {
+	encoded, err := protocol.EncodeTerminalOutput(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: 1, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
+	if err != nil {
 		return err
 	}
-	return c.connection.Write(c.ctx, websocket.MessageBinary, encoded.Bytes())
+	return c.connection.Write(c.ctx, websocket.MessageBinary, encoded)
+}
+
+func (c *webSocketConnection) WriteTerminalOutput(streamID uint32, frame protocol.BinaryFrame) error {
+	if streamID == 0 || len(frame.Data) == 0 || (frame.Channel != protocol.TerminalStdout && frame.Channel != protocol.TerminalStderr) {
+		return &protocol.Error{Code: protocol.InvalidFrame}
+	}
+	writer, err := c.connection.Writer(c.ctx, websocket.MessageBinary)
+	if err != nil {
+		return err
+	}
+	var header [14]byte
+	header[0], header[1] = protocol.TerminalOutputOpcode, frame.Channel
+	binary.BigEndian.PutUint32(header[2:6], streamID)
+	binary.BigEndian.PutUint64(header[6:14], frame.StartSequence)
+	if _, err = writer.Write(header[:]); err == nil {
+		_, err = writer.Write(frame.Data)
+	}
+	return errors.Join(err, writer.Close())
 }
 
 func (c *webSocketConnection) Close() error { return c.CloseProtocol(protocol.CloseNormal, "closed") }

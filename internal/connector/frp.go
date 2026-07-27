@@ -164,6 +164,8 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 		common.Transport.Protocol = "quic"
 	} else {
 		common.Transport.Protocol = "tcp"
+		tcpMux := transport == TCPMux
+		common.Transport.TCPMux = &tcpMux
 	}
 	service, err := frpclient.NewService(frpclient.ServiceOptions{Common: common, ConfigSourceAggregator: source.NewAggregator(configSource), ConnectorCreator: connectorCreator})
 	if err != nil {
