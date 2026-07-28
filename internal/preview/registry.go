@@ -145,7 +145,13 @@ func (r *Registry) Register(identity, environmentID, logicalName string, target 
 		r.records[identity] = existing
 		return cloneRecord(existing), nil
 	}
-	if len(r.records) >= r.config.MaxTargets {
+	active := 0
+	for _, item := range r.records {
+		if item.State != Removed {
+			active++
+		}
+	}
+	if active >= r.config.MaxTargets {
 		return Record{}, ErrResourceLimit
 	}
 	record := Record{Identity: identity, EnvironmentID: environmentID, LogicalName: logicalName, Target: target, State: Registering, UpdatedAt: r.config.Clock.Now(), Revision: 1}

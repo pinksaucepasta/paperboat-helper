@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 var ErrControlClientInvalid = errors.New("invalid preview control client")
@@ -23,17 +24,18 @@ type ControlTokenSource interface {
 	Token(context.Context) (string, error)
 }
 type ControlRecord struct {
-	ID            string `json:"id"`
-	EnvironmentID string `json:"environment_id"`
-	LogicalName   string `json:"logical_name"`
-	PreviewKey    string `json:"preview_key"`
-	URL           string `json:"url"`
-	TargetPort    int32  `json:"target_port"`
-	State         string `json:"state"`
+	ID            string     `json:"id"`
+	EnvironmentID string     `json:"environment_id"`
+	LogicalName   string     `json:"logical_name"`
+	PreviewKey    string     `json:"preview_key"`
+	URL           string     `json:"url"`
+	TargetPort    int32      `json:"target_port"`
+	State         string     `json:"state"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 }
 type PreviewControl interface {
 	List(context.Context) ([]ControlRecord, error)
-	Register(context.Context, string, Target, bool) (ControlRecord, error)
+	Register(context.Context, string, Target, bool, time.Duration, bool) (ControlRecord, error)
 	Remove(context.Context, string) (ControlRecord, error)
 }
 type ControlClientConfig struct {
@@ -75,8 +77,15 @@ func (c *ControlClient) List(ctx context.Context) ([]ControlRecord, error) {
 	value, err := c.call(ctx, map[string]any{"action": "list"}, true)
 	return value, err
 }
-func (c *ControlClient) Register(ctx context.Context, logical string, target Target, ack bool) (ControlRecord, error) {
-	return c.callOne(ctx, map[string]any{"action": "register", "logical_name": logical, "target_host": target.Host, "target_port": target.Port, "public_acknowledgement": ack})
+func (c *ControlClient) Register(ctx context.Context, logical string, target Target, ack bool, lifetime time.Duration, indefinite bool) (ControlRecord, error) {
+	payload := map[string]any{"action": "register", "logical_name": logical, "target_host": target.Host, "target_port": target.Port, "public_acknowledgement": ack}
+	if lifetime > 0 {
+		payload["duration_seconds"] = int64(lifetime / time.Second)
+	}
+	if indefinite {
+		payload["indefinite"] = true
+	}
+	return c.callOne(ctx, payload)
 }
 func (c *ControlClient) Remove(ctx context.Context, logical string) (ControlRecord, error) {
 	return c.callOne(ctx, map[string]any{"action": "remove", "logical_name": logical})

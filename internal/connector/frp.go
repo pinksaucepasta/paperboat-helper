@@ -29,23 +29,44 @@ type FRPClient interface {
 type FRPFactory func(Admission, Transport) (FRPClient, error)
 
 type FRPDialerConfig struct {
-	Factory      FRPFactory
-	ReadyTimeout time.Duration
+	Factory               FRPFactory
+	ReadyTimeout          time.Duration
+	ProxyCheckInterval    time.Duration
+	ProxyFailureThreshold int
+	RouteKinds            []string
 }
 
-type FRPDialer struct{ config FRPDialerConfig }
+type FRPDialer struct {
+	config     FRPDialerConfig
+	routeKinds map[string]bool
+}
 
 func NewFRPDialer(config FRPDialerConfig) (*FRPDialer, error) {
+	routeKinds := make(map[string]bool, len(config.RouteKinds))
+	for _, kind := range config.RouteKinds {
+		if kind != "helper_https_wss" && kind != "preview_public_https_wss" || routeKinds[kind] {
+			return nil, ErrFRPInvalid
+		}
+		routeKinds[kind] = true
+	}
 	if config.Factory == nil {
-		config.Factory = newFRPClient
+		config.Factory = func(admission Admission, transport Transport) (FRPClient, error) {
+			return newFRPClientForKinds(admission, transport, routeKinds, nil)
+		}
 	}
 	if config.ReadyTimeout == 0 {
 		config.ReadyTimeout = 30 * time.Second
 	}
-	if config.ReadyTimeout <= 0 {
+	if config.ProxyCheckInterval == 0 {
+		config.ProxyCheckInterval = 250 * time.Millisecond
+	}
+	if config.ProxyFailureThreshold == 0 {
+		config.ProxyFailureThreshold = 3
+	}
+	if config.ReadyTimeout <= 0 || config.ProxyCheckInterval <= 0 || config.ProxyFailureThreshold < 1 {
 		return nil, ErrFRPInvalid
 	}
-	return &FRPDialer{config: config}, nil
+	return &FRPDialer{config: config, routeKinds: routeKinds}, nil
 }
 
 func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Admission) (Connection, error) {
@@ -57,21 +78,23 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 	// session must outlive Accept, whose context is canceled immediately after
 	// admission completes; Connection.Close owns the established lifetime.
 	runCtx, cancel := context.WithCancel(context.Background())
-	c := &frpConnection{client: client, cancel: cancel, done: make(chan error, 1)}
+	c := &frpConnection{client: client, cancel: cancel, done: make(chan error, 1), closed: make(chan struct{})}
 	go func() { c.done <- client.Run(runCtx) }()
 	deadline := time.NewTimer(d.config.ReadyTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
+	routes := d.selectedRoutes(admission.Routes)
 	for {
 		ready := true
-		for _, route := range admission.Routes {
+		for _, route := range routes {
 			if !client.ProxyRunning(frpProxyIdentity(admission, route).name) {
 				ready = false
 				break
 			}
 		}
 		if ready {
+			go c.monitorProxies(admission, routes, d.config.ProxyCheckInterval, d.config.ProxyFailureThreshold)
 			return c, nil
 		}
 		select {
@@ -92,11 +115,54 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 	}
 }
 
+func (d *FRPDialer) selectedRoutes(routes []RouteHandoff) []RouteHandoff {
+	if len(d.routeKinds) == 0 {
+		return routes
+	}
+	selected := make([]RouteHandoff, 0, len(routes))
+	for _, route := range routes {
+		if d.routeKinds[route.Kind] {
+			selected = append(selected, route)
+		}
+	}
+	return selected
+}
+
 type frpConnection struct {
 	client FRPClient
 	cancel context.CancelFunc
 	done   chan error
+	closed chan struct{}
 	once   sync.Once
+}
+
+func (c *frpConnection) monitorProxies(admission Admission, routes []RouteHandoff, interval time.Duration, threshold int) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-c.closed:
+			return
+		case <-ticker.C:
+			running := true
+			for _, route := range routes {
+				if !c.client.ProxyRunning(frpProxyIdentity(admission, route).name) {
+					running = false
+					break
+				}
+			}
+			if running {
+				failures = 0
+				continue
+			}
+			failures++
+			if failures >= threshold {
+				_ = c.Close()
+				return
+			}
+		}
+	}
 }
 
 func (c *frpConnection) Drain(ctx context.Context) error {
@@ -120,7 +186,7 @@ func (c *frpConnection) Drain(ctx context.Context) error {
 	}
 }
 func (c *frpConnection) Close() error {
-	c.once.Do(func() { c.cancel(); c.client.Close() })
+	c.once.Do(func() { close(c.closed); c.cancel(); c.client.Close() })
 	return nil
 }
 func (c *frpConnection) Done() <-chan error { return c.done }
@@ -140,9 +206,16 @@ func newFRPClient(admission Admission, transport Transport) (FRPClient, error) {
 }
 
 func newFRPClientWithConnector(admission Admission, transport Transport, connectorCreator func(context.Context, *v1.ClientCommonConfig) frpclient.Connector) (FRPClient, error) {
+	return newFRPClientForKinds(admission, transport, nil, connectorCreator)
+}
+
+func newFRPClientForKinds(admission Admission, transport Transport, routeKinds map[string]bool, connectorCreator func(context.Context, *v1.ClientCommonConfig) frpclient.Connector) (FRPClient, error) {
 	configSource := source.NewConfigSource()
 	proxies := make([]v1.ProxyConfigurer, 0, len(admission.Routes))
 	for _, route := range admission.Routes {
+		if len(routeKinds) > 0 && !routeKinds[route.Kind] {
+			continue
+		}
 		identity := frpProxyIdentity(admission, route)
 		proxy := &v1.HTTPProxyConfig{ProxyBaseConfig: v1.ProxyBaseConfig{Name: identity.name, Type: "http", ProxyBackend: v1.ProxyBackend{LocalIP: route.LocalTarget.Host, LocalPort: int(route.LocalTarget.Port)}, LoadBalancer: v1.LoadBalancerConfig{Group: identity.group, GroupKey: identity.groupKey}}, DomainConfig: v1.DomainConfig{CustomDomains: []string{route.PublicHost}}}
 		proxies = append(proxies, proxy)

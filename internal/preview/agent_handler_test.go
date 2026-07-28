@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 type agentControl struct {
@@ -18,7 +19,7 @@ type agentControl struct {
 func (c *agentControl) List(context.Context) ([]ControlRecord, error) {
 	return append([]ControlRecord(nil), c.records...), nil
 }
-func (c *agentControl) Register(_ context.Context, logical string, target Target, ack bool) (ControlRecord, error) {
+func (c *agentControl) Register(_ context.Context, logical string, target Target, ack bool, _ time.Duration, _ bool) (ControlRecord, error) {
 	c.target, c.ack = target, ack
 	record := ControlRecord{ID: "prv_1", EnvironmentID: "env_1", LogicalName: logical, PreviewKey: "p-abcdefghijklmnopqrstuvwxyz", URL: "https://p-abcdefghijklmnopqrstuvwxyz.preview.test", TargetPort: int32(target.Port), State: "registering"}
 	c.records = []ControlRecord{record}
@@ -87,5 +88,31 @@ func TestAgentHandlerRejectsMissingPublicAcknowledgementAndCrossEnvironmentList(
 			_ = json.Unmarshal(response.Body.Bytes(), &decoded)
 			t.Fatalf("body=%s status=%d response=%v", body, response.Code, decoded)
 		}
+	}
+}
+
+func TestAgentHandlerReconcilesServerEvictionBeforeRegisteringReplacement(t *testing.T) {
+	registry, err := New(Config{Prober: agentHealthyProber{}, MaxTargets: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.RegisterCanonical("p-zyxwvutsrqponmlkjihgfedcba", "https://p-zyxwvutsrqponmlkjihgfedcba.preview.test", "env_1", "old", Target{Host: "127.0.0.1", Port: 2999}); err != nil {
+		t.Fatal(err)
+	}
+	control := &agentControl{}
+	handler, err := NewAgentHandler(AgentHandlerConfig{Token: "01234567890123456789012345678901", EnvironmentID: "env_1", Registry: registry, Control: control})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/preview-registrations", bytes.NewBufferString(`{"action":"create","logical_name":"web","target_port":3000,"public_acknowledgement":true}`))
+	request.Header.Set("Authorization", "Bearer 01234567890123456789012345678901")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	records := registry.ListEnvironment("env_1")
+	if len(records) != 1 || records[0].LogicalName != "web" {
+		t.Fatalf("reconciled records=%+v", records)
 	}
 }

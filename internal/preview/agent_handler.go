@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const maxAgentRequestBytes = 8 << 10
@@ -27,6 +28,8 @@ type agentRequest struct {
 	LogicalName           string `json:"logical_name,omitempty"`
 	TargetPort            uint16 `json:"target_port,omitempty"`
 	PublicAcknowledgement bool   `json:"public_acknowledgement,omitempty"`
+	DurationSeconds       int64  `json:"duration_seconds,omitempty"`
+	Indefinite            bool   `json:"indefinite,omitempty"`
 }
 
 func NewAgentHandler(config AgentHandlerConfig) (*AgentHandler, error) {
@@ -65,7 +68,7 @@ func (h *AgentHandler) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 		}
 		value, err = h.list(request)
 	case "create":
-		if operation.TargetPort == 0 || !operation.PublicAcknowledgement {
+		if operation.TargetPort == 0 || !operation.PublicAcknowledgement || operation.DurationSeconds < 0 || operation.Indefinite && operation.DurationSeconds != 0 {
 			writeAgentError(writer, http.StatusBadRequest, "public_acknowledgement_required")
 			return
 		}
@@ -101,26 +104,51 @@ func (h *AgentHandler) list(request *http.Request) ([]ControlRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	remoteKeys := make(map[string]bool, len(remote))
 	for _, record := range remote {
 		if record.EnvironmentID != h.config.EnvironmentID || record.TargetPort < 1 || record.TargetPort > 65535 {
 			return nil, ErrControlClientInvalid
 		}
+		remoteKeys[record.PreviewKey] = true
+	}
+	changed := false
+	for _, local := range h.config.Registry.ListEnvironment(h.config.EnvironmentID) {
+		if !remoteKeys[local.Identity] {
+			if _, removeErr := h.config.Registry.Remove(local.Identity); removeErr != nil && !errors.Is(removeErr, ErrNotFound) {
+				return nil, removeErr
+			}
+			changed = true
+		}
+	}
+	for _, record := range remote {
 		_, err := h.config.Registry.RegisterCanonical(record.PreviewKey, record.URL, h.config.EnvironmentID, record.LogicalName, Target{Host: "127.0.0.1", Port: uint16(record.TargetPort)})
 		if err != nil && !errors.Is(err, ErrIdentityConflict) {
 			return nil, err
 		}
+	}
+	if changed && h.config.RoutesChanged != nil {
+		h.config.RoutesChanged()
 	}
 	return remote, nil
 }
 
 func (h *AgentHandler) create(request *http.Request, operation agentRequest) (ControlRecord, error) {
 	target := Target{Host: "127.0.0.1", Port: operation.TargetPort}
-	remote, err := h.config.Control.Register(request.Context(), operation.LogicalName, target, true)
+	remote, err := h.config.Control.Register(request.Context(), operation.LogicalName, target, true, time.Duration(operation.DurationSeconds)*time.Second, operation.Indefinite)
 	if err != nil || remote.EnvironmentID != h.config.EnvironmentID {
 		return ControlRecord{}, errors.Join(err, ErrControlClientInvalid)
 	}
-	_, err = h.config.Registry.RegisterCanonical(remote.PreviewKey, remote.URL, h.config.EnvironmentID, remote.LogicalName, target)
-	if err == nil && h.config.RoutesChanged != nil {
+	reconciled, err := h.list(request)
+	if err != nil {
+		return ControlRecord{}, err
+	}
+	for _, record := range reconciled {
+		if record.PreviewKey == remote.PreviewKey {
+			remote = record
+			break
+		}
+	}
+	if h.config.RoutesChanged != nil {
 		h.config.RoutesChanged()
 	}
 	return remote, err

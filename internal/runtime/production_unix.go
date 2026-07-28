@@ -177,7 +177,8 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	dialer, err := connector.NewFRPDialer(connector.FRPDialerConfig{ReadyTimeout: durationRuntime(environ("PAPERBOAT_CONNECTOR_READY_TIMEOUT_SECONDS"), 15*time.Second)})
+	readyTimeout := durationRuntime(environ("PAPERBOAT_CONNECTOR_READY_TIMEOUT_SECONDS"), 15*time.Second)
+	dialer, err := connector.NewFRPDialer(connector.FRPDialerConfig{ReadyTimeout: readyTimeout, RouteKinds: []string{"helper_https_wss"}})
 	if err != nil {
 		return nil, err
 	}
@@ -189,11 +190,26 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	networkChanges, err := newNetworkChangeService(2*time.Second, supervisor.NetworkChanged)
+	previewDialer, err := connector.NewFRPDialer(connector.FRPDialerConfig{ReadyTimeout: readyTimeout, RouteKinds: []string{"preview_public_https_wss"}})
 	if err != nil {
 		return nil, err
 	}
-	connectorService := &connectorReadinessService{supervisor: supervisor, manager: manager, networkChanges: networkChanges}
+	previewManager, err := connector.New(connector.Config{EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, EdgePool: valueOrRuntime(environ("PAPERBOAT_EDGE_POOL"), "default"), Dialer: previewDialer, DrainTimeout: 10 * time.Second, Transport: productionConnectorTransport(environ("PAPERBOAT_CONNECTOR_TERMINAL_TRANSPORT"))})
+	if err != nil {
+		return nil, err
+	}
+	previewSupervisor, err := connector.NewSupervisor(connector.SupervisorConfig{Manager: previewManager, Admissions: source, InitialBackoff: time.Second, MaxBackoff: 45 * time.Second, Metrics: metrics})
+	if err != nil {
+		return nil, err
+	}
+	networkChanges, err := newNetworkChangeService(2*time.Second, func() {
+		supervisor.NetworkChanged()
+		previewSupervisor.NetworkChanged()
+	})
+	if err != nil {
+		return nil, err
+	}
+	connectorService := &connectorReadinessService{supervisor: supervisor, manager: manager, additionalSupervisors: []*connector.Supervisor{previewSupervisor}, networkChanges: networkChanges}
 	previews, err := preview.New(preview.Config{Prober: preview.TCPProber{Dialer: net.Dialer{Timeout: 2 * time.Second}}, MaxTargets: runtimeConfig.Resources.MaxPreviewTargets, MaxConcurrentProbes: runtimeConfig.Resources.MaxConcurrentProbes})
 	if err != nil {
 		return nil, err
@@ -317,7 +333,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if availabilityService != nil {
 		runtimeService = serviceGroup{availabilityService, runtimeObservation}
 	}
-	dependencies := HelperDependencies{Authorizer: authorizer, AuthorizationService: authorizationRefresh, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: supervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, RuntimeObservationService: runtimeService, ConfigSync: configSyncService, Updates: updateClient, Metrics: metrics}
+	dependencies := HelperDependencies{Authorizer: authorizer, AuthorizationService: authorizationRefresh, Connector: connectorService, Previews: previews, PreviewControl: previewControl, PreviewRoutesChanged: previewSupervisor.RoutesChanged, PreviewService: serviceGroup{previewMonitor, previewReporter}, RuntimeObservationService: runtimeService, ConfigSync: configSyncService, Updates: updateClient, Metrics: metrics}
 	if runtimeConfig.Profile == helperconfig.Hosted {
 		dependencies.HostedLifecycle = hostedLifecycle
 		dependencies.ConfigApply = configapply.SyncHandler{Apply: configSyncService.Apply}
@@ -629,17 +645,31 @@ func availabilityObservation(source interface {
 }
 
 type connectorReadinessService struct {
-	supervisor     *connector.Supervisor
-	manager        *connector.Manager
-	networkChanges Service
+	supervisor            *connector.Supervisor
+	manager               *connector.Manager
+	additionalSupervisors []*connector.Supervisor
+	networkChanges        Service
 }
 
 func (s *connectorReadinessService) Start(ctx context.Context) error {
 	if err := s.supervisor.Start(ctx); err != nil {
 		return err
 	}
+	started := 0
+	for _, additional := range s.additionalSupervisors {
+		if err := additional.Start(ctx); err != nil {
+			for i := started - 1; i >= 0; i-- {
+				_ = s.additionalSupervisors[i].Shutdown(context.Background())
+			}
+			return errors.Join(err, s.supervisor.Shutdown(context.Background()))
+		}
+		started++
+	}
 	if s.networkChanges != nil {
 		if err := s.networkChanges.Start(ctx); err != nil {
+			for i := len(s.additionalSupervisors) - 1; i >= 0; i-- {
+				_ = s.additionalSupervisors[i].Shutdown(context.Background())
+			}
 			return errors.Join(err, s.supervisor.Shutdown(context.Background()))
 		}
 	}
@@ -650,7 +680,11 @@ func (s *connectorReadinessService) Shutdown(ctx context.Context) error {
 	if s.networkChanges != nil {
 		networkErr = s.networkChanges.Shutdown(ctx)
 	}
-	return errors.Join(networkErr, s.supervisor.Shutdown(ctx))
+	result := networkErr
+	for i := len(s.additionalSupervisors) - 1; i >= 0; i-- {
+		result = errors.Join(result, s.additionalSupervisors[i].Shutdown(ctx))
+	}
+	return errors.Join(result, s.supervisor.Shutdown(ctx))
 }
 
 type jwksRefreshService struct {

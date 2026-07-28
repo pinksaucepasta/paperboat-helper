@@ -418,7 +418,7 @@ func (d *Dispatcher) preview(ctx context.Context, authorization Authorization, p
 	case "register":
 		target := preview.Target{Host: request.TargetHost, Port: request.TargetPort}
 		if d.config.PreviewControl != nil {
-			remote, err := d.config.PreviewControl.Register(ctx, request.LogicalName, target, request.PublicAcknowledgement)
+			remote, err := d.config.PreviewControl.Register(ctx, request.LogicalName, target, request.PublicAcknowledgement, 0, false)
 			if err != nil {
 				return failure("preview_control_unavailable")
 			}

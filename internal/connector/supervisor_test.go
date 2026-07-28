@@ -233,8 +233,8 @@ func TestAdmissionExpiryDoesNotReplaceHealthyConnector(t *testing.T) {
 	now := time.Now()
 	dialer := &recoveringDialer{}
 	manager := manager(t, dialer, now)
-	// The admission authorizes login for only another 100ms. Once connected,
-	// that expiry must not rotate and terminate healthy data-plane streams.
+	// Admission expiry limits new handshakes. It does not terminate an
+	// established connector or cause periodic connector replacement.
 	source := &admissionSource{now: now.Add(-59*time.Second - 900*time.Millisecond), calls: make(chan uint64, 4)}
 	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source})
 	if err != nil {

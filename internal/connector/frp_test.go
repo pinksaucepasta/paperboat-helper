@@ -97,6 +97,33 @@ func TestFRPDialerConnectionOutlivesReadinessContext(t *testing.T) {
 	}
 }
 
+func TestFRPDialerSurfacesEstablishedProxyLoss(t *testing.T) {
+	client := &fakeFRPClient{}
+	client.running.Store(true)
+	dialer, err := NewFRPDialer(FRPDialerConfig{
+		ReadyTimeout:          time.Second,
+		ProxyCheckInterval:    time.Millisecond,
+		ProxyFailureThreshold: 2,
+		Factory:               func(Admission, Transport) (FRPClient, error) { return client, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := dialer.Dial(context.Background(), TCPMux, admission(1, "jti_proxy_loss", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.running.Store(false)
+	select {
+	case <-connection.(LifecycleConnection).Done():
+	case <-time.After(time.Second):
+		t.Fatal("established proxy loss remained hidden inside the FRP retry loop")
+	}
+	if !client.closed.Load() {
+		t.Fatal("FRP client was not closed after established proxy loss")
+	}
+}
+
 func TestFRPDialerTimeoutClosesClient(t *testing.T) {
 	client := &fakeFRPClient{}
 	dialer, _ := NewFRPDialer(FRPDialerConfig{ReadyTimeout: 20 * time.Millisecond, Factory: func(Admission, Transport) (FRPClient, error) { return client, nil }})
@@ -137,6 +164,34 @@ func TestNativeFRPClientBuildsFromAuthenticatedHandoff(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("nil native client")
+	}
+}
+
+func TestFRPDialerSelectsOnlyOwnedRouteKinds(t *testing.T) {
+	value := admission(1, "jti_route_kinds", time.Now())
+	previewRoute := value.Routes[0]
+	previewRoute.RouteID = "route_preview"
+	previewRoute.ProxyName = "preview_1"
+	previewRoute.PublicHost = "preview.test"
+	previewRoute.Kind = "preview_public_https_wss"
+	value.Routes = append(value.Routes, previewRoute)
+
+	terminal, err := NewFRPDialer(FRPDialerConfig{RouteKinds: []string{"helper_https_wss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := NewFRPDialer(FRPDialerConfig{RouteKinds: []string{"preview_public_https_wss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routes := terminal.selectedRoutes(value.Routes); len(routes) != 1 || routes[0].Kind != "helper_https_wss" {
+		t.Fatalf("terminal routes = %+v", routes)
+	}
+	if routes := preview.selectedRoutes(value.Routes); len(routes) != 1 || routes[0].Kind != "preview_public_https_wss" {
+		t.Fatalf("preview routes = %+v", routes)
+	}
+	if _, err := NewFRPDialer(FRPDialerConfig{RouteKinds: []string{"unsupported"}}); !errors.Is(err, ErrFRPInvalid) {
+		t.Fatalf("unsupported route kind error = %v", err)
 	}
 }
 

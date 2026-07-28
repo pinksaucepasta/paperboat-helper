@@ -30,7 +30,7 @@ func TestPreviewCreatePrintsPublicURLAndAcknowledgement(t *testing.T) {
 		}
 		var payload map[string]any
 		_ = json.NewDecoder(request.Body).Decode(&payload)
-		if payload["action"] != "create" || payload["logical_name"] != "web" || payload["target_port"] != float64(3000) || payload["public_acknowledgement"] != true {
+		if payload["action"] != "create" || payload["logical_name"] != "web" || payload["target_port"] != float64(3000) || payload["public_acknowledgement"] != true || payload["duration_seconds"] != float64(7200) {
 			t.Errorf("payload=%v", payload)
 		}
 		_, _ = writer.Write([]byte(`{"data":{"id":"prv_1","environment_id":"env_1","logical_name":"web","preview_key":"p-abcdefghijklmnopqrstuvwxyz","url":"https://p-abcdefghijklmnopqrstuvwxyz.preview.test","target_port":3000,"state":"registering"}}`))
@@ -43,7 +43,7 @@ func TestPreviewCreatePrintsPublicURLAndAcknowledgement(t *testing.T) {
 	t.Setenv("PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT", server.URL+"/v1/preview-registrations")
 	t.Setenv("PAPERBOAT_HELPER_AGENT_TOKEN_FILE", tokenFile)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"preview", "create", "--name", "web", "--port", "3000", "--public"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"preview", "create", "--name", "web", "--port", "3000", "--public", "--duration", "2h"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "https://p-abcdefghijklmnopqrstuvwxyz.preview.test") || !strings.Contains(stdout.String(), "anyone with this URL can access it") {

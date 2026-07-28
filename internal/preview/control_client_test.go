@@ -42,7 +42,7 @@ func TestControlClientSignsRegisterAndAcceptsCanonicalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := client.Register(context.Background(), "web", Target{Host: "127.0.0.1", Port: 3000}, true)
+	record, err := client.Register(context.Background(), "web", Target{Host: "127.0.0.1", Port: 3000}, true, 0, false)
 	if err != nil || record.PreviewKey != "p-abcdefghijklmnopqrstuvwxyz" || record.EnvironmentID != "env_1" {
 		t.Fatalf("record=%#v err=%v", record, err)
 	}

@@ -34,13 +34,21 @@ func runPreview(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		name := flags.String("name", "", "Stable preview name")
 		port := flags.Int("port", 0, "Local target port")
 		public := flags.Bool("public", false, "Acknowledge public access")
+		duration := flags.Duration("duration", 0, "Preview lifetime (default 24h)")
+		indefinite := flags.Bool("indefinite", false, "Keep the preview until explicitly removed")
 		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
-			return errors.New("preview create accepts --name, --port, and --public")
+			return errors.New("preview create accepts --name, --port, --public, --duration, and --indefinite")
 		}
-		if *name == "" || *port < 1 || *port > 65535 || !*public {
+		if *name == "" || *port < 1 || *port > 65535 || !*public || *duration < 0 || *duration > 0 && *duration < time.Second || *indefinite && *duration != 0 {
 			return errors.New("preview create requires --name, --port, and --public acknowledgement")
 		}
 		payload = map[string]any{"action": "create", "logical_name": *name, "target_port": *port, "public_acknowledgement": true}
+		if *duration > 0 {
+			payload["duration_seconds"] = int64(*duration / time.Second)
+		}
+		if *indefinite {
+			payload["indefinite"] = true
+		}
 	case "list":
 		if len(args) != 1 {
 			return errors.New("preview list does not accept arguments")
@@ -69,7 +77,11 @@ func runPreview(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			return nil
 		}
 		for _, record := range records {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", record.LogicalName, record.State, record.URL)
+			lifetime := "indefinite"
+			if record.ExpiresAt != nil {
+				lifetime = "expires " + record.ExpiresAt.Local().Format(time.RFC3339)
+			}
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", record.LogicalName, record.State, lifetime, record.URL)
 		}
 		return nil
 	}

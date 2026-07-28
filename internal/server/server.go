@@ -422,9 +422,6 @@ func validateTerminalBinding(binding *terminalStreamBinding) error {
 	if binding == nil || binding.authorization.ClientID == "" || binding.sessionID == "" || binding.attachmentID == "" || binding.generation == 0 {
 		return &protocol.Error{Code: protocol.InvalidFrame, Cause: errors.New("terminal stream is not bound")}
 	}
-	if !binding.authorization.ExpiresAt.IsZero() && !time.Now().UTC().Before(binding.authorization.ExpiresAt) {
-		return &protocol.Error{Code: protocol.CredentialExpired, Cause: errors.New("terminal credential expired")}
-	}
 	if binding.revoked != nil && binding.revoked.Load() {
 		return &protocol.Error{Code: protocol.CredentialExpired, Cause: errors.New("terminal credential revoked")}
 	}
@@ -623,22 +620,9 @@ func (s *terminalConnectionState) bind(authorization Authorization, frame protoc
 				}
 			}(authorization.RevokedSignal)
 		}
-		if !authorization.ExpiresAt.IsZero() {
-			delay := time.Until(authorization.ExpiresAt)
-			time.AfterFunc(delay, func() { s.expire(streamID, binding) })
-		}
 		return streamID, nil
 	}
 	return 0, errors.New("terminal stream id space exhausted")
-}
-
-func (s *terminalConnectionState) expire(streamID uint32, binding *terminalStreamBinding) {
-	s.mu.RLock()
-	active := s.streams[streamID] == binding
-	s.mu.RUnlock()
-	if active {
-		s.expireOnce.Do(func() { close(s.expired) })
-	}
 }
 
 func (s *terminalConnectionState) remove(streamID uint32) {

@@ -15,7 +15,7 @@ Usage:
   pbh version
   pbh help
   pbh bootstrap --server <url> --enrollment-token <token> --name <name> [--shell <absolute-path>]
-  pbh preview create --name <name> --port <port> --public
+  pbh preview create --name <name> --port <port> --public [--duration <duration> | --indefinite]
   pbh preview list
   pbh preview remove <name>
   pbh doctor [--json]

@@ -25,30 +25,18 @@ func (f authorizerFunc) Authorize(ctx context.Context, frame protocol.Frame) (Au
 	return f(ctx, frame)
 }
 
-func TestTerminalBindingExpiryClosesOnlyAnActiveStream(t *testing.T) {
+func TestTerminalBindingSurvivesCredentialExpiry(t *testing.T) {
 	attach := protocol.Frame{Type: "request", RequestID: "req_attach", Version: "2.0", OperationID: "op_attach_0001", Capability: "terminal.v2", DeadlineMS: 1000, Payload: json.RawMessage(`{"action":"attach","session_id":"ses_1"}`)}
 	outcome := operation.Outcome{Result: json.RawMessage(`{"attachment_id":"att_1","session":{"snapshot":{"generation":1}}}`)}
 
-	active := newTerminalConnectionState()
-	if _, err := active.bind(Authorization{ClientID: "cli_1", ExpiresAt: time.Now().Add(10 * time.Millisecond)}, attach, outcome); err != nil {
+	state := newTerminalConnectionState()
+	if _, err := state.bind(Authorization{ClientID: "cli_1", ExpiresAt: time.Now().Add(10 * time.Millisecond)}, attach, outcome); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case <-active.expired:
-	case <-time.After(time.Second):
-		t.Fatal("active terminal binding did not expire")
-	}
-
-	removed := newTerminalConnectionState()
-	streamID, err := removed.bind(Authorization{ClientID: "cli_1", ExpiresAt: time.Now().Add(30 * time.Millisecond)}, attach, outcome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	removed.remove(streamID)
-	select {
-	case <-removed.expired:
-		t.Fatal("removed terminal binding closed the connection")
-	case <-time.After(60 * time.Millisecond):
+	case <-state.expired:
+		t.Fatal("credential expiry closed an established terminal binding")
+	case <-time.After(30 * time.Millisecond):
 	}
 }
 
