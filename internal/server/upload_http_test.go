@@ -150,7 +150,7 @@ func TestUploadHTTPRejectsExtraPartAndRemovesPublication(t *testing.T) {
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"stage":"multipart_extra"`)) {
 		t.Fatalf("missing bounded failure stage: %s", response.Body.String())
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "env_1"))
+	entries, err := os.ReadDir(root)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("entries=%v err=%v", entries, err)
 	}

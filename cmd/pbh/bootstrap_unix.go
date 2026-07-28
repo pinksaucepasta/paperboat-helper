@@ -25,6 +25,7 @@ import (
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	"github.com/pinksaucepasta/paperboat-helper/internal/buildinfo"
+	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/hostinstall"
@@ -54,11 +55,11 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return err
 	}
 	if *stateRoot == "" {
-		root, err := os.UserConfigDir()
+		root, err := helperconfig.DefaultStateRoot(os.Getenv)
 		if err != nil {
 			return err
 		}
-		*stateRoot = filepath.Join(root, "paperboat", "helper")
+		*stateRoot = root
 	}
 	verifierBytes := make([]byte, 32)
 	if _, err := rand.Read(verifierBytes); err != nil {

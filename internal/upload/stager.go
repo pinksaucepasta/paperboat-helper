@@ -95,11 +95,12 @@ func (s *Stager) ResourceCounts() map[string]uint64 {
 }
 
 type metadata struct {
-	Path      string    `json:"path"`
-	MIME      string    `json:"mime"`
-	Bytes     int64     `json:"bytes"`
-	SHA256    string    `json:"sha256"`
-	ExpiresAt time.Time `json:"expires_at"`
+	EnvironmentID string    `json:"environment_id"`
+	Path          string    `json:"path"`
+	MIME          string    `json:"mime"`
+	Bytes         int64     `json:"bytes"`
+	SHA256        string    `json:"sha256"`
+	ExpiresAt     time.Time `json:"expires_at"`
 }
 
 func New(config Config) (*Stager, error) {
@@ -143,10 +144,7 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	if !validImageMIME(request.DeclaredMIME) {
 		return Result{}, &Error{Code: MIMEMismatch}
 	}
-	directory := filepath.Join(s.config.Root, request.EnvironmentID)
-	if err := ensurePrivateDirectory(directory); err != nil {
-		return Result{}, &Error{Code: StorageUnavailable, Cause: err}
-	}
+	directory := s.config.Root
 	temporary, err := os.CreateTemp(directory, ".upload-*")
 	if err != nil {
 		return Result{}, &Error{Code: StorageUnavailable, Cause: err}
@@ -206,9 +204,9 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	if !request.CredentialExpiry.IsZero() && request.CredentialExpiry.Before(expires) {
 		expires = request.CredentialExpiry
 	}
-	relative := filepath.Join(request.EnvironmentID, filename)
+	relative := filename
 	result = Result{Path: relative, MIME: request.DeclaredMIME, Bytes: written, SHA256: digest, ExpiresAt: expires}
-	meta := metadata{Path: relative, MIME: detected, Bytes: written, SHA256: result.SHA256, ExpiresAt: expires}
+	meta := metadata{EnvironmentID: request.EnvironmentID, Path: relative, MIME: detected, Bytes: written, SHA256: result.SHA256, ExpiresAt: expires}
 	metaBytes, marshalErr := json.Marshal(meta)
 	if marshalErr != nil {
 		return Result{}, &Error{Code: StorageUnavailable, Cause: marshalErr}
@@ -246,21 +244,11 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 }
 
 func (s *Stager) Remove(relativePath string) error {
-	if filepath.IsAbs(relativePath) || strings.ContainsRune(relativePath, 0) {
+	if !safeStagedName(relativePath) {
 		return &Error{Code: InvalidPath}
 	}
-	clean := filepath.Clean(relativePath)
-	environmentID, filename := filepath.Dir(clean), filepath.Base(clean)
-	if !safeSegment(environmentID) || filename == "." || filename == ".." || clean != filepath.Join(environmentID, filename) {
-		return &Error{Code: InvalidPath}
-	}
-	directory := filepath.Join(s.config.Root, environmentID)
-	resolved, err := filepath.EvalSymlinks(directory)
-	resolvedRoot, rootErr := filepath.EvalSymlinks(s.config.Root)
-	if err != nil || rootErr != nil || resolved != filepath.Join(resolvedRoot, environmentID) {
-		return &Error{Code: InvalidPath, Cause: err}
-	}
-	path := filepath.Join(directory, filename)
+	directory := s.config.Root
+	path := filepath.Join(directory, relativePath)
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -285,24 +273,13 @@ func (s *Stager) Remove(relativePath string) error {
 }
 
 // AbsolutePath resolves a staged relative path for use by processes in the
-// environment. It accepts only an existing publication directly below the
-// configured environment directory.
+// environment. It accepts only an existing flat publication directly below the
+// private upload cache root.
 func (s *Stager) AbsolutePath(relativePath string) (string, error) {
-	if filepath.IsAbs(relativePath) || strings.ContainsRune(relativePath, 0) {
+	if !safeStagedName(relativePath) {
 		return "", &Error{Code: InvalidPath}
 	}
-	clean := filepath.Clean(relativePath)
-	environmentID, filename := filepath.Dir(clean), filepath.Base(clean)
-	if !safeSegment(environmentID) || filename == "." || filename == ".." || clean != filepath.Join(environmentID, filename) {
-		return "", &Error{Code: InvalidPath}
-	}
-	directory := filepath.Join(s.config.Root, environmentID)
-	resolved, err := filepath.EvalSymlinks(directory)
-	resolvedRoot, rootErr := filepath.EvalSymlinks(s.config.Root)
-	if err != nil || rootErr != nil || resolved != filepath.Join(resolvedRoot, environmentID) {
-		return "", &Error{Code: InvalidPath, Cause: errors.Join(err, rootErr)}
-	}
-	path := filepath.Join(directory, filename)
+	path := filepath.Join(s.config.Root, relativePath)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", &Error{Code: InvalidPath, Cause: err}
@@ -344,92 +321,76 @@ func (s *Stager) Cleanup(ctx context.Context, max int) (removed int, resultErr e
 	if err != nil {
 		return 0, err
 	}
-	for _, environment := range entries {
+	removedAny := false
+	for _, entry := range entries {
 		if removed >= max {
 			break
 		}
-		if !environment.IsDir() || !safeSegment(environment.Name()) {
+		select {
+		case <-ctx.Done():
+			return removed, ctx.Err()
+		default:
+		}
+		isMetadata := strings.HasSuffix(entry.Name(), ".meta")
+		isCleanup := strings.HasSuffix(entry.Name(), ".cleanup")
+		if entry.IsDir() || !isMetadata && !isCleanup {
 			continue
 		}
-		directory := filepath.Join(s.config.Root, environment.Name())
-		files, readErr := os.ReadDir(directory)
+		metaPath := filepath.Join(s.config.Root, entry.Name())
+		if err := safeRegularFile(metaPath); err != nil {
+			continue
+		}
+		data, readErr := os.ReadFile(metaPath)
 		if readErr != nil {
 			return removed, readErr
 		}
-		removedFromDirectory := false
-		for _, entry := range files {
-			if removed >= max {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return removed, ctx.Err()
-			default:
-			}
-			isMetadata := strings.HasSuffix(entry.Name(), ".meta")
-			isCleanup := strings.HasSuffix(entry.Name(), ".cleanup")
-			if !isMetadata && !isCleanup {
-				continue
-			}
-			metaPath := filepath.Join(directory, entry.Name())
-			if err := safeRegularFile(metaPath); err != nil {
-				continue
-			}
-			data, readErr := os.ReadFile(metaPath)
-			if readErr != nil {
-				return removed, readErr
-			}
-			var meta metadata
-			if decodeMetadata(data, &meta) != nil {
-				continue
-			}
-			expectedName := filepath.Base(meta.Path) + ".meta"
-			if isCleanup {
-				expectedName = filepath.Base(meta.Path) + ".cleanup"
-			}
-			if filepath.Dir(meta.Path) != environment.Name() || expectedName != entry.Name() {
-				continue
-			}
-			if s.config.Clock.Now().Before(meta.ExpiresAt) {
-				continue
-			}
-			imagePath := filepath.Join(s.config.Root, meta.Path)
-			if isCleanup {
-				if _, statErr := os.Lstat(imagePath); errors.Is(statErr, os.ErrNotExist) {
-					if err := os.Remove(metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-						return removed, err
-					}
-					removed++
-					removedFromDirectory = true
-					continue
-				}
-			}
-			if err := safeRegularFile(imagePath); err != nil || !s.validMetadataFile(meta) {
-				continue
-			}
-			cleanupPath := metaPath
-			if isMetadata {
-				cleanupPath = imagePath + ".cleanup"
-				if err := os.Rename(metaPath, cleanupPath); err != nil {
-					return removed, err
-				}
-				if err := syncDirectory(directory); err != nil {
-					return removed, err
-				}
-			}
-			if err := os.Remove(imagePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return removed, err
-			}
-			if err := os.Remove(cleanupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return removed, err
-			}
-			removed++
-			removedFromDirectory = true
+		var meta metadata
+		if decodeMetadata(data, &meta) != nil || !safeSegment(meta.EnvironmentID) || !safeStagedName(meta.Path) {
+			continue
 		}
-		if removedFromDirectory {
-			if err := syncDirectory(directory); err != nil {
+		expectedName := meta.Path + ".meta"
+		if isCleanup {
+			expectedName = meta.Path + ".cleanup"
+		}
+		if expectedName != entry.Name() || s.config.Clock.Now().Before(meta.ExpiresAt) {
+			continue
+		}
+		imagePath := filepath.Join(s.config.Root, meta.Path)
+		if isCleanup {
+			if _, statErr := os.Lstat(imagePath); errors.Is(statErr, os.ErrNotExist) {
+				if err := os.Remove(metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return removed, err
+				}
+				removed++
+				removedAny = true
+				continue
+			}
+		}
+		if err := safeRegularFile(imagePath); err != nil || !s.validMetadataFile(meta) {
+			continue
+		}
+		cleanupPath := metaPath
+		if isMetadata {
+			cleanupPath = imagePath + ".cleanup"
+			if err := os.Rename(metaPath, cleanupPath); err != nil {
 				return removed, err
 			}
+			if err := syncDirectory(s.config.Root); err != nil {
+				return removed, err
+			}
+		}
+		if err := os.Remove(imagePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		if err := os.Remove(cleanupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+		removedAny = true
+	}
+	if removedAny {
+		if err := syncDirectory(s.config.Root); err != nil {
+			return removed, err
 		}
 	}
 	return removed, nil
@@ -504,7 +465,7 @@ func rejectDuplicateJSON(data []byte) error {
 }
 
 func (s *Stager) validMetadataFile(meta metadata) bool {
-	if !validImageMIME(meta.MIME) || meta.Bytes < 1 || meta.Bytes > s.config.MaxBytes || !validSHA256(meta.SHA256) || meta.ExpiresAt.IsZero() {
+	if !safeSegment(meta.EnvironmentID) || !safeStagedName(meta.Path) || !validImageMIME(meta.MIME) || meta.Bytes < 1 || meta.Bytes > s.config.MaxBytes || !validSHA256(meta.SHA256) || meta.ExpiresAt.IsZero() {
 		return false
 	}
 	path := filepath.Join(s.config.Root, meta.Path)
@@ -572,6 +533,19 @@ func safeSegment(value string) bool {
 		}
 	}
 	return true
+}
+
+func safeStagedName(value string) bool {
+	if filepath.IsAbs(value) || filepath.Base(value) != value || strings.ContainsRune(value, 0) {
+		return false
+	}
+	extension := stagedExtension(value)
+	stem := strings.TrimSuffix(value, extension)
+	if len(stem) != 32 || strings.ToLower(stem) != stem {
+		return false
+	}
+	decoded, err := hex.DecodeString(stem)
+	return err == nil && len(decoded) == 16
 }
 func ensurePrivateDirectory(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {

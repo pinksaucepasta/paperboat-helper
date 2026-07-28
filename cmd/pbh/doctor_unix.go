@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/hostservice"
 )
@@ -52,11 +53,11 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		*stateRoot = os.Getenv("PAPERBOAT_HELPER_STATE_ROOT")
 	}
 	if *stateRoot == "" {
-		root, err := os.UserConfigDir()
+		root, err := helperconfig.DefaultStateRoot(os.Getenv)
 		if err != nil {
 			return err
 		}
-		*stateRoot = filepath.Join(root, "paperboat", "helper")
+		*stateRoot = root
 	}
 	report := collectDoctor(ctx, *stateRoot)
 	if *jsonOutput {

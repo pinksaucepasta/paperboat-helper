@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -27,11 +28,12 @@ type Limits struct {
 var DefaultLimits = Limits{64 << 10, 256 << 10, 1 << 20, 15 * time.Second, 45 * time.Second, 5 * time.Minute}
 
 type Config struct {
-	Profile   Profile
-	StateRoot string
-	Version   string
-	Limits    Limits
-	Resources ResourceLimits
+	Profile    Profile
+	StateRoot  string
+	UploadRoot string
+	Version    string
+	Limits     Limits
+	Resources  ResourceLimits
 }
 
 type ResourceLimits struct {
@@ -53,6 +55,9 @@ func (c Config) Validate() error {
 	}
 	if c.StateRoot == "" || !filepath.IsAbs(c.StateRoot) {
 		return fmt.Errorf("state root must be an absolute path: %w", ErrInvalid)
+	}
+	if c.UploadRoot != "" && !filepath.IsAbs(c.UploadRoot) {
+		return fmt.Errorf("upload root must be an absolute path: %w", ErrInvalid)
 	}
 	if c.Version == "" {
 		return fmt.Errorf("version: %w", ErrInvalid)
@@ -81,14 +86,75 @@ func FromEnv(version string, environ func(string) string) (Config, error) {
 	}
 	root := environ("PAPERBOAT_HELPER_STATE_ROOT")
 	if root == "" {
-		base, err := os.UserConfigDir()
+		var err error
+		root, err = DefaultStateRoot(environ)
 		if err != nil {
-			return Config{}, fmt.Errorf("state root: %w", err)
+			return Config{}, err
 		}
-		root = filepath.Join(base, "paperboat", "helper")
 	}
-	c := Config{Profile: profile, StateRoot: root, Version: version, Limits: DefaultLimits, Resources: DefaultResources}
+	uploadRoot := environ("PAPERBOAT_HELPER_UPLOAD_ROOT")
+	if uploadRoot == "" {
+		var err error
+		uploadRoot, err = DefaultUploadRoot(environ)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	c := Config{Profile: profile, StateRoot: root, UploadRoot: uploadRoot, Version: version, Limits: DefaultLimits, Resources: DefaultResources}
 	return c, c.Validate()
+}
+
+// DefaultStateRoot resolves durable runtime state separately from user
+// configuration. Linux follows XDG_STATE_HOME; macOS uses Application Support.
+func DefaultStateRoot(environ func(string) string) (string, error) {
+	if runtime.GOOS == "linux" {
+		if base := environ("XDG_STATE_HOME"); base != "" {
+			if !filepath.IsAbs(base) {
+				return "", fmt.Errorf("XDG_STATE_HOME must be absolute: %w", ErrInvalid)
+			}
+			return filepath.Join(base, "paperboat", "helper"), nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("state root: %w", err)
+		}
+		return filepath.Join(home, ".local", "state", "paperboat", "helper"), nil
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("state root: %w", err)
+	}
+	return filepath.Join(base, "Paperboat", "helper"), nil
+}
+
+// DefaultUploadRoot resolves short-lived staged images under the OS cache.
+func DefaultUploadRoot(environ func(string) string) (string, error) {
+	if runtime.GOOS == "linux" {
+		if base := environ("XDG_CACHE_HOME"); base != "" {
+			if !filepath.IsAbs(base) {
+				return "", fmt.Errorf("XDG_CACHE_HOME must be absolute: %w", ErrInvalid)
+			}
+			return filepath.Join(base, "paperboat", "uploads"), nil
+		}
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("upload cache root: %w", err)
+	}
+	product := "Paperboat"
+	if runtime.GOOS == "linux" {
+		product = "paperboat"
+	}
+	return filepath.Join(base, product, "uploads"), nil
+}
+
+// EffectiveUploadRoot returns the separately configured cache root. Explicit
+// test and embedded configurations retain a deterministic state-root fallback.
+func (c Config) EffectiveUploadRoot() string {
+	if c.UploadRoot != "" {
+		return c.UploadRoot
+	}
+	return filepath.Join(c.StateRoot, "uploads")
 }
 
 var ErrInvalid = errors.New("invalid configuration")

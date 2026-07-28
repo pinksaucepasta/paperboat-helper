@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestFromEnvDefaultsToBYOD(t *testing.T) {
 	c, err := FromEnv("1.0.0", func(string) string { return "" })
@@ -9,6 +12,25 @@ func TestFromEnvDefaultsToBYOD(t *testing.T) {
 	}
 	if c.Profile != BYOD || c.Limits != DefaultLimits || c.Resources != DefaultResources {
 		t.Fatalf("config = %#v", c)
+	}
+	if c.UploadRoot == "" || c.UploadRoot == filepath.Join(c.StateRoot, "uploads") || filepath.Base(c.UploadRoot) != "uploads" {
+		t.Fatalf("upload cache root = %q, state root = %q", c.UploadRoot, c.StateRoot)
+	}
+}
+
+func TestFromEnvAcceptsIndependentAbsoluteUploadRoot(t *testing.T) {
+	c, err := FromEnv("1", func(key string) string {
+		switch key {
+		case "PAPERBOAT_HELPER_STATE_ROOT":
+			return "/srv/paperboat/state"
+		case "PAPERBOAT_HELPER_UPLOAD_ROOT":
+			return "/srv/paperboat/cache/uploads"
+		default:
+			return ""
+		}
+	})
+	if err != nil || c.EffectiveUploadRoot() != "/srv/paperboat/cache/uploads" {
+		t.Fatalf("config=%#v err=%v", c, err)
 	}
 }
 

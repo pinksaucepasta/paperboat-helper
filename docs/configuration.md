@@ -7,7 +7,11 @@ Current environment inputs:
 
 - `PAPERBOAT_HELPER_PROFILE`: `byod` by default or `hosted`.
 - `PAPERBOAT_HELPER_STATE_ROOT`: absolute private state directory; defaults under the user
-  configuration directory.
+  state directory (`$XDG_STATE_HOME/paperboat/helper` or `~/.local/state/paperboat/helper`
+  on Linux, and Application Support on macOS).
+- `PAPERBOAT_HELPER_UPLOAD_ROOT`: absolute private staged-image cache; defaults to
+  `$XDG_CACHE_HOME/paperboat/uploads`, `~/.cache/paperboat/uploads`, or the macOS Caches
+  directory.
 
 Protocol maxima are 64 KiB structured frames, 256 KiB terminal frames, 1 MiB pending output
 per attachment, 15-second heartbeat, 45-second peer timeout, and five-minute mutation
@@ -22,7 +26,8 @@ hard bounds. Startup rejects zero, partial, or excessive values; saturation retu
 resource limit before side effects or unbounded body reads.
 
 The enrolled user's state root owns SQLite session/history/input/operation records and
-scoped generated artifacts. Root-owned availability, install, and update journals live in
+scoped generated artifacts. Short-lived staged images live separately in the upload cache,
+use flat helper-generated names, and are removed by bounded retention cleanup. Root-owned availability, install, and update journals live in
 `/var/lib/paperboat` on Linux or `/Library/Application Support/Paperboat` on macOS. Direct database edits, cross-version copying without the
 compatibility gate, symlinked roots, and group/world-writable executables are unsupported.
 Backups must capture SQLite database/WAL/SHM consistently while helper writes are stopped.
@@ -110,3 +115,5 @@ these required request headers:
 Multipart filename and MIME must exactly match the headers, and the streamed byte count,
 detected MIME, and SHA-256 must all match before publication. An idempotent replay returns
 the recorded result with `X-Paperboat-Replayed: true` without reading the request body.
+Clients send a known multipart content length and may stream directly from a validated
+seekable descriptor; the helper still enforces its independent body and file limits.

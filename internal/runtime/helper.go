@@ -188,7 +188,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		return nil, err
 	}
 	stager, err := upload.New(upload.Config{
-		Root:          filepath.Join(config.Runtime.StateRoot, "uploads"),
+		Root:          config.Runtime.EffectiveUploadRoot(),
 		MaxConcurrent: resources.MaxConcurrentUploads, Random: random,
 	})
 	if err != nil {

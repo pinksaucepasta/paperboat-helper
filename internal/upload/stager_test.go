@@ -38,7 +38,7 @@ func TestStagePublishesPrivateScopedImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.IsAbs(result.Path) || result.MIME != "image/png" || result.Bytes != int64(len(data)) || result.ExpiresAt != clock.now.Add(time.Hour) {
+	if filepath.IsAbs(result.Path) || filepath.Dir(result.Path) != "." || result.MIME != "image/png" || result.Bytes != int64(len(data)) || result.ExpiresAt != clock.now.Add(time.Hour) {
 		t.Fatalf("result=%#v", result)
 	}
 	info, err := os.Stat(filepath.Join(root, result.Path))
@@ -132,7 +132,7 @@ func TestStageVerifiesExpectedDigestBeforePublicationAndRemoveIsIdempotent(t *te
 	if _, err := stager.Stage(context.Background(), Request{EnvironmentID: "env", DisplayName: "image.png", DeclaredMIME: "image/png", DeclaredSize: int64(len(png)), ExpectedSHA256: wrong, Body: bytes.NewReader(png)}); err == nil {
 		t.Fatal("digest mismatch accepted")
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "env"))
+	entries, err := os.ReadDir(root)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("entries=%v err=%v", entries, err)
 	}
@@ -157,7 +157,7 @@ func TestCanceledStageRemovesPartialFiles(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
-	entries, readErr := os.ReadDir(filepath.Join(root, "env"))
+	entries, readErr := os.ReadDir(root)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
@@ -166,7 +166,7 @@ func TestCanceledStageRemovesPartialFiles(t *testing.T) {
 	}
 }
 
-func TestCleanupDeletesExpiredPairsAndRejectsSymlinkDirectory(t *testing.T) {
+func TestCleanupDeletesExpiredPairsAndRejectsSymlinkPublication(t *testing.T) {
 	clock := &fixedClock{time.Now().UTC()}
 	s, root := newStager(t, clock)
 	data := []byte("GIF89a")
@@ -182,14 +182,16 @@ func TestCleanupDeletesExpiredPairsAndRejectsSymlinkDirectory(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, result.Path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat err=%v", err)
 	}
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+	outside := filepath.Join(t.TempDir(), "outside.gif")
+	if err := os.WriteFile(outside, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Stage(context.Background(), Request{EnvironmentID: "linked", DisplayName: "x.gif", DeclaredMIME: "image/gif", DeclaredSize: int64(len(data)), Body: bytes.NewReader(data)})
-	var uploadErr *Error
-	if !errors.As(err, &uploadErr) || uploadErr.Code != StorageUnavailable {
-		t.Fatalf("symlink err=%v", err)
+	symlinkName := strings.Repeat("a", 32) + ".gif"
+	if err := os.Symlink(outside, filepath.Join(root, symlinkName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AbsolutePath(symlinkName); err == nil {
+		t.Fatal("symlink publication accepted")
 	}
 }
 
@@ -267,7 +269,7 @@ func TestStageDiskFailureIsTypedAndLeavesNoPartialFile(t *testing.T) {
 	if !errors.As(err, &uploadErr) || uploadErr.Code != StorageUnavailable || !errors.Is(err, syscall.ENOSPC) {
 		t.Fatalf("err=%v", err)
 	}
-	entries, readErr := os.ReadDir(filepath.Join(root, "env"))
+	entries, readErr := os.ReadDir(root)
 	if readErr != nil || len(entries) != 0 {
 		t.Fatalf("entries=%v err=%v", entries, readErr)
 	}
