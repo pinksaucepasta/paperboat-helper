@@ -226,16 +226,26 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err != nil {
 		return nil, err
 	}
+	connectionLimiter, err := server.NewConnectionLimiter(resources.MaxAttachments * resources.MaxSessions)
+	if err != nil {
+		return nil, err
+	}
 	websocketHandler, err := server.NewWebSocketHandler(server.WebSocketHandlerConfig{
 		Server: protocolServer, Authorizer: dependencies.Authorizer,
 		OriginPatterns: append([]string(nil), config.OriginPatterns...),
 		MaxConnections: resources.MaxAttachments * resources.MaxSessions,
+		Limiter:        connectionLimiter,
 	})
+	if err != nil {
+		return nil, err
+	}
+	streamHandler, err := server.NewHTTPStreamHandler(server.HTTPStreamHandlerConfig{Server: protocolServer, Authorizer: dependencies.Authorizer, Limiter: connectionLimiter})
 	if err != nil {
 		return nil, err
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/runtime", websocketHandler)
+	mux.Handle("/v1/runtime-stream", streamHandler)
 	mux.Handle("/v1/uploads", uploadHandler)
 	if dependencies.Previews != nil && dependencies.PreviewControl != nil && config.EnvironmentID != "" {
 		agentHandler, agentErr := preview.NewAgentHandler(preview.AgentHandlerConfig{Token: agentToken, EnvironmentID: config.EnvironmentID, Registry: dependencies.Previews, Control: dependencies.PreviewControl, RoutesChanged: dependencies.PreviewRoutesChanged})

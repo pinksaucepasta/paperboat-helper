@@ -29,12 +29,33 @@ type WebSocketHandlerConfig struct {
 	Subprotocol     string
 	MaxConnections  int
 	MaxMessageBytes int64
+	Limiter         *ConnectionLimiter
 }
 
 type WebSocketHandler struct {
-	config WebSocketHandlerConfig
-	slots  chan struct{}
+	config  WebSocketHandlerConfig
+	limiter *ConnectionLimiter
 }
+
+type ConnectionLimiter struct{ slots chan struct{} }
+
+func NewConnectionLimiter(max int) (*ConnectionLimiter, error) {
+	if max < 1 {
+		return nil, ErrInvalidConfiguration
+	}
+	return &ConnectionLimiter{slots: make(chan struct{}, max)}, nil
+}
+
+func (l *ConnectionLimiter) acquire() bool {
+	select {
+	case l.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *ConnectionLimiter) release() { <-l.slots }
 
 func NewWebSocketHandler(config WebSocketHandlerConfig) (*WebSocketHandler, error) {
 	if config.Subprotocol == "" {
@@ -46,10 +67,13 @@ func NewWebSocketHandler(config WebSocketHandlerConfig) (*WebSocketHandler, erro
 	if config.MaxMessageBytes == 0 {
 		config.MaxMessageBytes = DefaultMaxWebSocketMessage
 	}
+	if config.Limiter == nil {
+		config.Limiter, _ = NewConnectionLimiter(config.MaxConnections)
+	}
 	if config.Server == nil || config.Authorizer == nil || config.MaxConnections < 1 || config.MaxMessageBytes < protocol.MaxStructuredFrame+4 || config.MaxMessageBytes > 4<<20 || len(config.Subprotocol) > 128 {
 		return nil, ErrInvalidConfiguration
 	}
-	return &WebSocketHandler{config: config, slots: make(chan struct{}, config.MaxConnections)}, nil
+	return &WebSocketHandler{config: config, limiter: config.Limiter}, nil
 }
 
 func (h *WebSocketHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -63,14 +87,12 @@ func (h *WebSocketHandler) ServeHTTP(writer http.ResponseWriter, request *http.R
 		http.Error(writer, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
-	select {
-	case h.slots <- struct{}{}:
-		defer func() { <-h.slots }()
-	default:
+	if !h.limiter.acquire() {
 		writer.Header().Set("Retry-After", "1")
 		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
 	}
+	defer h.limiter.release()
 	connection, err := websocket.Accept(writer, request, &websocket.AcceptOptions{Subprotocols: []string{h.config.Subprotocol}, OriginPatterns: append([]string(nil), h.config.OriginPatterns...), CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return

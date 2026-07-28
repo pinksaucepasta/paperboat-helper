@@ -355,14 +355,14 @@ func TestInstallHelperCommandTargetsCanonicalWorkerAndRestoresPreviousLink(t *te
 	if err := os.Symlink(previous, commandPath); err != nil {
 		t.Fatal(err)
 	}
-	restore, err := installHelperCommand(directory, systemWorkerExecutable())
+	installation, err := installHelperCommand(directory, systemWorkerExecutable())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target, err := os.Readlink(commandPath); err != nil || target != systemWorkerExecutable() {
 		t.Fatalf("target=%q err=%v", target, err)
 	}
-	if err := restore(); err != nil {
+	if err := installation.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	if target, err := os.Readlink(commandPath); err != nil || target != previous {
@@ -370,7 +370,7 @@ func TestInstallHelperCommandTargetsCanonicalWorkerAndRestoresPreviousLink(t *te
 	}
 }
 
-func TestInstallHelperCommandDoesNotReplaceRegularFile(t *testing.T) {
+func TestInstallHelperCommandReplacesAndRestoresRegularExecutable(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
@@ -379,12 +379,44 @@ func TestInstallHelperCommandDoesNotReplaceRegularFile(t *testing.T) {
 	if err := os.WriteFile(commandPath, []byte("user-owned"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := installHelperCommand(directory, systemWorkerExecutable()); !errors.Is(err, bootstrap.ErrInvalid) {
-		t.Fatalf("error=%v", err)
+	installation, err := installHelperCommand(directory, systemWorkerExecutable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(commandPath); err != nil || target != systemWorkerExecutable() {
+		t.Fatalf("target=%q err=%v", target, err)
+	}
+	if err := installation.Rollback(); err != nil {
+		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(commandPath)
 	if err != nil || string(contents) != "user-owned" {
 		t.Fatalf("contents=%q err=%v", contents, err)
+	}
+}
+
+func TestInstallHelperCommandCommitsRegularExecutableReplacement(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commandPath := filepath.Join(directory, "pbh")
+	if err := os.WriteFile(commandPath, []byte("old executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installation, err := installHelperCommand(directory, systemWorkerExecutable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installation.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(commandPath); err != nil || target != systemWorkerExecutable() {
+		t.Fatalf("target=%q err=%v", target, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(directory, ".pbh-backup-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("backups=%v err=%v", matches, err)
 	}
 }
 

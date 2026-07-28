@@ -144,7 +144,7 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	if err := authorizeServiceInstall(installCtx, executable, installRequest, stdin, stdout, stderr); err != nil {
 		return failBootstrapInstallation(ctx, err, material, *stateRoot, "service_install")
 	}
-	restoreHelperCommand, err := installHelperCommand(commandDirectory, systemWorkerExecutable())
+	helperCommand, err := installHelperCommand(commandDirectory, systemWorkerExecutable())
 	if err != nil {
 		failureErr := errors.Join(err, authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr))
 		return failBootstrapInstallation(ctx, failureErr, material, *stateRoot, "service_install")
@@ -157,8 +157,11 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		response, requestErr := healthClient.Do(request)
 		if requestErr == nil && bootstrapWorkerReady(readyCtx, response, *stateRoot, material.Artifact.Version, previousGeneration) {
 			if err := authorizeServiceOperation(ctx, executable, "commit", installRequest, stdout, stderr); err != nil {
-				failureErr := errors.Join(err, authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr), restoreHelperCommand())
+				failureErr := errors.Join(err, authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr), helperCommand.Rollback())
 				return failBootstrapInstallation(ctx, failureErr, material, *stateRoot, "service_readiness")
+			}
+			if err := helperCommand.Commit(); err != nil {
+				return &installationStageError{Stage: "service_install", Cause: fmt.Errorf("remove previous helper command backup: %w", err)}
 			}
 			fmt.Fprintln(stdout, "Paperboat helper is ready.")
 			return nil
@@ -168,7 +171,7 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		}
 		select {
 		case <-readyCtx.Done():
-			failureErr := errors.Join(errors.New("helper service did not become ready"), authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr), restoreHelperCommand())
+			failureErr := errors.Join(errors.New("helper service did not become ready"), authorizeServiceOperation(ctx, executable, "uninstall", installRequest, stdout, stderr), helperCommand.Rollback())
 			return failBootstrapInstallation(ctx, failureErr, material, *stateRoot, "service_readiness")
 		case <-time.After(time.Second):
 		}
@@ -382,7 +385,12 @@ func accountLoginShell() string {
 	return fields[6]
 }
 
-func installHelperCommand(directory, artifact string) (func() error, error) {
+type helperCommandInstallation struct {
+	commandPath string
+	backupPath  string
+}
+
+func installHelperCommand(directory, artifact string) (*helperCommandInstallation, error) {
 	if !filepath.IsAbs(directory) || !filepath.IsAbs(artifact) {
 		return nil, bootstrap.ErrInvalid
 	}
@@ -394,14 +402,13 @@ func installHelperCommand(directory, artifact string) (func() error, error) {
 		return nil, bootstrap.ErrInvalid
 	}
 	commandPath := filepath.Join(directory, "pbh")
-	previousTarget := ""
+	backupPath := filepath.Join(directory, fmt.Sprintf(".pbh-backup-%d", time.Now().UnixNano()))
 	previousExists := false
 	if info, err = os.Lstat(commandPath); err == nil {
-		if info.Mode()&os.ModeSymlink == 0 {
+		if info.Mode()&os.ModeSymlink == 0 && (!info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Mode().Perm()&0o022 != 0) {
 			return nil, bootstrap.ErrInvalid
 		}
-		previousTarget, err = os.Readlink(commandPath)
-		if err != nil {
+		if err := os.Rename(commandPath, backupPath); err != nil {
 			return nil, err
 		}
 		previousExists = true
@@ -410,23 +417,40 @@ func installHelperCommand(directory, artifact string) (func() error, error) {
 	}
 	temporary := filepath.Join(directory, fmt.Sprintf(".pbh-%d", time.Now().UnixNano()))
 	if err := os.Symlink(artifact, temporary); err != nil {
+		if previousExists {
+			_ = os.Rename(backupPath, commandPath)
+		}
 		return nil, err
 	}
 	defer os.Remove(temporary)
 	if err := os.Rename(temporary, commandPath); err != nil {
+		if previousExists {
+			_ = os.Rename(backupPath, commandPath)
+		}
 		return nil, err
 	}
-	return func() error {
-		if !previousExists {
-			return os.Remove(commandPath)
-		}
-		restorePath := filepath.Join(directory, fmt.Sprintf(".pbh-restore-%d", time.Now().UnixNano()))
-		if err := os.Symlink(previousTarget, restorePath); err != nil {
-			return err
-		}
-		defer os.Remove(restorePath)
-		return os.Rename(restorePath, commandPath)
-	}, nil
+	if !previousExists {
+		backupPath = ""
+	}
+	return &helperCommandInstallation{commandPath: commandPath, backupPath: backupPath}, nil
+}
+
+func (i *helperCommandInstallation) Commit() error {
+	if i.backupPath == "" {
+		return nil
+	}
+	return os.Remove(i.backupPath)
+}
+
+func (i *helperCommandInstallation) Rollback() error {
+	removeErr := os.Remove(i.commandPath)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if i.backupPath == "" {
+		return removeErr
+	}
+	return errors.Join(removeErr, os.Rename(i.backupPath, i.commandPath))
 }
 
 func pathListContains(value, want string) bool {
