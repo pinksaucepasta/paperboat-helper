@@ -187,10 +187,6 @@ func validRequest(t *testing.T) Request {
 	if err != nil {
 		t.Fatal(err)
 	}
-	herdr := filepath.Join(t.TempDir(), "herdr")
-	if err := os.WriteFile(herdr, []byte("herdr"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	shell, err := filepath.EvalSymlinks("/bin/sh")
 	if err != nil {
 		t.Fatal(err)
@@ -200,6 +196,6 @@ func validRequest(t *testing.T) Request {
 		Executable: executable, Artifact: manifest, HostExecutable: executable, HostArtifact: hostManifest, ArtifactPublicKey: base64.RawURLEncoding.EncodeToString(public),
 		Home: account.HomeDir, Path: "/usr/bin:/bin", StateRoot: state, WorkspaceRoot: account.HomeDir,
 		ControlURL: "https://control.example.test", UserMachineID: "um_test", Shell: shell,
-		HelperListenAddress: "127.0.0.1:8080", HerdrPath: herdr, HerdrVersion: "test",
+		HelperListenAddress: "127.0.0.1:8080",
 	}
 }

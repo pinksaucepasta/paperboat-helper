@@ -119,10 +119,6 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return failBootstrapInstallation(ctx, err, material, *stateRoot, "artifact_verification")
 	}
 	executable = artifactPath
-	herdrPath, err := installHerdr(ctx, *stateRoot, runtime.GOOS, runtime.GOARCH, herdrHTTPClient())
-	if err != nil {
-		return failBootstrapInstallation(ctx, err, material, *stateRoot, "artifact_verification")
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return failBootstrapInstallation(ctx, err, material, *stateRoot, "service_install")
@@ -138,7 +134,6 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		HostExecutable: hostServicePath, HostArtifact: *material.HostServiceArtifact,
 		Home: home, Path: servicePath, StateRoot: *stateRoot, WorkspaceRoot: workspace, ControlURL: material.ControlURL,
 		UserMachineID: material.UserMachineID, Shell: resolvedShell, HelperListenAddress: material.HelperListenAddress,
-		HerdrPath: herdrPath, HerdrVersion: herdrVersion,
 	}
 	previousGeneration := workerGeneration(*stateRoot)
 	fmt.Fprintln(stderr, "Paperboat must run before login and while this account is logged out.")

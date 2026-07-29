@@ -40,8 +40,6 @@ type HelperConfig struct {
 	Runtime            helperconfig.Config
 	ListenAddress      string
 	WorkspaceRoot      string
-	HerdrPath          string
-	HerdrVersion       string
 	ShellPath          string
 	AgentEnvironment   []string
 	OriginPatterns     []string
@@ -90,7 +88,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if err := config.Runtime.Validate(); err != nil || !LoopbackAddress(config.ListenAddress) || !filepath.IsAbs(config.WorkspaceRoot) || dependencies.Authorizer == nil {
 		return nil, errors.Join(ErrHelperInvalid, err)
 	}
-	if dependencies.SessionLauncherFactory == nil && (config.HerdrPath == "" || config.HerdrVersion == "" || config.ShellPath == "") {
+	if dependencies.SessionLauncherFactory == nil && config.ShellPath == "" {
 		return nil, ErrHelperInvalid
 	}
 	if config.ShutdownTimeout == 0 {
@@ -171,11 +169,7 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if dependencies.SessionLauncherFactory != nil {
 		sessionLauncher, err = dependencies.SessionLauncherFactory(sessions)
 	} else {
-		var herdr *process.Supervisor
-		herdr, err = process.NewSupervisor(ctx, process.Config{Executable: config.HerdrPath, ExpectedVersion: config.HerdrVersion, Environment: append([]string(nil), config.AgentEnvironment...), StateRoot: filepath.Join(config.Runtime.StateRoot, "herdr"), Sessions: sessions})
-		if err == nil {
-			sessionLauncher, err = process.NewModeLauncher(herdr, config.ShellPath, config.AgentEnvironment, sessions)
-		}
+		sessionLauncher, err = process.NewShellLauncher(config.ShellPath, config.AgentEnvironment, sessions)
 	}
 	if err != nil || sessionLauncher == nil {
 		return nil, errors.Join(ErrHelperInvalid, err)

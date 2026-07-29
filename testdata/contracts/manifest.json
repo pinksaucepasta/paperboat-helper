@@ -406,7 +406,7 @@
       "id": "environment.connection.v1",
       "path": "schemas/environment/connection-v1.schema.json",
       "type": "json-schema",
-      "sha256": "f55f851ae490b4df64bffcfe61cbbcb313095855a8667b343b2193f7a7c62ce8",
+      "sha256": "8f3e3afd066b5b0996088ee89707828e0cdb98fd2a08fcb441d5a9afdc9939ba",
       "owner": "server",
       "review": "frozen-review",
       "consumers": [

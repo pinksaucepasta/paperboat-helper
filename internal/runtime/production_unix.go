@@ -317,8 +317,6 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err := writeWorkerLocal(runtimeConfig.StateRoot, listen); err != nil {
 		return nil, err
 	}
-	herdrPath := valueOrRuntime(environ("PAPERBOAT_HERDR_PATH"), "/usr/local/bin/herdr")
-	herdrVersion := valueOrRuntime(environ("PAPERBOAT_HERDR_VERSION"), "0.7.4")
 	runtimeService := Service(runtimeObservation)
 	if availabilityService != nil {
 		runtimeService = serviceGroup{availabilityService, runtimeObservation}
@@ -329,7 +327,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		dependencies.ConfigApply = configapply.SyncHandler{Apply: configSyncService.Apply}
 		dependencies.ConfigApplyProof = true
 	}
-	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, ShellPath: agentShell, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal, FileTransferPolicy: transferPolicy}, dependencies)
+	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, ShellPath: agentShell, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal, FileTransferPolicy: transferPolicy}, dependencies)
 }
 
 func writeWorkerLocal(stateRoot, listenAddress string) error {

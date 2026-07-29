@@ -6,7 +6,7 @@ mean this repo. `pbh` is the user-facing helper command.
 ## Ownership
 
 Remote Go service owning the outbound frpc-compatible connector, scoped auth, PTYs,
-durable sessions, replay history, Herdr processes, bidirectional file transfer, preview targets,
+durable shell sessions, replay history, bidirectional file transfer, preview targets,
 health, config application, and signed updates. Hosted-only modules additionally
 own workspace/volume preparation, presets, setup, boot, pre-stop flush, and shutdown.
 

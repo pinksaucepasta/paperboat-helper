@@ -1,7 +1,7 @@
 # paperboat-helper
 
 The remote Paperboat runtime for hosted environments and approved user machines. It owns
-the outbound tunnel connector, PTYs, durable terminal sessions, Herdr process launch,
+the outbound tunnel connector, PTYs, durable shell sessions,
 bidirectional file transfer, preview targets, activity, health, and assigned configuration sync.
 
 Hosted deployments additionally use the helper for managed environment lifecycle hooks.

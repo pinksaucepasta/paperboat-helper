@@ -18,14 +18,12 @@ ARG GO_BASE_IMAGE
 ARG TARGETARCH
 ARG PAPERBOAT_HELPER_REVISION
 ARG PAPERBOAT_HELPER_VERSION
-ARG HERDR_VERSION=0.7.4
 LABEL org.opencontainers.image.source="https://github.com/pinksaucepasta/paperboat" \
   io.paperboat.image.contract="hosted-helper-v1" \
   io.paperboat.base.node="${NODE_BASE_IMAGE}" \
   io.paperboat.base.go="${GO_BASE_IMAGE}" \
   io.paperboat.source.helper.revision="${PAPERBOAT_HELPER_REVISION}" \
   io.paperboat.source.helper.version="${PAPERBOAT_HELPER_VERSION}" \
-  io.paperboat.herdr.version="${HERDR_VERSION}" \
   io.paperboat.protocol.version="1.0"
 
 RUN apt-get update \
@@ -47,16 +45,6 @@ RUN case "$TARGETARCH" in \
   && rm /tmp/chezmoi.tar.gz \
   && chmod 0755 /usr/local/bin/chezmoi \
   && chezmoi --version
-
-RUN case "$TARGETARCH" in \
-      amd64) HERDR_ASSET=herdr-linux-x86_64; HERDR_SHA256=bc0fc02d4ba500f9cac2353a43e67fe036785ecca6eb55378e050fac3c103059 ;; \
-      arm64) HERDR_ASSET=herdr-linux-aarch64; HERDR_SHA256=544e0002de42806d1ab64ccdef3a7e7414f24717b0b6b022bc9e57d2eefd26a2 ;; \
-      *) echo "unsupported Herdr architecture: $TARGETARCH" >&2; exit 1 ;; \
-    esac \
-  && curl -fsSLo /usr/local/bin/herdr "https://github.com/ogulcancelik/herdr/releases/download/v${HERDR_VERSION}/${HERDR_ASSET}" \
-  && echo "${HERDR_SHA256}  /usr/local/bin/herdr" | sha256sum -c - \
-  && chmod 0755 /usr/local/bin/herdr \
-  && herdr --version | grep -Fx "herdr ${HERDR_VERSION}"
 
 ENV PAPERBOAT_HELPER_PROFILE=hosted \
   PAPERBOAT_HELPER_STATE_ROOT=/workspace/.paperboat/helper \

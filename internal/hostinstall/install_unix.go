@@ -60,8 +60,6 @@ type Request struct {
 	UserMachineID       string                     `json:"user_machine_id"`
 	Shell               string                     `json:"shell"`
 	HelperListenAddress string                     `json:"helper_listen_address"`
-	HerdrPath           string                     `json:"herdr_path"`
-	HerdrVersion        string                     `json:"herdr_version"`
 }
 
 func Decode(reader io.Reader) (Request, error) {
@@ -598,7 +596,7 @@ func secureRootDirectory(path string, mode os.FileMode) error {
 
 func Validate(request Request, sudoUID int) error {
 	if request.Schema != SchemaV1 || request.Platform != runtime.GOOS || !validRunIdentity(request) || sudoUID != request.UID ||
-		request.UserMachineID == "" || request.HerdrVersion == "" || strings.ContainsAny(request.UserMachineID+request.HerdrVersion, "\x00\r\n") {
+		request.UserMachineID == "" || strings.ContainsAny(request.UserMachineID, "\x00\r\n") {
 		return ErrInvalidRequest
 	}
 	account, err := user.Lookup(request.User)
@@ -624,10 +622,8 @@ func Validate(request Request, sudoUID int) error {
 			return ErrInvalidRequest
 		}
 	}
-	for _, path := range []string{request.Shell, request.HerdrPath} {
-		if !canonicalExecutable(path) {
-			return ErrInvalidRequest
-		}
+	if !canonicalExecutable(request.Shell) {
+		return ErrInvalidRequest
 	}
 	if !pathListValid(request.Path) {
 		return ErrInvalidRequest
@@ -653,7 +649,6 @@ func workerEnvironment(request Request) map[string]string {
 		"PAPERBOAT_HELPER_STATE_ROOT": request.StateRoot, "PAPERBOAT_WORKSPACE_ROOT": request.WorkspaceRoot,
 		"PAPERBOAT_CONTROL_URL": request.ControlURL, "PAPERBOAT_USER_MACHINE_ID": request.UserMachineID,
 		"PAPERBOAT_SHELL": request.Shell, "PAPERBOAT_HELPER_LISTEN_ADDRESS": request.HelperListenAddress,
-		"PAPERBOAT_HERDR_PATH": request.HerdrPath, "PAPERBOAT_HERDR_VERSION": request.HerdrVersion,
 		"PAPERBOAT_HELPER_SERVICE_SCOPE": "system",
 	}
 }

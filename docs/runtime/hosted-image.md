@@ -11,8 +11,7 @@ paperboat-helper/deploy/hosted-image/build-image.sh registry.example/paperboat/h
 
 `PAPERBOAT_NODE_BASE_IMAGE` and `PAPERBOAT_GO_BASE_IMAGE` must be immutable
 `name@sha256:<digest>` references. Clean `paperboat-helper` and `paperboat-server` revisions
-are recorded as OCI labels. The image records hosted contract/protocol metadata and installs
-Herdr 0.7.4 from architecture-specific release assets whose SHA-256 values are checked.
+are recorded as OCI labels. The image records hosted contract and protocol metadata.
 
 ## Boot Contract
 
@@ -46,14 +45,14 @@ engine's bounded final flush, closes durable state, and exits within the Fly sto
 Docker healthcheck reads the helper `/healthz` response and requires liveness plus ready
 `hosted_lifecycle` and `edge` capabilities.
 
-The image contains Git, chezmoi, CA roots, Node/npm, Python/venv, the helper, Herdr,
+The image contains Git, chezmoi, CA roots, Node/npm, Python/venv, the helper,
 version-pinned catalog preset definitions, and shell tooling required by supported presets. It exposes no Fly service;
 all terminal/upload/preview traffic traverses the assigned Paperboat edge route.
 
 ## Rollout And Rollback
 
 Server catalogs must reference the image by immutable digest. Rollout metadata includes
-the helper/server revisions, helper protocol, hosted image contract, Herdr version,
+the helper/server revisions, helper protocol, hosted image contract,
 architecture, and both base-image digests. Rollback selects the previous compatible image
 digest and preserves the mounted volume; it does not rewrite workspace identity or apply
 pending project configuration silently.

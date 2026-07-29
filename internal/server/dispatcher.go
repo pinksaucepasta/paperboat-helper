@@ -288,7 +288,6 @@ type terminalRequest struct {
 	Generation     uint64            `json:"generation,omitempty"`
 	Columns        uint16            `json:"columns,omitempty"`
 	Rows           uint16            `json:"rows,omitempty"`
-	TerminalMode   string            `json:"terminal_mode,omitempty"`
 	Environment    map[string]string `json:"environment,omitempty"`
 	Signal         string            `json:"signal,omitempty"`
 }
@@ -350,13 +349,7 @@ func (d *Dispatcher) terminal(ctx context.Context, authorization Authorization, 
 		if !ok || request.Columns == 0 || request.Rows == 0 {
 			return failure("invalid_request")
 		}
-		if request.TerminalMode == "" {
-			request.TerminalMode = "herdr"
-		}
-		if request.TerminalMode != "herdr" && request.TerminalMode != "shell" {
-			return failure("invalid_request")
-		}
-		value, err := d.config.SessionLauncher.Launch(ctx, process.LaunchRequest{ID: request.SessionID, Name: request.Name, CWD: cwd, Dimensions: pty.Dimensions{Columns: request.Columns, Rows: request.Rows}, Mode: request.TerminalMode, Environment: request.Environment})
+		value, err := d.config.SessionLauncher.Launch(ctx, process.LaunchRequest{ID: request.SessionID, Name: request.Name, CWD: cwd, Dimensions: pty.Dimensions{Columns: request.Columns, Rows: request.Rows}, Environment: request.Environment})
 		return domainResult(value, err)
 	case "attach", "replay":
 		attachmentID := request.AttachmentID
