@@ -53,7 +53,7 @@
       "id": "credentials.classes",
       "path": "credentials/classes.json",
       "type": "credential-matrix",
-      "sha256": "dfb8aae2cc4ba9d4a2aa35cd7bc207ab409f7a7327adae6aee771ab20c9ddbfd",
+      "sha256": "65d44277a4aa33b727106fe20fdef26dea4410c091d863189c749ee2bc9c5647",
       "owner": "server",
       "review": "initial-review",
       "consumers": [

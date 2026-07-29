@@ -97,7 +97,7 @@ func (r staticPolicyResolver) Policy(frame protocol.Frame) (auth.Policy, error) 
 		base.Scopes = []string{"terminal:operate"}
 		base.MaxLifetime = 5 * time.Minute
 	case "upload.v1":
-		base.CredentialClass = "image_stage"
+		base.CredentialClass = "file_stage"
 		base.Scopes = []string{"file:stage"}
 		base.MaxLifetime = 5 * time.Minute
 	case "config.apply.v1":

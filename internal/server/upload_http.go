@@ -121,7 +121,12 @@ func (h *UploadHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	metadataJSON, _ := json.Marshal(metadata)
 	frame := protocol.Frame{Type: "request", RequestID: requestID, Version: protocol.ProtocolVersion, OperationID: operationID, Capability: "upload.v1", DeadlineMS: uint32(deadline / time.Millisecond), Payload: metadataJSON}
 	authorization, err := authorizer.Authorize(ctx, frame)
-	if err != nil || authorization.JournalBinding == "" || authorization.EnvironmentID == "" {
+	if err != nil {
+		h.record("rejected")
+		writeHTTPError(writer, requestID, "unauthorized", http.StatusUnauthorized, false)
+		return
+	}
+	if authorization.JournalBinding == "" || authorization.EnvironmentID == "" {
 		h.record("rejected")
 		writeHTTPError(writer, requestID, "not_found_or_forbidden", http.StatusNotFound, false)
 		return

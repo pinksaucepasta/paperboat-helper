@@ -191,7 +191,22 @@ func TestUploadHTTPAuthenticatesAndAdmitsBeforeReading(t *testing.T) {
 	request.Body = probe
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNotFound || probe.reads != 0 {
+	if response.Code != http.StatusUnauthorized || !bytes.Contains(response.Body.Bytes(), []byte(`"code":"unauthorized"`)) || probe.reads != 0 {
 		t.Fatalf("status=%d reads=%d", response.Code, probe.reads)
+	}
+}
+
+func TestUploadHTTPConcealsMissingAuthorizationBinding(t *testing.T) {
+	handler, _ := uploadTestHandler(t, func(context.Context, protocol.Frame) (Authorization, error) {
+		return Authorization{}, nil
+	})
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 16)...)
+	request := multipartUpload(t, "op_upload_0001", "diagram.png", "image/png", png, false)
+	probe := &readProbe{}
+	request.Body = probe
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || !bytes.Contains(response.Body.Bytes(), []byte(`"code":"not_found_or_forbidden"`)) || probe.reads != 0 {
+		t.Fatalf("status=%d reads=%d body=%s", response.Code, probe.reads, response.Body.String())
 	}
 }
