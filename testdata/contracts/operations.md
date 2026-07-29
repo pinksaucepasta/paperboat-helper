@@ -55,7 +55,8 @@ infrastructure names appear only in restricted operator diagnostics.
 ### Connector, route, or usage failure
 
 1. Compare desired connector generation and route revision with edge observations.
-2. Reject stale ownership, drain the old connector, and attach only the current generation.
+2. Reject stale ownership and fence new work on a replaced connector. Keep its established
+   streams alive until they finish, then close it; attach new work only to the current generation.
 3. Reconcile absolute counters by node/epoch/route; never synthesize deltas from a reset.
 4. If ownership is ambiguous, stop new admission and restore the last approved control pair.
 

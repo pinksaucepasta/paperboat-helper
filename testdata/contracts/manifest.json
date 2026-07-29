@@ -315,7 +315,7 @@
       "id": "operations.contract",
       "path": "operations.md",
       "type": "operations-specification",
-      "sha256": "76d3e9983b95add836fa68b030bf5b83b397174efc4de93b325797d8d803691e",
+      "sha256": "b23697af4c28e3290625c312470148f26e3603351efe652ab8173c609c5953e6",
       "owner": "operations",
       "review": "initial-review",
       "consumers": [
@@ -484,7 +484,7 @@
       "id": "session.stream",
       "path": "session/stream.md",
       "type": "specification",
-      "sha256": "501602e168bf3088d912988972ac263b978b3557a0420deecf036321ce1f14cf",
+      "sha256": "11f9b395ff138fa12e5094dc5bd4458ebc489fdac78f2da3181c71330f525732",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [

@@ -18,7 +18,7 @@ ranges are removed by sequence, not content.
 
 Input uses ordered binary channel `3`, a connection-local monotonically increasing
 sequence, attachment ID, and process generation. The helper authorizes and writes frames
-to the PTY synchronously in WebSocket order without creating operation or input-idempotency
+to the PTY synchronously in reliable transport order without creating operation or input-idempotency
 rows. Socket backpressure is bounded. A disconnect makes only the last unconfirmed frame
 uncertain; the client discards it and never replays terminal input.
 
