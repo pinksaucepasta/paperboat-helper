@@ -212,6 +212,7 @@ func (s *Service) CleanupExpired(ctx context.Context) error {
 	for _, transfer := range transfers {
 		_ = os.Remove(s.partialPath(transfer.ID))
 		_ = os.Remove(s.contentPath(transfer.ID))
+		_ = os.Remove(s.publishedPath(transfer))
 		s.cancels.Delete(transfer.ID)
 	}
 	return s.config.Store.ExpireFileTransfers(ctx, transfers)
@@ -451,9 +452,17 @@ func (s *Service) PublishedPath(ctx context.Context, id string) (string, error) 
 	if transfer.Direction != "pb_to_pbh" || transfer.State != "published" {
 		return "", &Error{Code: InvalidPath}
 	}
-	path := s.contentPath(id)
+	contentPath := s.contentPath(id)
+	path := s.publishedPath(transfer)
+	if err := os.Link(contentPath, path); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", &Error{Code: StorageUnavailable, Cause: err}
+	}
+	contentInfo, contentErr := os.Stat(contentPath)
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	if contentErr != nil || err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !os.SameFile(contentInfo, info) {
+		return "", &Error{Code: StorageUnavailable, Cause: errors.Join(contentErr, err)}
+	}
+	if err := syncDir(s.config.Root); err != nil {
 		return "", &Error{Code: StorageUnavailable, Cause: err}
 	}
 	return path, nil
@@ -474,10 +483,14 @@ func (s *Service) Cancel(ctx context.Context, id string) error {
 }
 
 func (s *Service) cancelLocked(ctx context.Context, id string) error {
+	transfer, err := s.config.Store.FileTransfer(ctx, id)
+	if err != nil {
+		return err
+	}
 	if err := s.config.Store.CancelFileTransfer(ctx, id); err != nil {
 		return err
 	}
-	for _, path := range []string{s.partialPath(id), s.contentPath(id)} {
+	for _, path := range []string{s.partialPath(id), s.contentPath(id), s.publishedPath(transfer)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return &Error{Code: StorageUnavailable, Cause: err}
 		}
@@ -503,7 +516,7 @@ func (s *Service) cancelBatchLocked(ctx context.Context, transfers []store.FileT
 		result = s.config.Store.CancelFileTransferBatch(ctx, transfers[0].BatchID)
 	}
 	for _, transfer := range transfers {
-		for _, path := range []string{s.partialPath(transfer.ID), s.contentPath(transfer.ID)} {
+		for _, path := range []string{s.partialPath(transfer.ID), s.contentPath(transfer.ID), s.publishedPath(transfer)} {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				result = errors.Join(result, err)
 			}
@@ -514,6 +527,9 @@ func (s *Service) cancelBatchLocked(ctx context.Context, transfers []store.FileT
 }
 func (s *Service) partialPath(id string) string { return filepath.Join(s.config.Root, id+".part") }
 func (s *Service) contentPath(id string) string { return filepath.Join(s.config.Root, id+".content") }
+func (s *Service) publishedPath(transfer store.FileTransfer) string {
+	return filepath.Join(s.config.Root, transfer.ID+"-"+transfer.Basename)
+}
 func (s *Service) lock(id string) *sync.Mutex {
 	value, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
 	return value.(*sync.Mutex)

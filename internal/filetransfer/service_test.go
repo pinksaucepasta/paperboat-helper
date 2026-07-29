@@ -63,6 +63,17 @@ func TestResumableTransferPersistsExactCommittedOffsetAndPublishes(t *testing.T)
 	if err != nil || completed.State != "published" {
 		t.Fatalf("complete=%#v err=%v", completed, err)
 	}
+	published, err := service.PublishedPath(context.Background(), id)
+	if err != nil || filepath.Base(published) != id+"-data.bin" {
+		t.Fatalf("published path=%q err=%v", published, err)
+	}
+	publishedBytes, err := os.ReadFile(published)
+	if err != nil || !bytes.Equal(publishedBytes, data) {
+		t.Fatalf("published content=%q err=%v", publishedBytes, err)
+	}
+	if repeated, err := service.PublishedPath(context.Background(), id); err != nil || repeated != published {
+		t.Fatalf("repeated published path=%q err=%v", repeated, err)
+	}
 	file, manifest, err := service.OpenContent(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
