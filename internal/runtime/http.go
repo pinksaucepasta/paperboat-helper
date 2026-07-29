@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -23,6 +25,7 @@ type HTTPConfig struct {
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	MaxHeaderBytes    int
+	NativeHandler     func(net.Conn)
 }
 
 type HTTPService struct {
@@ -71,6 +74,9 @@ func (s *HTTPService) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if s.config.NativeHandler != nil {
+		listener = &protocolListener{Listener: listener, native: s.config.NativeHandler, timeout: s.config.ReadHeaderTimeout}
+	}
 	server := &http.Server{Handler: s.config.Handler, ReadHeaderTimeout: s.config.ReadHeaderTimeout, IdleTimeout: s.config.IdleTimeout, MaxHeaderBytes: s.config.MaxHeaderBytes}
 	s.server, s.listener, s.done, s.running = server, listener, make(chan struct{}), true
 	go func() {
@@ -85,6 +91,42 @@ func (s *HTTPService) Start(ctx context.Context) error {
 	}()
 	return nil
 }
+
+type protocolListener struct {
+	net.Listener
+	native  func(net.Conn)
+	timeout time.Duration
+}
+
+func (l *protocolListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(l.timeout))
+		var prefix [4]byte
+		_, err = io.ReadFull(conn, prefix[:])
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			_ = conn.Close()
+			continue
+		}
+		wrapped := &prefixedConn{Conn: conn, reader: io.MultiReader(bytes.NewReader(prefix[:]), conn)}
+		if string(prefix[:]) == "PBT1" {
+			go l.native(wrapped)
+			continue
+		}
+		return wrapped, nil
+	}
+}
+
+type prefixedConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (c *prefixedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 
 func (s *HTTPService) Shutdown(ctx context.Context) error {
 	s.mu.Lock()

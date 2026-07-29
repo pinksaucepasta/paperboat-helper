@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	DefaultMaxBytes  = int64(20 << 20)
+	DefaultMaxBytes  = int64(50 << 20)
 	DefaultRetention = 24 * time.Hour
 )
 
@@ -141,7 +141,7 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	if !safeSegment(request.EnvironmentID) || !safeName(request.DisplayName) {
 		return Result{}, &Error{Code: InvalidPath}
 	}
-	if !validImageMIME(request.DeclaredMIME) {
+	if !validMIME(request.DeclaredMIME) {
 		return Result{}, &Error{Code: MIMEMismatch}
 	}
 	directory := s.config.Root
@@ -168,9 +168,8 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 		return Result{}, &Error{Code: StorageUnavailable, Cause: err}
 	}
 	hash := sha256.New()
-	header := &prefixWriter{max: 512}
 	limited := io.LimitReader(&contextReader{ctx: ctx, reader: request.Body}, s.config.MaxBytes+1)
-	written, copyErr := io.CopyBuffer(io.MultiWriter(temporary, hash, header), limited, make([]byte, 32<<10))
+	written, copyErr := io.CopyBuffer(io.MultiWriter(temporary, hash), limited, make([]byte, 32<<10))
 	if copyErr != nil {
 		return Result{}, classifyIO(copyErr)
 	}
@@ -180,10 +179,6 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	digest := hex.EncodeToString(hash.Sum(nil))
 	if request.ExpectedSHA256 != "" && (!validSHA256(request.ExpectedSHA256) || digest != request.ExpectedSHA256) {
 		return Result{}, &Error{Code: InvalidSize, Cause: errors.New("content digest mismatch")}
-	}
-	detected := detectImageMIME(header.bytes)
-	if detected != "application/octet-stream" && detected != request.DeclaredMIME {
-		return Result{}, &Error{Code: MIMEMismatch}
 	}
 	if err = temporary.Sync(); err != nil {
 		return Result{}, &Error{Code: StorageUnavailable, Cause: err}
@@ -206,7 +201,7 @@ func (s *Stager) Stage(ctx context.Context, request Request) (result Result, err
 	}
 	relative := filename
 	result = Result{Path: relative, MIME: request.DeclaredMIME, Bytes: written, SHA256: digest, ExpiresAt: expires}
-	meta := metadata{EnvironmentID: request.EnvironmentID, Path: relative, MIME: detected, Bytes: written, SHA256: result.SHA256, ExpiresAt: expires}
+	meta := metadata{EnvironmentID: request.EnvironmentID, Path: relative, MIME: request.DeclaredMIME, Bytes: written, SHA256: result.SHA256, ExpiresAt: expires}
 	metaBytes, marshalErr := json.Marshal(meta)
 	if marshalErr != nil {
 		return Result{}, &Error{Code: StorageUnavailable, Cause: marshalErr}
@@ -465,7 +460,7 @@ func rejectDuplicateJSON(data []byte) error {
 }
 
 func (s *Stager) validMetadataFile(meta metadata) bool {
-	if !safeSegment(meta.EnvironmentID) || !safeStagedName(meta.Path) || !validImageMIME(meta.MIME) || meta.Bytes < 1 || meta.Bytes > s.config.MaxBytes || !validSHA256(meta.SHA256) || meta.ExpiresAt.IsZero() {
+	if !safeSegment(meta.EnvironmentID) || !safeStagedName(meta.Path) || !validMIME(meta.MIME) || meta.Bytes < 1 || meta.Bytes > s.config.MaxBytes || !validSHA256(meta.SHA256) || meta.ExpiresAt.IsZero() {
 		return false
 	}
 	path := filepath.Join(s.config.Root, meta.Path)
@@ -486,10 +481,8 @@ func (s *Stager) validMetadataFile(meta metadata) bool {
 		return false
 	}
 	hash := sha256.New()
-	header := &prefixWriter{max: 512}
-	read, err := io.Copy(io.MultiWriter(hash, header), io.LimitReader(file, s.config.MaxBytes+1))
-	detected := detectImageMIME(header.bytes)
-	return err == nil && read == meta.Bytes && read <= s.config.MaxBytes && hex.EncodeToString(hash.Sum(nil)) == meta.SHA256 && (detected == "application/octet-stream" || detected == meta.MIME)
+	read, err := io.Copy(hash, io.LimitReader(file, s.config.MaxBytes+1))
+	return err == nil && read == meta.Bytes && read <= s.config.MaxBytes && hex.EncodeToString(hash.Sum(nil)) == meta.SHA256
 }
 
 func detectImageMIME(header []byte) string {
@@ -502,9 +495,10 @@ func detectImageMIME(header []byte) string {
 	return http.DetectContentType(header)
 }
 
-func validImageMIME(value string) bool {
+func validMIME(value string) bool {
 	mediaType, params, err := mime.ParseMediaType(value)
-	return err == nil && len(params) == 0 && mediaType == value && strings.HasPrefix(mediaType, "image/") && len(mediaType) > len("image/")
+	parts := strings.Split(mediaType, "/")
+	return err == nil && len(params) == 0 && mediaType == value && len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
 func stagedExtension(name string) string {

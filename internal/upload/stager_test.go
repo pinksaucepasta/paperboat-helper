@@ -98,6 +98,18 @@ func TestStageAcceptsUnknownImageSubtypeWithoutAllowlist(t *testing.T) {
 	}
 }
 
+func TestStageAcceptsNonImageFile(t *testing.T) {
+	s, _ := newStager(t, &fixedClock{time.Now()})
+	data := []byte("hello from paperboat\n")
+	result, err := s.Stage(context.Background(), Request{EnvironmentID: "env", DisplayName: "notes.txt", DeclaredMIME: "text/plain", DeclaredSize: int64(len(data)), Body: bytes.NewReader(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MIME != "text/plain" || filepath.Ext(result.Path) != ".txt" {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestStageRejectsPathMimeAndSize(t *testing.T) {
 	s, _ := newStager(t, &fixedClock{time.Now()})
 	png := []byte("\x89PNG\r\n\x1a\n")
@@ -107,7 +119,7 @@ func TestStageRejectsPathMimeAndSize(t *testing.T) {
 		code    Code
 	}{
 		{"traversal", Request{EnvironmentID: "env", DisplayName: "../x.png", DeclaredMIME: "image/png", DeclaredSize: int64(len(png)), Body: bytes.NewReader(png)}, InvalidPath},
-		{"mime", Request{EnvironmentID: "env", DisplayName: "x.png", DeclaredMIME: "image/jpeg", DeclaredSize: int64(len(png)), Body: bytes.NewReader(png)}, MIMEMismatch},
+		{"mime", Request{EnvironmentID: "env", DisplayName: "x.png", DeclaredMIME: "not-a-mime", DeclaredSize: int64(len(png)), Body: bytes.NewReader(png)}, MIMEMismatch},
 		{"size", Request{EnvironmentID: "env", DisplayName: "x.png", DeclaredMIME: "image/png", DeclaredSize: int64(len(png)) + 1, Body: bytes.NewReader(png)}, InvalidSize},
 	}
 	for _, tc := range cases {

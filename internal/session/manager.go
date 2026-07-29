@@ -814,12 +814,14 @@ func (m *Manager) capture(session *managedSession, process PTYProcess) {
 		buffer := history.AcquireBuffer()
 		n, err := process.Read(buffer)
 		if n > 0 {
+			session.opMu.Lock()
 			event, appendErr := session.history.AppendBuffer(1, buffer[:n])
 			if appendErr == nil {
 				_, _ = session.fanout.PublishOwned(event)
 				m.queueOutputPersistence(session, event)
 				event.Release()
 			}
+			session.opMu.Unlock()
 		} else {
 			history.ReleaseBuffer(buffer)
 		}

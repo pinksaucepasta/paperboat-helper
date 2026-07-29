@@ -53,6 +53,7 @@ type Supervisor struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wake    chan struct{}
+	routes  chan struct{}
 	running bool
 }
 
@@ -75,7 +76,7 @@ func NewSupervisor(config SupervisorConfig) (*Supervisor, error) {
 	if config.Manager == nil || config.Admissions == nil || config.InitialBackoff <= 0 || config.MaxBackoff < config.InitialBackoff || config.Jitter < 0 || config.Jitter > 1 {
 		return nil, ErrSupervisorInvalid
 	}
-	return &Supervisor{config: config, wake: make(chan struct{}, 1)}, nil
+	return &Supervisor{config: config, wake: make(chan struct{}, 1), routes: make(chan struct{}, 1)}, nil
 }
 
 func (s *Supervisor) Start(ctx context.Context) error {
@@ -100,9 +101,14 @@ func (s *Supervisor) NetworkChanged() {
 	}
 }
 
-// RoutesChanged refreshes the admission snapshot without dropping the active
-// connector. Accept installs the replacement before draining the old client.
-func (s *Supervisor) RoutesChanged() { s.NetworkChanged() }
+// RoutesChanged requests a new connector generation because proxy ownership is
+// part of connector admission. Credential expiry alone never calls this path.
+func (s *Supervisor) RoutesChanged() {
+	select {
+	case s.routes <- struct{}{}:
+	default:
+	}
+}
 
 func (s *Supervisor) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
@@ -152,7 +158,7 @@ func (s *Supervisor) loop(ctx context.Context) {
 				var waitErr error
 				select {
 				case waitErr = <-waitResult:
-				case <-s.wake:
+				case <-s.routes:
 					cancelWait()
 					waitErr = <-waitResult
 				}

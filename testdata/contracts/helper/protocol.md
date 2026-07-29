@@ -1,7 +1,7 @@
 # Helper Application Protocol 2.0
 
-The application protocol runs over authenticated HTTPS and WSS through the Paperboat
-edge. The bearer credential is authenticated once during WebSocket establishment.
+The application protocol runs through the Paperboat edge over either WSS or native QUIC.
+The bearer credential is authenticated once on the native control stream or WSS connection.
 Lifecycle operations are authorized against their advertised capability; terminal data
 frames use the connection-local stream binding established by attach.
 
@@ -14,15 +14,42 @@ selected exactly; optional unknown capabilities are ignored.
 
 ## Limits
 
-- Structured JSON WebSocket message: 64 KiB encoded.
-- Binary terminal WebSocket message: 256 KiB.
-- HTTP body: operation-specific and never unbounded.
+- Structured JSON application frame: 64 KiB encoded.
+- Binary terminal application frame: 256 KiB.
+- Native QUIC records are bounded per frame; streams have no cumulative byte ceiling.
+- Other HTTP bodies are operation-specific and bounded.
 - Pending outbound data per attachment: 1 MiB.
 - Heartbeat interval: 15 seconds; peer timeout: 45 seconds.
 - Operation deadline: required for mutations, at most 5 minutes.
 
-Each WebSocket message is exactly one application frame. Structured lifecycle frames are
-UTF-8 JSON text messages. Attach returns a nonzero connection-local `uint32 stream_id`.
+WSS maps each text or binary message to exactly one application frame. Native QUIC uses
+one connection with independently flow-controlled control, input, and output streams.
+Each begins with a bounded `PBT1` preface containing version, role, a 16-byte connection
+ID, and bounded binding/token lengths. Control carries the bearer token. Its welcome
+returns a random 32-byte binding secret required by input and output.
+
+Control records use:
+
+```text
++----------+----------------+------------------+
+| kind u8  | length u32 BE  | payload          |
++----------+----------------+------------------+
+```
+
+Kind `1` is a nonempty structured JSON frame. Kind `2` is a control binary frame such as
+ACK or resize. Input and output use the same big-endian length without a kind byte because
+their roles are fixed. Unknown kinds, zero or oversized lengths, malformed JSON, and
+truncated records are protocol errors. Fragmentation does not alter record boundaries.
+
+Native QUIC uses ALPN `paperboat-terminal/1` on UDP 443. WSS continues at `/v1/runtime`
+with subprotocol `paperboat.terminal.v2`. Both transports use the same scoped bearer
+credential, negotiation, application frames, limits, authorization, session state, and
+close semantics. Auxiliary streams are usable only after control authorization succeeds;
+duplicates, incorrect roles or bindings, and incomplete sets are rejected. Control loss
+closes the attachment, and uncertain input is never replayed.
+
+Structured lifecycle frames are UTF-8 JSON. Attach returns a nonzero connection-local
+`uint32 stream_id`.
 Terminal input, output, cumulative ACK and resize are fixed-header binary messages defined
 by `fixtures/helper/terminal-v2.json`; they carry the stream ID rather than string session
 or attachment identifiers. Input and resize sequences start at one for each attached stream

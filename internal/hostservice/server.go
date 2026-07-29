@@ -96,7 +96,7 @@ type Server struct {
 }
 
 func New(config Config) (*Server, error) {
-	if !filepath.IsAbs(config.SocketPath) || !filepath.IsAbs(config.StatePath) || config.UID < 1 || config.GID < 1 || config.Applier == nil || config.Version == "" {
+	if !filepath.IsAbs(config.SocketPath) || !filepath.IsAbs(config.StatePath) || config.UID < 0 || config.GID < 0 || config.Applier == nil || config.Version == "" {
 		return nil, ErrInvalidConfig
 	}
 	if config.Now == nil {

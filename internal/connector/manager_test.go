@@ -14,6 +14,7 @@ func (c fixedClock) Now() time.Time { return c.now }
 
 type fakeConnection struct {
 	mu             sync.Mutex
+	retires        int
 	drains, closes int
 	drainErr       error
 	done           chan error
@@ -25,7 +26,8 @@ func (c *fakeConnection) Drain(context.Context) error {
 	c.drains++
 	return c.drainErr
 }
-func (c *fakeConnection) Close() error { c.mu.Lock(); defer c.mu.Unlock(); c.closes++; return nil }
+func (c *fakeConnection) Retire() error { c.mu.Lock(); defer c.mu.Unlock(); c.retires++; return nil }
+func (c *fakeConnection) Close() error  { c.mu.Lock(); defer c.mu.Unlock(); c.closes++; return nil }
 func (c *fakeConnection) Done() <-chan error {
 	if c.done == nil {
 		c.done = make(chan error)
@@ -109,12 +111,12 @@ func TestSelectedTerminalTransportIsTheOnlyDialedMode(t *testing.T) {
 	}
 }
 
-func TestAutomaticTransportPrefersQUICAndFallsBackToTCPMux(t *testing.T) {
+func TestAutomaticTransportDelegatesOnePreLoginRace(t *testing.T) {
 	now := time.Now()
 	dialer := &fakeDialer{quicErr: errors.New("udp unavailable")}
 	m := manager(t, dialer, now)
 	result, err := m.Accept(context.Background(), admission(1, "jti_0001", now))
-	if err != nil || result.Transport != TCPMux {
+	if err != nil || result.Transport != Auto {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	if _, err := m.Accept(context.Background(), admission(2, "jti_0002", now)); err != nil {
@@ -122,7 +124,7 @@ func TestAutomaticTransportPrefersQUICAndFallsBackToTCPMux(t *testing.T) {
 	}
 	dialer.mu.Lock()
 	defer dialer.mu.Unlock()
-	want := []Transport{QUIC, TCPMux, TCPMux}
+	want := []Transport{Auto, Auto}
 	if len(dialer.calls) != len(want) {
 		t.Fatalf("calls=%v want=%v", dialer.calls, want)
 	}
@@ -133,17 +135,17 @@ func TestAutomaticTransportPrefersQUICAndFallsBackToTCPMux(t *testing.T) {
 	}
 }
 
-func TestAutomaticTransportDoesNotFallbackWhenQUICConnects(t *testing.T) {
+func TestAutomaticTransportStartsOnlyOneAuthenticatedDial(t *testing.T) {
 	now := time.Now()
 	dialer := &fakeDialer{}
 	m := manager(t, dialer, now)
 	result, err := m.Accept(context.Background(), admission(1, "jti_0001", now))
-	if err != nil || result.Transport != QUIC {
+	if err != nil || result.Transport != Auto {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	dialer.mu.Lock()
 	defer dialer.mu.Unlock()
-	if len(dialer.calls) != 1 || dialer.calls[0] != QUIC {
+	if len(dialer.calls) != 1 || dialer.calls[0] != Auto {
 		t.Fatalf("calls=%v", dialer.calls)
 	}
 }
@@ -167,7 +169,7 @@ func TestAdmissionReplayStaleAndBindingRejected(t *testing.T) {
 	}
 }
 
-func TestReplacementDrainsAndClosesPreviousConnection(t *testing.T) {
+func TestReplacementRetainsPreviousConnectionUntilItDisconnects(t *testing.T) {
 	now := time.Now()
 	dialer := &fakeDialer{}
 	m := manager(t, dialer, now)
@@ -178,9 +180,22 @@ func TestReplacementDrainsAndClosesPreviousConnection(t *testing.T) {
 	}
 	first := dialer.connections[0]
 	first.mu.Lock()
+	if first.retires != 1 || first.drains != 0 || first.closes != 0 {
+		t.Fatalf("retires=%d drains=%d closes=%d", first.retires, first.drains, first.closes)
+	}
+	first.mu.Unlock()
+	if got := m.ResourceCounts()["connectors"]; got != 2 {
+		t.Fatalf("connectors during retirement=%d", got)
+	}
+	first.done <- nil
+	deadline := time.Now().Add(time.Second)
+	for m.ResourceCounts()["connectors"] != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	first.mu.Lock()
 	defer first.mu.Unlock()
-	if first.drains != 1 || first.closes != 1 {
-		t.Fatalf("drains=%d closes=%d", first.drains, first.closes)
+	if first.retires != 1 || first.drains != 0 || first.closes != 1 {
+		t.Fatalf("retired retires=%d drains=%d closes=%d", first.retires, first.drains, first.closes)
 	}
 }
 

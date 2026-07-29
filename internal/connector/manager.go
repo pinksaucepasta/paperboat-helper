@@ -59,6 +59,7 @@ type RouteHandoff struct {
 	LocalTarget RouteTarget `json:"target"`
 }
 type Connection interface {
+	Retire() error
 	Drain(context.Context) error
 	Close() error
 }
@@ -102,15 +103,15 @@ type activeConnection struct {
 }
 
 type Manager struct {
-	opMu          sync.Mutex
-	mu            sync.RWMutex
-	config        Config
-	ctx           context.Context
-	cancel        context.CancelFunc
-	used          map[string]time.Time
-	active        *activeConnection
-	autoTransport Transport
-	stopping      bool
+	opMu     sync.Mutex
+	mu       sync.RWMutex
+	config   Config
+	ctx      context.Context
+	cancel   context.CancelFunc
+	used     map[string]time.Time
+	active   *activeConnection
+	retired  map[*activeConnection]struct{}
+	stopping bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -130,7 +131,7 @@ func New(config Config) (*Manager, error) {
 		return nil, ErrAdmissionInvalid
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{config: config, ctx: ctx, cancel: cancel, used: make(map[string]time.Time), autoTransport: QUIC}, nil
+	return &Manager{config: config, ctx: ctx, cancel: cancel, used: make(map[string]time.Time), retired: make(map[*activeConnection]struct{})}, nil
 }
 
 func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, error) {
@@ -177,45 +178,57 @@ func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, erro
 	m.mu.Lock()
 	old := m.active
 	m.active = &activeConnection{generation: admission.Generation, transport: transport, connection: connection}
+	if old != nil {
+		m.retired[old] = struct{}{}
+	}
 	m.mu.Unlock()
 	result := Result{Generation: admission.Generation, Transport: transport, Replaced: old != nil}
 	if old != nil {
-		result.DrainEscalated = drainAndClose(old.connection, m.config.DrainTimeout)
+		if err := old.connection.Retire(); err != nil {
+			_ = old.connection.Close()
+		}
+		go m.waitRetired(old)
 	}
 	return result, nil
 }
 
+func (m *Manager) waitRetired(retired *activeConnection) {
+	connection, ok := retired.connection.(LifecycleConnection)
+	if !ok {
+		m.mu.Lock()
+		delete(m.retired, retired)
+		m.mu.Unlock()
+		_ = retired.connection.Close()
+		return
+	}
+	select {
+	case <-connection.Done():
+	case <-m.ctx.Done():
+		return
+	}
+	m.mu.Lock()
+	if _, ok := m.retired[retired]; ok {
+		delete(m.retired, retired)
+		m.mu.Unlock()
+		_ = connection.Close()
+		return
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) dial(ctx context.Context, admission Admission) (Connection, Transport, error) {
 	transport := m.config.Transport
-	if transport == Auto {
-		m.mu.RLock()
-		transport = m.autoTransport
-		m.mu.RUnlock()
-	}
 	connection, err := m.config.Dialer.Dial(ctx, transport, admission)
 	if err == nil && connection != nil {
+		if selected, ok := connection.(interface{ SelectedTransport() Transport }); ok && selected.SelectedTransport() != "" {
+			transport = selected.SelectedTransport()
+		}
 		return connection, transport, nil
 	}
 	if connection != nil {
 		_ = connection.Close()
 	}
-	firstErr := fmt.Errorf("%s: %w", transport, err)
-	if m.config.Transport != Auto || transport != QUIC || ctx.Err() != nil {
-		return nil, "", fmt.Errorf("%w: %w", ErrUnavailable, firstErr)
-	}
-	// Keep the fallback sticky for later admissions. A failed QUIC attempt may
-	// have consumed its replay-protected credential before readiness failed.
-	m.mu.Lock()
-	m.autoTransport = TCPMux
-	m.mu.Unlock()
-	connection, err = m.config.Dialer.Dial(ctx, TCPMux, admission)
-	if err == nil && connection != nil {
-		return connection, TCPMux, nil
-	}
-	if connection != nil {
-		_ = connection.Close()
-	}
-	return nil, "", fmt.Errorf("%w: %w; %s: %w", ErrUnavailable, firstErr, TCPMux, err)
+	return nil, "", fmt.Errorf("%w: %s: %w", ErrUnavailable, transport, err)
 }
 
 func (m *Manager) Status() Status {
@@ -231,10 +244,12 @@ func (m *Manager) Status() Status {
 }
 
 func (m *Manager) ResourceCounts() map[string]uint64 {
-	count := uint64(0)
-	if m.Status().Connected {
-		count = 1
+	m.mu.RLock()
+	count := uint64(len(m.retired))
+	if m.active != nil {
+		count++
 	}
+	m.mu.RUnlock()
 	return map[string]uint64{"connectors": count}
 }
 
@@ -282,22 +297,38 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	active := m.active
 	m.active = nil
+	connections := make([]*activeConnection, 0, len(m.retired)+1)
+	if active != nil {
+		connections = append(connections, active)
+	}
+	for retired := range m.retired {
+		connections = append(connections, retired)
+	}
+	m.retired = make(map[*activeConnection]struct{})
 	m.mu.Unlock()
-	if active == nil {
+	if len(connections) == 0 {
 		return nil
 	}
-	done := make(chan bool, 1)
-	go func() { done <- drainAndClose(active.connection, m.config.DrainTimeout) }()
-	select {
-	case escalated := <-done:
-		if escalated {
-			return ErrUnavailable
+	done := make(chan bool, len(connections))
+	for _, connection := range connections {
+		go func() { done <- drainAndClose(connection.connection, m.config.DrainTimeout) }()
+	}
+	escalated := false
+	for range connections {
+		select {
+		case failed := <-done:
+			escalated = escalated || failed
+		case <-ctx.Done():
+			for _, connection := range connections {
+				_ = connection.connection.Close()
+			}
+			return ctx.Err()
 		}
-		return nil
-	case <-ctx.Done():
-		_ = active.connection.Close()
-		return ctx.Err()
 	}
+	if escalated {
+		return ErrUnavailable
+	}
+	return nil
 }
 
 func drainAndClose(connection Connection, timeout time.Duration) bool {

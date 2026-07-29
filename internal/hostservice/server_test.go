@@ -41,6 +41,21 @@ func (a *fakeApplier) Apply(_ context.Context, mode string) error {
 }
 func (a *fakeApplier) Close(context.Context) error { return nil }
 
+func TestNewAllowsRootPeerIdentity(t *testing.T) {
+	root := t.TempDir()
+	server, err := New(Config{
+		SocketPath: filepath.Join(root, "host.sock"),
+		StatePath:  filepath.Join(root, "policy.json"),
+		UID:        0,
+		GID:        0,
+		Applier:    &fakeApplier{},
+		Version:    "test",
+	})
+	if err != nil || server.config.UID != 0 || server.config.GID != 0 {
+		t.Fatalf("server=%v error=%v", server, err)
+	}
+}
+
 func TestProtocolAppliesMonotonicPolicyAndIsIdempotent(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("peer test requires a non-root enrolled user")

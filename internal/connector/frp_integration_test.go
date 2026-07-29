@@ -2,7 +2,6 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +24,10 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 	}
 	for index, transport := range []Transport{TCPMux, TCPDedicated, QUIC} {
 		t.Run(string(transport), func(t *testing.T) {
+			streamStarted := make(chan struct{})
+			finishStream := make(chan struct{})
+			releaseStream := sync.OnceFunc(func() { close(finishStream) })
+			defer releaseStream()
 			controlPort := 17070 + index
 			vhostPort := 18080 + index
 			token := strings.Repeat(string('a'+rune(index)), 40)
@@ -53,7 +57,7 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 				select {
 				case <-serverDone:
 				case <-time.After(100 * time.Millisecond):
-					// v0.70.0 frps Run does not reliably return after Close. This
+					// frps Run does not reliably return after Close. This
 					// opt-in test runs in an isolated process; The test asserts only
 					// the embedded client work path and bounded client drain.
 				}
@@ -61,6 +65,14 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 
 			target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				writer.Header().Set("Content-Type", "text/plain")
+				if request.URL.Path == "/held" {
+					_, _ = io.WriteString(writer, "held-start\n")
+					writer.(http.Flusher).Flush()
+					close(streamStarted)
+					<-finishStream
+					_, _ = io.WriteString(writer, "held-end\n")
+					return
+				}
 				_, _ = fmt.Fprintf(writer, "work-connection:%s", request.URL.Path)
 			}))
 			defer target.Close()
@@ -92,6 +104,26 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 				_ = connection.Close()
 				t.Fatalf("status=%d body=%q err=%v", response.StatusCode, body, readErr)
 			}
+			heldRequest, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/held", vhostPort), nil)
+			heldRequest.Host = host
+			heldResponse, err := (&http.Client{Timeout: 30 * time.Second}).Do(heldRequest)
+			if err != nil {
+				_ = connection.Close()
+				t.Fatal(err)
+			}
+			<-streamStarted
+			if err := connection.Retire(); err != nil {
+				heldResponse.Body.Close()
+				_ = connection.Close()
+				t.Fatal(err)
+			}
+			fencedResponse, fencedErr := (&http.Client{Timeout: time.Second}).Do(request)
+			if fencedErr == nil {
+				fencedResponse.Body.Close()
+				if fencedResponse.StatusCode == http.StatusOK {
+					t.Fatal("retired connector accepted new traffic")
+				}
+			}
 			replacementAdmission := admission
 			replacementAdmission.OperationID = "op_admit_second"
 			replacement, err := dialer.Dial(context.Background(), transport, replacementAdmission)
@@ -99,13 +131,6 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 				_ = connection.Close()
 				t.Fatal(err)
 			}
-			retireCtx, cancelRetire := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			if err := connection.Drain(retireCtx); err != nil {
-				cancelRetire()
-				_ = replacement.Close()
-				t.Fatal(err)
-			}
-			cancelRetire()
 			response, err = (&http.Client{Timeout: 5 * time.Second}).Do(request)
 			if err != nil {
 				_ = replacement.Close()
@@ -117,11 +142,25 @@ func TestPinnedFRPRealServerHTTPWorkConnection(t *testing.T) {
 				_ = replacement.Close()
 				t.Fatalf("replacement status=%d body=%q err=%v", response.StatusCode, body, readErr)
 			}
-			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelDrain()
-			if err := replacement.Drain(drainCtx); err != nil && !errors.Is(err, context.Canceled) {
-				t.Fatal(err)
+			releaseStream()
+			heldBody, heldErr := io.ReadAll(io.LimitReader(heldResponse.Body, 1024))
+			heldResponse.Body.Close()
+			if heldErr != nil || string(heldBody) != "held-start\nheld-end\n" {
+				t.Fatalf("retired stream body=%q err=%v", heldBody, heldErr)
 			}
+			_ = connection.Close()
+			lifecycle, ok := replacement.(LifecycleConnection)
+			if !ok {
+				t.Fatal("real FRP connection does not expose lifecycle")
+			}
+			_ = frps.Close()
+			select {
+			case <-lifecycle.Done():
+			case <-time.After(5 * time.Second):
+				_ = replacement.Close()
+				t.Fatal("FRP client retried consumed admission after control loss")
+			}
+			_ = replacement.Close()
 		})
 	}
 }

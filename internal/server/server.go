@@ -48,6 +48,14 @@ type ConnectionRevocation interface {
 	RevocationFlag() *atomic.Bool
 }
 
+type WelcomeAugmenter interface {
+	AugmentWelcome(map[string]any)
+}
+
+type AuthorizationObserver interface {
+	AuthorizationSucceeded()
+}
+
 // Authorizer must validate the operation credential and all applicable bindings.
 // It runs before Handler, including for requests that name nonexistent resources.
 type Authorizer interface {
@@ -260,7 +268,11 @@ func (s *Server) ServeAuthenticated(conn Connection, authorizer Authorizer) (ser
 		_ = writer.write(errorFrame(first.RequestID, protocolCode(err), "protocol negotiation failed", false))
 		return err
 	}
-	payload, _ := json.Marshal(welcomePayload{Version: welcome.Version, Capabilities: welcome.Capabilities})
+	welcomeFields := map[string]any{"version": welcome.Version, "capabilities": welcome.Capabilities}
+	if augmenter, ok := conn.(WelcomeAugmenter); ok {
+		augmenter.AugmentWelcome(welcomeFields)
+	}
+	payload, _ := json.Marshal(welcomeFields)
 	if err := writer.write(protocol.Frame{Type: "welcome", RequestID: first.RequestID, Version: protocol.ProtocolVersion, Payload: payload}); err != nil {
 		return err
 	}

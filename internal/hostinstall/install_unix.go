@@ -379,7 +379,7 @@ func loadInstallMetadata(path string, sudoUID int) (Request, error) {
 		return Request{}, err
 	}
 	request, err := Decode(strings.NewReader(string(body)))
-	if err != nil || request.Schema != SchemaV1 || request.Platform != runtime.GOOS || request.UID < 1 || request.UID != sudoUID {
+	if err != nil || request.Schema != SchemaV1 || request.Platform != runtime.GOOS || !validRunIdentity(request) || request.UID != sudoUID {
 		return Request{}, ErrInvalidRequest
 	}
 	account, err := user.Lookup(request.User)
@@ -597,7 +597,7 @@ func secureRootDirectory(path string, mode os.FileMode) error {
 }
 
 func Validate(request Request, sudoUID int) error {
-	if request.Schema != SchemaV1 || request.Platform != runtime.GOOS || request.UID < 1 || request.GID < 1 || sudoUID != request.UID ||
+	if request.Schema != SchemaV1 || request.Platform != runtime.GOOS || !validRunIdentity(request) || sudoUID != request.UID ||
 		request.UserMachineID == "" || request.HerdrVersion == "" || strings.ContainsAny(request.UserMachineID+request.HerdrVersion, "\x00\r\n") {
 		return ErrInvalidRequest
 	}
@@ -641,6 +641,10 @@ func Validate(request Request, sudoUID int) error {
 		return ErrInvalidRequest
 	}
 	return nil
+}
+
+func validRunIdentity(request Request) bool {
+	return request.UID > 0 && request.GID > 0 || request.UID == 0 && request.GID == 0 && request.User == "root"
 }
 
 func workerEnvironment(request Request) map[string]string {

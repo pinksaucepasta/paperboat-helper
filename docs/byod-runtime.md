@@ -18,6 +18,8 @@ workspaces, PTYs, and connectors remain owned by the enrolled user.
 `pbh bootstrap` verifies both signed artifacts before requesting one administrator
 approval. The privileged installer independently verifies signature, digest, platform,
 architecture, canonical paths, file ownership, modes, UID/GID, and fixed service inputs.
+When the enrolled account is root, bootstrap warns that remote Paperboat operations gain
+full control of the machine and requires the user to type `yes` before pairing begins.
 It stages through a root-owned journal, starts the host service, stops an active canonical
 legacy user service, starts the system worker, and waits for all of:
 

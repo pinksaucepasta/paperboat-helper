@@ -1,15 +1,14 @@
 # Non-Terminal Helper Operations 1.0
 
-## Image staging
+## File staging
 
 `upload.v1` accepts authenticated streaming multipart data with exactly one file. The
-default maximum is 20 MiB and the credential may lower it. Allowed MIME types are
-`image/png`, `image/jpeg`, `image/gif`, and `image/webp`; detected content must match the
-declared type. Names are reduced to a safe basename. Absolute paths, traversal, NUL, device
+default maximum is 50 MiB and the credential may lower it. Any syntactically valid MIME
+type is accepted. Names are reduced to a safe basename. Absolute paths, traversal, NUL, device
 files, hard links, and symlinks are rejected. The helper writes to a private temporary file,
 fsyncs, atomically publishes a helper-generated scoped path, and returns its SHA-256. A
 repeated operation ID is idempotent. Partial files are removed on failure or cancellation.
-Staged images expire after 24 hours by default and never later than the credential expiry.
+Staged files expire after 24 hours by default and never later than the credential expiry.
 Concurrent uploads are limited by helper configuration and excess work returns
 `resource_limit` without reading an unbounded body.
 

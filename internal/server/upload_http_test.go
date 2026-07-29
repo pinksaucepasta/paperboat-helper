@@ -101,6 +101,19 @@ func TestUploadHTTPStagesExactlyOneAuthenticatedFile(t *testing.T) {
 	}
 }
 
+func TestUploadHTTPStagesNonImageFile(t *testing.T) {
+	handler, _ := uploadTestHandler(t, uploadAuthorization)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, multipartUpload(t, "op_upload_text_01", "notes.txt", "text/plain", []byte("notes\n"), false))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result upload.Result
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.MIME != "text/plain" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 type readProbe struct{ reads int }
 
 func (r *readProbe) Read([]byte) (int, error) { r.reads++; return 0, io.EOF }

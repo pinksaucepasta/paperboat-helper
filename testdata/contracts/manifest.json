@@ -17,7 +17,7 @@
       "id": "cli.command-tree",
       "path": "cli/command-tree.json",
       "type": "command-tree",
-      "sha256": "906e87e13cabbeb9b4a7fe51a34c4f7d490897bd228ef490798ad9f6e15a3a93",
+      "sha256": "08d25e6e1c66d6577f591228485f2a2ab578c75093d31993a654d34bc7ed382b",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [
@@ -39,7 +39,7 @@
       "id": "compatibility.matrix",
       "path": "compatibility/matrix.json",
       "type": "matrix",
-      "sha256": "604dd2d737505325d13a6952a3768a959aae2627a254431238163d328d989353",
+      "sha256": "480c2a65034c6fc8677848f25341925f7a27c3cca4bc08ba186ed9bebb91240d",
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
@@ -116,7 +116,7 @@
       "id": "compatibility.pairs",
       "path": "fixtures/compatibility/pairs.ndjson",
       "type": "compatibility-vectors",
-      "sha256": "8ab5a539da1e0f804aff0d4e1b50e670dc1ff0c21b6cb292286e8eb812cc2e94",
+      "sha256": "28e22f9673e3b79ed57877c58e9113aa756e5d3ea582eefbf4340c61fc6a466b",
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
@@ -276,7 +276,7 @@
       "id": "helper.operations",
       "path": "helper/operations.md",
       "type": "specification",
-      "sha256": "c82e8c21cc127798e429edf458d04892678e87bb0379f56d960b19c34848718e",
+      "sha256": "3ab9e22b3abd10e70ac5e340b2c542d182a20644a9162e2a9e7ef875a4c0ef69",
       "owner": "helper",
       "review": "preview-ownership-review",
       "consumers": [
@@ -302,7 +302,7 @@
       "id": "helper.protocol",
       "path": "helper/protocol.md",
       "type": "specification",
-      "sha256": "a5fb75276cadf50f647c1f8a46c618259a43fbea3380d444230d42bd4344ad18",
+      "sha256": "7e6ffd0fa6ca4aec0b263d881c24ad90112cde1e8466b39d563f8c00d592e12a",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -406,7 +406,7 @@
       "id": "environment.connection.v1",
       "path": "schemas/environment/connection-v1.schema.json",
       "type": "json-schema",
-      "sha256": "94dfd82721879d81a4ed252f34f601b8911e9171f50ccb0ffaa598fc572b0a44",
+      "sha256": "e2cb24c40a5ac1ecf56d223852ef29c2184735aac7c1a85161fdf44b3f50c68b",
       "owner": "server",
       "review": "frozen-review",
       "consumers": [

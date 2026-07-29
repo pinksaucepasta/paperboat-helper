@@ -11,6 +11,7 @@ import (
 type admissionSource struct {
 	mu         sync.Mutex
 	now        time.Time
+	ttl        time.Duration
 	generation uint64
 	calls      chan uint64
 }
@@ -24,7 +25,11 @@ func (s *admissionSource) Admission(context.Context) (Admission, error) {
 	case s.calls <- generation:
 	default:
 	}
-	return admission(generation, "jti_000"+string(rune('0'+generation)), s.now), nil
+	value := admission(generation, "jti_000"+string(rune('0'+generation)), s.now)
+	if s.ttl > 0 {
+		value.ExpiresAt = s.now.Add(s.ttl)
+	}
+	return value, nil
 }
 
 type recordingWaiter struct {
@@ -229,14 +234,12 @@ func TestRouteChangeRefreshesActiveAdmission(t *testing.T) {
 	}
 }
 
-func TestAdmissionExpiryDoesNotReplaceHealthyConnector(t *testing.T) {
+func TestCredentialExpiryDoesNotReplaceHealthyConnector(t *testing.T) {
 	now := time.Now()
 	dialer := &recoveringDialer{}
 	manager := manager(t, dialer, now)
-	// Admission expiry limits new handshakes. It does not terminate an
-	// established connector or cause periodic connector replacement.
-	source := &admissionSource{now: now.Add(-59*time.Second - 900*time.Millisecond), calls: make(chan uint64, 4)}
-	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source})
+	source := &admissionSource{now: now, ttl: 25 * time.Millisecond, calls: make(chan uint64, 4)}
+	supervisor, err := NewSupervisor(SupervisorConfig{Manager: manager, Admissions: source, InitialBackoff: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,11 +251,10 @@ func TestAdmissionExpiryDoesNotReplaceHealthyConnector(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("initial admission was not requested")
 	}
-	time.Sleep(250 * time.Millisecond)
 	select {
 	case generation := <-source.calls:
-		t.Fatalf("healthy connector was replaced at admission expiry: generation=%d", generation)
-	default:
+		t.Fatalf("healthy connector was replaced with generation %d", generation)
+	case <-time.After(100 * time.Millisecond):
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

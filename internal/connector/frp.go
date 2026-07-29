@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	frpclient "github.com/fatedier/frp/client"
@@ -21,10 +22,12 @@ var (
 
 type FRPClient interface {
 	Run(context.Context) error
+	Retire() error
 	Close()
 	GracefulClose(time.Duration)
 	ProxyRunning(string) bool
 }
+type selectedFRPTransport interface{ SelectedTransport() Transport }
 
 type FRPFactory func(Admission, Transport) (FRPClient, error)
 
@@ -34,6 +37,7 @@ type FRPDialerConfig struct {
 	ProxyCheckInterval    time.Duration
 	ProxyFailureThreshold int
 	RouteKinds            []string
+	PreferencePath        string
 }
 
 type FRPDialer struct {
@@ -51,6 +55,11 @@ func NewFRPDialer(config FRPDialerConfig) (*FRPDialer, error) {
 	}
 	if config.Factory == nil {
 		config.Factory = func(admission Admission, transport Transport) (FRPClient, error) {
+			if transport == Auto {
+				return newFRPClientForKinds(admission, transport, routeKinds, func(ctx context.Context, cfg *v1.ClientCommonConfig) frpclient.Connector {
+					return newRacingConnector(ctx, cfg, config.PreferencePath)
+				})
+			}
 			return newFRPClientForKinds(admission, transport, routeKinds, nil)
 		}
 	}
@@ -78,8 +87,11 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 	// session must outlive Accept, whose context is canceled immediately after
 	// admission completes; Connection.Close owns the established lifetime.
 	runCtx, cancel := context.WithCancel(context.Background())
-	c := &frpConnection{client: client, cancel: cancel, done: make(chan error, 1), closed: make(chan struct{})}
-	go func() { c.done <- client.Run(runCtx) }()
+	c := &frpConnection{client: client, cancel: cancel, done: make(chan error, 1), closed: make(chan struct{}), stopped: make(chan struct{}), transport: transport}
+	go func() {
+		defer close(c.stopped)
+		c.done <- client.Run(runCtx)
+	}()
 	deadline := time.NewTimer(d.config.ReadyTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -94,6 +106,9 @@ func (d *FRPDialer) Dial(ctx context.Context, transport Transport, admission Adm
 			}
 		}
 		if ready {
+			if selected, ok := client.(selectedFRPTransport); ok {
+				c.transport = selected.SelectedTransport()
+			}
 			go c.monitorProxies(admission, routes, d.config.ProxyCheckInterval, d.config.ProxyFailureThreshold)
 			return c, nil
 		}
@@ -129,11 +144,13 @@ func (d *FRPDialer) selectedRoutes(routes []RouteHandoff) []RouteHandoff {
 }
 
 type frpConnection struct {
-	client FRPClient
-	cancel context.CancelFunc
-	done   chan error
-	closed chan struct{}
-	once   sync.Once
+	client    FRPClient
+	cancel    context.CancelFunc
+	done      chan error
+	closed    chan struct{}
+	stopped   chan struct{}
+	transport Transport
+	once      sync.Once
 }
 
 func (c *frpConnection) monitorProxies(admission Admission, routes []RouteHandoff, interval time.Duration, threshold int) {
@@ -143,6 +160,8 @@ func (c *frpConnection) monitorProxies(admission Admission, routes []RouteHandof
 	for {
 		select {
 		case <-c.closed:
+			return
+		case <-c.stopped:
 			return
 		case <-ticker.C:
 			running := true
@@ -185,20 +204,36 @@ func (c *frpConnection) Drain(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+func (c *frpConnection) Retire() error { return c.client.Retire() }
 func (c *frpConnection) Close() error {
 	c.once.Do(func() { close(c.closed); c.cancel(); c.client.Close() })
 	return nil
 }
-func (c *frpConnection) Done() <-chan error { return c.done }
+func (c *frpConnection) Done() <-chan error           { return c.done }
+func (c *frpConnection) SelectedTransport() Transport { return c.transport }
 
-type nativeFRPClient struct{ service *frpclient.Service }
+type nativeFRPClient struct {
+	service  *frpclient.Service
+	selected *atomic.Value
+}
 
 func (c *nativeFRPClient) Run(ctx context.Context) error { return c.service.Run(ctx) }
+func (c *nativeFRPClient) Retire() error                 { return c.service.UpdateAllConfigurer(nil, nil) }
 func (c *nativeFRPClient) Close()                        { c.service.Close() }
 func (c *nativeFRPClient) GracefulClose(d time.Duration) { c.service.GracefulClose(d) }
 func (c *nativeFRPClient) ProxyRunning(name string) bool {
 	status, ok := c.service.StatusExporter().GetProxyStatus(name)
 	return ok && status != nil && status.Phase == "running"
+}
+func (c *nativeFRPClient) SelectedTransport() Transport {
+	if c.selected == nil {
+		return ""
+	}
+	value := c.selected.Load()
+	if value == nil {
+		return ""
+	}
+	return value.(Transport)
 }
 
 func newFRPClient(admission Admission, transport Transport) (FRPClient, error) {
@@ -210,6 +245,17 @@ func newFRPClientWithConnector(admission Admission, transport Transport, connect
 }
 
 func newFRPClientForKinds(admission Admission, transport Transport, routeKinds map[string]bool, connectorCreator func(context.Context, *v1.ClientCommonConfig) frpclient.Connector) (FRPClient, error) {
+	var selected atomic.Value
+	if transport == Auto && connectorCreator != nil {
+		baseCreator := connectorCreator
+		connectorCreator = func(ctx context.Context, cfg *v1.ClientCommonConfig) frpclient.Connector {
+			created := baseCreator(ctx, cfg)
+			if racing, ok := created.(*racingConnector); ok {
+				racing.onSelected = func(value Transport) { selected.Store(value) }
+			}
+			return created
+		}
+	}
 	configSource := source.NewConfigSource()
 	proxies := make([]v1.ProxyConfigurer, 0, len(admission.Routes))
 	for _, route := range admission.Routes {
@@ -237,14 +283,18 @@ func newFRPClientForKinds(admission Admission, transport Transport, routeKinds m
 		common.Transport.Protocol = "quic"
 	} else {
 		common.Transport.Protocol = "tcp"
-		tcpMux := transport == TCPMux
+		tcpMux := transport == TCPMux || transport == Auto
 		common.Transport.TCPMux = &tcpMux
 	}
-	service, err := frpclient.NewService(frpclient.ServiceOptions{Common: common, ConfigSourceAggregator: source.NewAggregator(configSource), ConnectorCreator: connectorCreator})
+	service, err := frpclient.NewService(frpclient.ServiceOptions{Common: common, ConfigSourceAggregator: source.NewAggregator(configSource), ConnectorCreator: connectorCreator, ExitOnControlLoss: true})
 	if err != nil {
 		return nil, err
 	}
-	return &nativeFRPClient{service: service}, nil
+	client := &nativeFRPClient{service: service}
+	if transport == Auto {
+		client.selected = &selected
+	}
+	return client, nil
 }
 
 func connectorPort(endpoint EdgeEndpoint, transport Transport) int {

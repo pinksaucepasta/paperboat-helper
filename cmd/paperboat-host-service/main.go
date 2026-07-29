@@ -24,7 +24,7 @@ func main() {
 	artifactPublicKey := flags.String("artifact-public-key", "", "trusted release artifact public key")
 	listenAddress := flags.String("listen-address", "", "worker loopback health address")
 	_ = flags.Parse(os.Args[1:])
-	if os.Geteuid() != 0 || *uid < 1 || *gid < 1 || *artifactPublicKey == "" || !validLoopbackAddress(*listenAddress) || flags.NArg() != 0 {
+	if os.Geteuid() != 0 || *uid < 0 || *gid < 0 || *artifactPublicKey == "" || !validLoopbackAddress(*listenAddress) || flags.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "paperboat-host-service: invalid invocation")
 		os.Exit(2)
 	}

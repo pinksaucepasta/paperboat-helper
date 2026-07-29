@@ -3,6 +3,8 @@ package process
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/pty"
@@ -17,9 +19,17 @@ func (l *recordingLauncher) Launch(_ context.Context, request LaunchRequest) (se
 }
 
 func TestModeLauncherSelectsValidatedShell(t *testing.T) {
+	shellPath := filepath.Join(t.TempDir(), "shell")
+	if err := os.WriteFile(shellPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolvedShellPath, err := filepath.EvalSymlinks(shellPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	herdr := &recordingLauncher{}
 	runtime := &sessions{}
-	launcher, err := NewModeLauncher(herdr, "/bin/sh", []string{"PATH=/usr/bin:/bin", "SHELL=/bin/sh", "TERM=xterm"}, runtime)
+	launcher, err := NewModeLauncher(herdr, shellPath, []string{"PATH=/usr/bin:/bin", "SHELL=" + shellPath, "TERM=xterm"}, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +42,7 @@ func TestModeLauncherSelectsValidatedShell(t *testing.T) {
 		t.Fatalf("herdr calls=%d shell creates=%d", len(herdr.calls), len(runtime.created))
 	}
 	command := runtime.created[0].Command
-	if command.Path != "/bin/sh" || len(command.Args) != 1 || command.Args[0] != "-l" || command.CWD != "/tmp" || command.Dimensions != dimensions {
+	if command.Path != resolvedShellPath || len(command.Args) != 1 || command.Args[0] != "-l" || command.CWD != "/tmp" || command.Dimensions != dimensions {
 		t.Fatalf("command = %#v", command)
 	}
 	if environmentValue(command.Env, "TERM") != "xterm-ghostty" || environmentValue(command.Env, "COLORTERM") != "truecolor" {

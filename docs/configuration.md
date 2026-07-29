@@ -16,7 +16,7 @@ Current environment inputs:
 Protocol maxima are 64 KiB structured frames, 256 KiB terminal frames, 1 MiB pending output
 per attachment, 15-second heartbeat, 45-second peer timeout, and five-minute mutation
 deadline. Local/credential configuration may lower but never raise frozen maxima. Default
-upload size is 20 MiB and retention is 24 hours, both lowerable by credentials.
+upload size is 50 MiB and retention is 24 hours, both lowerable by credentials.
 
 Default resource ceilings are 64 sessions, 16 attachments per session, 10,000 retained
 input decisions per session, 4 MiB output history per session, two concurrent uploads, 128

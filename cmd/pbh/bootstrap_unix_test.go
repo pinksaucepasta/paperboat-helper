@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -24,6 +26,22 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
 )
+
+func TestConfirmRootBootstrapRequiresExplicitYes(t *testing.T) {
+	for _, input := range []string{"", "y\n", "YES\n", "no\n"} {
+		var output bytes.Buffer
+		if err := confirmRootBootstrap(bufio.NewReader(strings.NewReader(input)), &output); err == nil {
+			t.Fatalf("input %q was accepted", input)
+		}
+		if !strings.Contains(output.String(), "full control of this machine") {
+			t.Fatalf("warning missing for input %q: %q", input, output.String())
+		}
+	}
+	var output bytes.Buffer
+	if err := confirmRootBootstrap(bufio.NewReader(strings.NewReader("yes\n")), &output); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type recordingEnrollmentClient struct{ calls int }
 

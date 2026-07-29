@@ -13,6 +13,7 @@ type fakeFRPClient struct {
 	running  atomic.Bool
 	closed   atomic.Bool
 	graceful atomic.Bool
+	retired  atomic.Bool
 	exited   atomic.Bool
 }
 
@@ -22,6 +23,7 @@ type drainingFRPClient struct {
 }
 
 func (c *drainingFRPClient) Run(context.Context) error { <-c.done; return nil }
+func (c *drainingFRPClient) Retire() error             { return nil }
 func (c *drainingFRPClient) Close()                    {}
 func (c *drainingFRPClient) GracefulClose(duration time.Duration) {
 	c.duration.Store(int64(duration))
@@ -35,6 +37,7 @@ func (c *fakeFRPClient) Run(ctx context.Context) error {
 	c.exited.Store(true)
 	return ctx.Err()
 }
+func (c *fakeFRPClient) Retire() error               { c.retired.Store(true); return nil }
 func (c *fakeFRPClient) Close()                      { c.closed.Store(true) }
 func (c *fakeFRPClient) GracefulClose(time.Duration) { c.graceful.Store(true) }
 func (c *fakeFRPClient) ProxyRunning(string) bool    { return c.running.Load() }
@@ -88,6 +91,9 @@ func TestFRPDialerConnectionOutlivesReadinessContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
+	if err := connection.Retire(); err != nil || !client.retired.Load() {
+		t.Fatalf("retire err=%v called=%t", err, client.retired.Load())
+	}
 	time.Sleep(20 * time.Millisecond)
 	if client.exited.Load() {
 		t.Fatal("established FRP session inherited readiness cancellation")
@@ -184,11 +190,18 @@ func TestFRPDialerSelectsOnlyOwnedRouteKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	combined, err := NewFRPDialer(FRPDialerConfig{RouteKinds: []string{"helper_https_wss", "preview_public_https_wss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if routes := terminal.selectedRoutes(value.Routes); len(routes) != 1 || routes[0].Kind != "helper_https_wss" {
 		t.Fatalf("terminal routes = %+v", routes)
 	}
 	if routes := preview.selectedRoutes(value.Routes); len(routes) != 1 || routes[0].Kind != "preview_public_https_wss" {
 		t.Fatalf("preview routes = %+v", routes)
+	}
+	if routes := combined.selectedRoutes(value.Routes); len(routes) != 2 {
+		t.Fatalf("combined routes = %+v", routes)
 	}
 	if _, err := NewFRPDialer(FRPDialerConfig{RouteKinds: []string{"unsupported"}}); !errors.Is(err, ErrFRPInvalid) {
 		t.Fatalf("unsupported route kind error = %v", err)

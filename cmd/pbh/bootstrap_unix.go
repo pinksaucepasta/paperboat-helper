@@ -46,6 +46,27 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	if err := promptBootstrapValue(reader, stderr, "User machine name", name); err != nil {
 		return err
 	}
+	account, err := user.Current()
+	if err != nil || account.Username == "" {
+		return errors.New("could not resolve enrolled user")
+	}
+	group, err := user.LookupGroupId(account.Gid)
+	if err != nil || group.Name == "" {
+		return errors.New("could not resolve enrolled group")
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil || uid < 0 {
+		return errors.New("could not resolve enrolled uid")
+	}
+	gid, err := strconv.Atoi(account.Gid)
+	if err != nil || gid < 0 {
+		return errors.New("could not resolve enrolled gid")
+	}
+	if uid == 0 {
+		if err := confirmRootBootstrap(reader, stderr); err != nil {
+			return err
+		}
+	}
 	resolvedShell, err := resolveUserShell(*shell, os.Getenv)
 	if err != nil {
 		return err
@@ -105,22 +126,6 @@ func runBootstrap(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return failBootstrapInstallation(ctx, err, material, *stateRoot, "service_install")
-	}
-	account, err := user.Current()
-	if err != nil || account.Username == "" {
-		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled user"), material, *stateRoot, "service_install")
-	}
-	group, err := user.LookupGroupId(account.Gid)
-	if err != nil || group.Name == "" {
-		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled group"), material, *stateRoot, "service_install")
-	}
-	uid, err := strconv.Atoi(account.Uid)
-	if err != nil || uid < 1 {
-		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled uid"), material, *stateRoot, "service_install")
-	}
-	gid, err := strconv.Atoi(account.Gid)
-	if err != nil || gid < 1 {
-		return failBootstrapInstallation(ctx, errors.New("could not resolve enrolled gid"), material, *stateRoot, "service_install")
 	}
 	commandDirectory := filepath.Join(home, ".local", "bin")
 	servicePath := os.Getenv("PATH")
@@ -615,6 +620,19 @@ func promptBootstrapValue(reader *bufio.Reader, output io.Writer, label string, 
 	*value = strings.TrimSpace(line)
 	if *value == "" {
 		return fmt.Errorf("%s is required", strings.ToLower(label))
+	}
+	return nil
+}
+
+func confirmRootBootstrap(reader *bufio.Reader, output io.Writer) error {
+	fmt.Fprintln(output, "Warning: installing Paperboat for root gives remote terminal sessions, processes, and configuration full control of this machine.")
+	fmt.Fprint(output, "Type \"yes\" to install and run Paperboat as root: ")
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if strings.TrimSpace(line) != "yes" {
+		return errors.New("root installation was not confirmed")
 	}
 	return nil
 }

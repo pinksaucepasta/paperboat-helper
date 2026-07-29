@@ -93,6 +93,26 @@ func TestValidateBindsSignedArtifactAndInvokingUID(t *testing.T) {
 	}
 }
 
+func TestValidRunIdentityAllowsOnlyNormalUsersOrRoot(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		request Request
+		want    bool
+	}{
+		{name: "normal user", request: Request{User: "alice", UID: 1000, GID: 1000}, want: true},
+		{name: "root", request: Request{User: "root", UID: 0, GID: 0}, want: true},
+		{name: "zero uid non-root", request: Request{User: "alice", UID: 0, GID: 0}},
+		{name: "root name with non-root ids", request: Request{User: "root", UID: 1000, GID: 1000}, want: true},
+		{name: "zero group", request: Request{User: "alice", UID: 1000, GID: 0}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validRunIdentity(test.request); got != test.want {
+				t.Fatalf("validRunIdentity()=%v want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsSymlinkedArtifact(t *testing.T) {
 	request := validRequest(t)
 	link := filepath.Join(t.TempDir(), "pbh")

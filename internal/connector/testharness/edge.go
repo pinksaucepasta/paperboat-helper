@@ -88,6 +88,8 @@ func (c *Client) Run(ctx context.Context) error {
 	return runCtx.Err()
 }
 
+func (c *Client) Retire() error { return nil }
+
 func (c *Client) Close() {
 	c.mu.Lock()
 	c.closed = true
