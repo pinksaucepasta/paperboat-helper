@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,6 +73,126 @@ func TestStorePersistsSessionAndOutputAcrossReopen(t *testing.T) {
 	info, err := os.Stat(filepath.Join(root, "state.db"))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%v err=%v", info.Mode().Perm(), err)
+	}
+}
+
+func TestFileTransfersPersistOffsetsPendingRecipientAndReceipt(t *testing.T) {
+	state, root := openStore(t, nil)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	transfer := FileTransfer{ID: "ft_1", BatchID: "fb_1", Direction: "pbh_to_pb", SessionID: "ses_1", ClientID: "cli_1", Basename: "empty.bin", Size: 0, SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute)}
+	if err := state.CreateFileTransfers(context.Background(), []FileTransfer{transfer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteFileTransfer(context.Background(), transfer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Open(context.Background(), Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	pending, err := state.PendingFileTransfers(context.Background(), "cli_1", "ses_1", now, 10)
+	if err != nil || len(pending) != 1 || pending[0].ID != transfer.ID {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	wrong, err := state.PendingFileTransfers(context.Background(), "cli_2", "ses_1", now, 10)
+	if err != nil || len(wrong) != 0 {
+		t.Fatalf("wrong recipient pending=%#v err=%v", wrong, err)
+	}
+	if err := state.ReceiptFileTransfer(context.Background(), transfer.ID, "cli_1", "stored", "Paperboat Inbox/empty.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ReceiptFileTransfer(context.Background(), transfer.ID, "cli_1", "stored", "Paperboat Inbox/empty.bin"); err != nil {
+		t.Fatalf("identical receipt replay: %v", err)
+	}
+	if err := state.ReceiptFileTransfer(context.Background(), transfer.ID, "cli_1", "stored", "Paperboat Inbox/other.bin"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting receipt replay: %v", err)
+	}
+	got, err := state.FileTransfer(context.Background(), transfer.ID)
+	if err != nil || got.State != "delivered" || got.ReceiptPath != "Paperboat Inbox/empty.bin" {
+		t.Fatalf("transfer=%#v err=%v", got, err)
+	}
+}
+
+func TestFileTransferOffsetIsCompareAndSwapAndBounded(t *testing.T) {
+	state, _ := openStore(t, nil)
+	defer state.Close()
+	now := time.Now().UTC()
+	transfer := FileTransfer{ID: "ft_2", BatchID: "fb_2", Direction: "pb_to_pbh", SessionID: "ses_1", ClientID: "cli_1", Basename: "data.bin", Size: 4, SHA256: "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7", CreatedAt: now, ExpiresAt: now.Add(7 * 24 * time.Hour)}
+	if err := state.CreateFileTransfers(context.Background(), []FileTransfer{transfer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CommitFileTransferOffset(context.Background(), transfer.ID, 0, 2); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []struct{ expected, next int64 }{{0, 3}, {2, 5}, {3, 2}} {
+		if err := state.CommitFileTransferOffset(context.Background(), transfer.ID, call.expected, call.next); !errors.Is(err, ErrConflict) {
+			t.Fatalf("offset %+v err=%v", call, err)
+		}
+	}
+	if err := state.CompleteFileTransfer(context.Background(), transfer.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("early complete err=%v", err)
+	}
+	if err := state.CommitFileTransferOffset(context.Background(), transfer.ID, 2, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteFileTransfer(context.Background(), transfer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteFileTransfer(context.Background(), transfer.ID); err != nil {
+		t.Fatalf("completion not idempotent: %v", err)
+	}
+	got, _ := state.FileTransfer(context.Background(), transfer.ID)
+	if got.State != "published" || got.CommittedOffset != 4 {
+		t.Fatalf("transfer=%#v", got)
+	}
+}
+
+func TestFileTransferBatchCreationIsAtomic(t *testing.T) {
+	state, _ := openStore(t, nil)
+	defer state.Close()
+	now := time.Now().UTC()
+	base := FileTransfer{BatchID: "fb_3", Direction: "pb_to_pbh", SessionID: "ses_1", ClientID: "cli_1", Basename: "a", Size: 0, SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	first, second := base, base
+	first.ID, second.ID = "ft_same", "ft_same"
+	if err := state.CreateFileTransfers(context.Background(), []FileTransfer{first, second}); err == nil {
+		t.Fatal("duplicate batch committed")
+	}
+	if _, err := state.FileTransfer(context.Background(), first.ID); err == nil {
+		t.Fatal("partial batch remained")
+	}
+}
+
+func TestStoreMigratesVersionOneToFileTransfers(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(root, "state.db")}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range migrationV1 {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("PRAGMA user_version=1"); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	state, err := Open(context.Background(), Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	now := time.Now().UTC()
+	transfer := FileTransfer{ID: "ft_migrated", BatchID: "fb", Direction: "pb_to_pbh", SessionID: "ses", ClientID: "cli", Basename: "empty", Size: 0, SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := state.CreateFileTransfers(context.Background(), []FileTransfer{transfer}); err != nil {
+		t.Fatal(err)
 	}
 }
 

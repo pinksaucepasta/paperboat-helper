@@ -60,17 +60,18 @@ type admissionRequest struct {
 }
 
 type admissionResponse struct {
-	OperationID     string         `json:"operation_id"`
-	EnvironmentID   string         `json:"environment_id"`
-	HelperID        string         `json:"helper_id"`
-	Generation      uint64         `json:"connector_generation"`
-	EdgePool        string         `json:"edge_pool"`
-	EdgeNodeID      string         `json:"edge_node_id"`
-	EdgeEndpoint    EdgeEndpoint   `json:"edge_endpoint"`
-	Routes          []RouteHandoff `json:"routes"`
-	ProtocolVersion string         `json:"protocol_version"`
-	Capabilities    []string       `json:"capabilities,omitempty"`
-	Credential      string         `json:"credential"`
+	OperationID        string                  `json:"operation_id"`
+	EnvironmentID      string                  `json:"environment_id"`
+	HelperID           string                  `json:"helper_id"`
+	Generation         uint64                  `json:"connector_generation"`
+	EdgePool           string                  `json:"edge_pool"`
+	EdgeNodeID         string                  `json:"edge_node_id"`
+	EdgeEndpoint       EdgeEndpoint            `json:"edge_endpoint"`
+	Routes             []RouteHandoff          `json:"routes"`
+	ProtocolVersion    string                  `json:"protocol_version"`
+	Capabilities       []string                `json:"capabilities,omitempty"`
+	Credential         string                  `json:"credential"`
+	FileTransferPolicy auth.FileTransferPolicy `json:"file_transfer_policy"`
 }
 
 func NewHTTPSAdmissionSource(config AdmissionSourceConfig) (*HTTPSAdmissionSource, error) {
@@ -140,7 +141,7 @@ func (s *HTTPSAdmissionSource) Admission(ctx context.Context) (Admission, error)
 		return Admission{}, ErrAdmissionSourceInvalid
 	}
 	var document admissionResponse
-	if strictJSON(body, &document) != nil || document.OperationID != operationID || document.EnvironmentID != s.config.EnvironmentID || document.HelperID != s.config.HelperID || document.EdgePool != s.config.EdgePool || !identifierPattern.MatchString(document.EdgeNodeID) || document.ProtocolVersion != "1.0" || document.Generation == 0 || len(document.Credential) < 32 || len(document.Credential) > 8192 || !validCapabilities(document.Capabilities) || !validEndpoint(document.EdgeEndpoint) || !validRoutes(document.Routes) {
+	if strictJSON(body, &document) != nil || document.OperationID != operationID || document.EnvironmentID != s.config.EnvironmentID || document.HelperID != s.config.HelperID || document.EdgePool != s.config.EdgePool || !identifierPattern.MatchString(document.EdgeNodeID) || document.ProtocolVersion != "1.0" || document.Generation == 0 || len(document.Credential) < 32 || len(document.Credential) > 8192 || !validCapabilities(document.Capabilities) || !validEndpoint(document.EdgeEndpoint) || !validRoutes(document.Routes) || !validFileTransferPolicy(document.FileTransferPolicy) {
 		return Admission{}, ErrAdmissionSourceInvalid
 	}
 	claims, err := s.config.Verifier.Verify(ctx, document.Credential, auth.Policy{Issuer: s.config.Issuer, Audience: "paperboat-edge", CredentialClass: "connector_admission", Scopes: []string{"connector:admit"}, EnvironmentID: s.config.EnvironmentID, HelperID: s.config.HelperID, ConnectorGeneration: document.Generation, EdgePool: s.config.EdgePool, EdgeNodeID: document.EdgeNodeID, MaxLifetime: 5 * time.Minute, SingleUse: true})
@@ -148,10 +149,14 @@ func (s *HTTPSAdmissionSource) Admission(ctx context.Context) (Admission, error)
 		return Admission{}, err
 	}
 	expires := time.Unix(claims.ExpiresAt, 0).UTC()
-	if claims.JTI == "" || claims.EdgePool != s.config.EdgePool || !expires.After(s.config.Clock.Now()) {
+	if claims.JTI == "" || claims.EdgePool != s.config.EdgePool || !expires.After(s.config.Clock.Now()) || claims.FileTransferPolicy == nil || *claims.FileTransferPolicy != document.FileTransferPolicy {
 		return Admission{}, ErrAdmissionSourceInvalid
 	}
-	return Admission{OperationID: document.OperationID, JTI: claims.JTI, Credential: document.Credential, EnvironmentID: document.EnvironmentID, HelperID: document.HelperID, Generation: document.Generation, EdgePool: claims.EdgePool, EdgeNodeID: claims.EdgeNodeID, Endpoint: document.EdgeEndpoint, Routes: append([]RouteHandoff(nil), document.Routes...), ProtocolVersion: document.ProtocolVersion, ExpiresAt: expires}, nil
+	return Admission{OperationID: document.OperationID, JTI: claims.JTI, Credential: document.Credential, EnvironmentID: document.EnvironmentID, HelperID: document.HelperID, Generation: document.Generation, EdgePool: claims.EdgePool, EdgeNodeID: claims.EdgeNodeID, Endpoint: document.EdgeEndpoint, Routes: append([]RouteHandoff(nil), document.Routes...), ProtocolVersion: document.ProtocolVersion, ExpiresAt: expires, FileTransferPolicy: document.FileTransferPolicy}, nil
+}
+
+func validFileTransferPolicy(policy auth.FileTransferPolicy) bool {
+	return policy.Revision != "" && policy.MaxFileBytes > 0 && policy.MaxFileBytes <= 50<<20 && policy.MaxBatchFiles > 0 && policy.MaxBatchFiles <= 10 && policy.MaxBatchBytes >= policy.MaxFileBytes && policy.MaxBatchBytes <= 500<<20 && policy.MaxConcurrentTransfers > 0 && policy.MaxConcurrentTransfers <= 2 && policy.RetentionSeconds > 0 && policy.DeliveryTimeoutSeconds > 0 && policy.MaxPendingSpoolBytes >= policy.MaxBatchBytes
 }
 
 func strictJSON(data []byte, target any) error {

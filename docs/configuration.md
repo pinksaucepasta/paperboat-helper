@@ -9,25 +9,22 @@ Current environment inputs:
 - `PAPERBOAT_HELPER_STATE_ROOT`: absolute private state directory; defaults under the user
   state directory (`$XDG_STATE_HOME/paperboat/helper` or `~/.local/state/paperboat/helper`
   on Linux, and Application Support on macOS).
-- `PAPERBOAT_HELPER_UPLOAD_ROOT`: absolute private staged-image cache; defaults to
-  `$XDG_CACHE_HOME/paperboat/uploads`, `~/.cache/paperboat/uploads`, or the macOS Caches
-  directory.
 
 Protocol maxima are 64 KiB structured frames, 256 KiB terminal frames, 1 MiB pending output
 per attachment, 15-second heartbeat, 45-second peer timeout, and five-minute mutation
-deadline. Local/credential configuration may lower but never raise frozen maxima. Default
-upload size is 50 MiB and retention is 24 hours, both lowerable by credentials.
+deadline. Local configuration may lower but never raise frozen maxima. File-transfer limits
+come from the signed connector-admission policy.
 
 Default resource ceilings are 64 sessions, 16 attachments per session, 10,000 retained
-input decisions per session, 4 MiB output history per session, two concurrent uploads, 128
+input decisions per session, 4 MiB output history per session, two concurrent file transfers, 128
 preview targets, eight concurrent target probes, 32 concurrent protocol operations, and
 1,000 queued activity events. Static configuration may tune these values within reviewed
 hard bounds. Startup rejects zero, partial, or excessive values; saturation returns a typed
 resource limit before side effects or unbounded body reads.
 
 The enrolled user's state root owns SQLite session/history/input/operation records and
-scoped generated artifacts. Short-lived staged images live separately in the upload cache,
-use flat helper-generated names, and are removed by bounded retention cleanup. Root-owned availability, install, and update journals live in
+durable file-transfer metadata and spool content. Bounded cleanup applies the signed
+retention and delivery policy. Root-owned availability, install, and update journals live in
 `/var/lib/paperboat` on Linux or `/Library/Application Support/Paperboat` on macOS. Direct database edits, cross-version copying without the
 compatibility gate, symlinked roots, and group/world-writable executables are unsupported.
 Backups must capture SQLite database/WAL/SHM consistently while helper writes are stopped.
@@ -100,20 +97,9 @@ route ownership remain at the edge. Helper WebSockets require the
 same-origin validation. Structured protocol bytes use WebSocket text messages; terminal
 output uses binary messages. Application frames may still span or share WebSocket messages.
 
-Image staging is a separate authenticated `POST` handler. It reserves concurrency and the
-operation journal before reading multipart bytes, accepts exactly one `file` part, and uses
-these required request headers:
-
-- `X-Paperboat-Request-ID`
-- `X-Paperboat-Operation-ID`
-- `X-Paperboat-Deadline-Ms`
-- `X-Paperboat-File-Name`
-- `X-Paperboat-File-Mime`
-- `X-Paperboat-File-Size`
-- `X-Paperboat-File-Sha256`
-
-Multipart filename and MIME must exactly match the headers, and the streamed byte count,
-detected MIME, and SHA-256 must all match before publication. An idempotent replay returns
-the recorded result with `X-Paperboat-Replayed: true` without reading the request body.
-Clients send a known multipart content length and may stream directly from a validated
-seekable descriptor; the helper still enforces its independent body and file limits.
+File transfer uses the authenticated `/v1/file-transfers` resource tree. Uploads reserve
+bounded work before reading content, authenticate before reading request bodies, append with
+`Upload-Offset`, verify SHA-256 and size, and publish a batch atomically. Downloads support
+strong ETags, `Range`, and `If-Match`; receipts are recorded only after durable inbox storage.
+Idempotent replays retain the same transfer and operation IDs without rereading committed
+bytes. The helper applies the accepted signed policy independently of credential expiry.

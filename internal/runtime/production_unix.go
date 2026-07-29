@@ -29,6 +29,7 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
 	"github.com/pinksaucepasta/paperboat-helper/internal/connector"
 	"github.com/pinksaucepasta/paperboat-helper/internal/enrollment"
+	"github.com/pinksaucepasta/paperboat-helper/internal/filetransfer"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/hosted"
 	"github.com/pinksaucepasta/paperboat-helper/internal/hostservice"
@@ -183,7 +184,10 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 	if err != nil {
 		return nil, err
 	}
-	manager, err := connector.New(connector.Config{EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, EdgePool: valueOrRuntime(environ("PAPERBOAT_EDGE_POOL"), "default"), Dialer: dialer, DrainTimeout: 10 * time.Second, Transport: productionConnectorTransport(environ("PAPERBOAT_CONNECTOR_TERMINAL_TRANSPORT"))})
+	transferPolicy := filetransfer.NewPolicyStore(filetransfer.DefaultPolicy)
+	manager, err := connector.New(connector.Config{EnvironmentID: identity.EnvironmentID, HelperID: identity.HelperID, EdgePool: valueOrRuntime(environ("PAPERBOAT_EDGE_POOL"), "default"), Dialer: dialer, DrainTimeout: 10 * time.Second, Transport: productionConnectorTransport(environ("PAPERBOAT_CONNECTOR_TERMINAL_TRANSPORT")), AdmissionAccepted: func(policy auth.FileTransferPolicy) {
+		_ = transferPolicy.Update(filetransfer.Policy{Revision: policy.Revision, MaxFileBytes: policy.MaxFileBytes, MaxBatchFiles: policy.MaxBatchFiles, MaxBatchBytes: policy.MaxBatchBytes, MaxConcurrentTransfers: policy.MaxConcurrentTransfers, RetentionSeconds: policy.RetentionSeconds, DeliveryTimeoutSeconds: policy.DeliveryTimeoutSeconds, MaxPendingSpoolBytes: policy.MaxPendingSpoolBytes})
+	}})
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +329,7 @@ func NewProductionHelper(ctx context.Context, version string, environ func(strin
 		dependencies.ConfigApply = configapply.SyncHandler{Apply: configSyncService.Apply}
 		dependencies.ConfigApplyProof = true
 	}
-	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, ShellPath: agentShell, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal}, dependencies)
+	return NewHelper(ctx, HelperConfig{Runtime: runtimeConfig, ListenAddress: listen, WorkspaceRoot: workspaceRoot, HerdrPath: herdrPath, HerdrVersion: herdrVersion, ShellPath: agentShell, AgentEnvironment: agentEnvironment, EnvironmentID: identity.EnvironmentID, ShutdownTimeout: shutdownTimeout, RecoveryExitSignal: recoveryExitSignal, FileTransferPolicy: transferPolicy}, dependencies)
 }
 
 func writeWorkerLocal(stateRoot, listenAddress string) error {

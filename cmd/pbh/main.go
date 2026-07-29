@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ Usage:
   pbh preview create --name <name> --port <port> --public [--duration <duration> | --indefinite]
   pbh preview list
   pbh preview remove <name>
+  pbh send [--json] <path>...
   pbh doctor [--json]
   pbh service uninstall
   pbh run
@@ -67,6 +69,17 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if args[0] == "preview" {
 		if err := runPreview(context.Background(), args[1:], stdout, stderr); err != nil {
 			writeError(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if args[0] == "send" {
+		if err := runSend(context.Background(), args[1:], stdout, stderr); err != nil {
+			writeError(stderr, err)
+			var invocation *sendInvocationError
+			if errors.As(err, &invocation) {
+				return 2
+			}
 			return 1
 		}
 		return 0

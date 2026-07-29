@@ -96,9 +96,9 @@ func (r staticPolicyResolver) Policy(frame protocol.Frame) (auth.Policy, error) 
 		base.CredentialClass = "terminal_operation"
 		base.Scopes = []string{"terminal:operate"}
 		base.MaxLifetime = 5 * time.Minute
-	case "upload.v1":
-		base.CredentialClass = "file_stage"
-		base.Scopes = []string{"file:stage"}
+	case "file-transfer.v1":
+		base.CredentialClass = "file_transfer"
+		base.Scopes = []string{"file:transfer"}
 		base.MaxLifetime = 5 * time.Minute
 	case "config.apply.v1":
 		if r.helperID == "" {

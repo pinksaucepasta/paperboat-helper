@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/pinksaucepasta/paperboat-helper/internal/auth"
 )
 
 type Transport string
@@ -27,18 +29,19 @@ var (
 )
 
 type Admission struct {
-	OperationID     string
-	JTI             string
-	Credential      string
-	EnvironmentID   string
-	HelperID        string
-	Generation      uint64
-	EdgePool        string
-	EdgeNodeID      string
-	Endpoint        EdgeEndpoint
-	Routes          []RouteHandoff
-	ProtocolVersion string
-	ExpiresAt       time.Time
+	OperationID        string
+	JTI                string
+	Credential         string
+	EnvironmentID      string
+	HelperID           string
+	Generation         uint64
+	EdgePool           string
+	EdgeNodeID         string
+	Endpoint           EdgeEndpoint
+	Routes             []RouteHandoff
+	ProtocolVersion    string
+	ExpiresAt          time.Time
+	FileTransferPolicy auth.FileTransferPolicy
 }
 type EdgeEndpoint struct {
 	Host     string `json:"host"`
@@ -76,13 +79,14 @@ type realClock struct{}
 func (realClock) Now() time.Time { return time.Now().UTC() }
 
 type Config struct {
-	EnvironmentID string
-	HelperID      string
-	EdgePool      string
-	Dialer        Dialer
-	Clock         Clock
-	DrainTimeout  time.Duration
-	Transport     Transport
+	EnvironmentID     string
+	HelperID          string
+	EdgePool          string
+	Dialer            Dialer
+	Clock             Clock
+	DrainTimeout      time.Duration
+	Transport         Transport
+	AdmissionAccepted func(auth.FileTransferPolicy)
 }
 type Result struct {
 	Generation     uint64
@@ -182,6 +186,9 @@ func (m *Manager) Accept(ctx context.Context, admission Admission) (Result, erro
 		m.retired[old] = struct{}{}
 	}
 	m.mu.Unlock()
+	if m.config.AdmissionAccepted != nil {
+		m.config.AdmissionAccepted(admission.FileTransferPolicy)
+	}
 	result := Result{Generation: admission.Generation, Transport: transport, Replaced: old != nil}
 	if old != nil {
 		if err := old.connection.Retire(); err != nil {

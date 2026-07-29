@@ -72,8 +72,12 @@ func admissionSourceFor(t *testing.T, responseBody func(admissionRequest) string
 }
 
 func validAdmissionResponse(input admissionRequest) string {
-	encoded, _ := json.Marshal(admissionResponse{OperationID: input.OperationID, EnvironmentID: input.EnvironmentID, HelperID: input.HelperID, Generation: 3, EdgePool: input.EdgePool, EdgeNodeID: "edge_1", EdgeEndpoint: EdgeEndpoint{Host: "edge.test", Port: 7000}, Routes: []RouteHandoff{{RouteID: "route_1", Revision: 1, Kind: "helper_https_wss", PublicHost: "helper.test", ProxyName: "helper_1", LocalTarget: RouteTarget{Host: "127.0.0.1", Port: 8080}}}, ProtocolVersion: "1.0", Capabilities: []string{"terminal.v2"}, Credential: "test-only-connector-admission-credential"})
+	encoded, _ := json.Marshal(admissionResponse{OperationID: input.OperationID, EnvironmentID: input.EnvironmentID, HelperID: input.HelperID, Generation: 3, EdgePool: input.EdgePool, EdgeNodeID: "edge_1", EdgeEndpoint: EdgeEndpoint{Host: "edge.test", Port: 7000}, Routes: []RouteHandoff{{RouteID: "route_1", Revision: 1, Kind: "helper_https_wss", PublicHost: "helper.test", ProxyName: "helper_1", LocalTarget: RouteTarget{Host: "127.0.0.1", Port: 8080}}}, ProtocolVersion: "1.0", Capabilities: []string{"terminal.v2"}, Credential: "test-only-connector-admission-credential", FileTransferPolicy: testFileTransferPolicy()})
 	return string(encoded)
+}
+
+func testFileTransferPolicy() auth.FileTransferPolicy {
+	return auth.FileTransferPolicy{Revision: "file-transfer-v1", MaxFileBytes: 50 << 20, MaxBatchFiles: 10, MaxBatchBytes: 500 << 20, MaxConcurrentTransfers: 2, RetentionSeconds: 604800, DeliveryTimeoutSeconds: 600, MaxPendingSpoolBytes: 1 << 30}
 }
 
 func TestHTTPSAdmissionSourceVerifiesExactBindingsAndReturnsCredential(t *testing.T) {
@@ -82,7 +86,8 @@ func TestHTTPSAdmissionSourceVerifiesExactBindingsAndReturnsCredential(t *testin
 		if token != "test-only-connector-admission-credential" || policy.Issuer != "https://api.test" || policy.Audience != "paperboat-edge" || policy.CredentialClass != "connector_admission" || policy.EnvironmentID != "env" || policy.HelperID != "helper" || policy.ConnectorGeneration != 3 || policy.EdgePool != "default" || policy.EdgeNodeID != "edge_1" || !policy.SingleUse {
 			return auth.Claims{}, errors.New("incorrect policy")
 		}
-		return auth.Claims{JTI: "jti_admit_0001", EdgePool: "default", EdgeNodeID: "edge_1", ExpiresAt: now.Add(time.Minute).Unix()}, nil
+		transferPolicy := testFileTransferPolicy()
+		return auth.Claims{JTI: "jti_admit_0001", EdgePool: "default", EdgeNodeID: "edge_1", ExpiresAt: now.Add(time.Minute).Unix(), FileTransferPolicy: &transferPolicy}, nil
 	}))
 	admission, err := source.Admission(context.Background())
 	if err != nil {
@@ -93,10 +98,23 @@ func TestHTTPSAdmissionSourceVerifiesExactBindingsAndReturnsCredential(t *testin
 	}
 }
 
+func TestHTTPSAdmissionSourceRejectsSignedPolicyMismatch(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	source := admissionSourceFor(t, validAdmissionResponse, credentialVerifierFunc(func(context.Context, string, auth.Policy) (auth.Claims, error) {
+		policy := testFileTransferPolicy()
+		policy.MaxFileBytes--
+		return auth.Claims{JTI: "jti_admit_0001", EdgePool: "default", EdgeNodeID: "edge_1", ExpiresAt: now.Add(time.Minute).Unix(), FileTransferPolicy: &policy}, nil
+	}))
+	if _, err := source.Admission(context.Background()); !errors.Is(err, ErrAdmissionSourceInvalid) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestHTTPSAdmissionSourceRejectsMalformedCrossBindingAndReplay(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	verifier := credentialVerifierFunc(func(context.Context, string, auth.Policy) (auth.Claims, error) {
-		return auth.Claims{JTI: "jti", EdgePool: "default", EdgeNodeID: "edge_1", ExpiresAt: now.Add(time.Minute).Unix()}, nil
+		policy := testFileTransferPolicy()
+		return auth.Claims{JTI: "jti", EdgePool: "default", EdgeNodeID: "edge_1", ExpiresAt: now.Add(time.Minute).Unix(), FileTransferPolicy: &policy}, nil
 	})
 	for name, response := range map[string]func(admissionRequest) string{
 		"duplicate": func(input admissionRequest) string {

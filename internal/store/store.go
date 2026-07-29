@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	CurrentVersion          = 1
+	CurrentVersion          = 2
 	MaxOperationResultBytes = 64 << 10
 )
 
@@ -89,6 +89,283 @@ type OperationResult struct {
 	ErrorCode   string
 	CompletedAt time.Time
 	ExpiresAt   time.Time
+}
+
+type FileTransfer struct {
+	ID              string    `json:"transfer_id"`
+	BatchID         string    `json:"batch_id"`
+	Direction       string    `json:"direction"`
+	SessionID       string    `json:"session_id"`
+	ClientID        string    `json:"-"`
+	Basename        string    `json:"basename"`
+	Size            int64     `json:"size"`
+	SHA256          string    `json:"sha256"`
+	CommittedOffset int64     `json:"committed_offset"`
+	State           string    `json:"state"`
+	ResultCode      string    `json:"result_code,omitempty"`
+	ReceiptPath     string    `json:"receipt_path,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+func (s *Store) CreateFileTransfers(ctx context.Context, transfers []FileTransfer) error {
+	return s.CreateFileTransfersWithinLimits(ctx, transfers, 0, 0)
+}
+
+func (s *Store) CreateFileTransfersWithinSpool(ctx context.Context, transfers []FileTransfer, maxSpoolBytes int64) error {
+	return s.CreateFileTransfersWithinLimits(ctx, transfers, maxSpoolBytes, 0)
+}
+
+func (s *Store) CreateFileTransfersWithinLimits(ctx context.Context, transfers []FileTransfer, maxSpoolBytes int64, maxActiveBatches int) error {
+	if len(transfers) < 1 || len(transfers) > 10 {
+		return ErrConflict
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if maxActiveBatches > 0 {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT batch_id) FROM file_transfers WHERE state IN ('created','uploading','pending')`).Scan(&active); err != nil {
+			return err
+		}
+		if active >= maxActiveBatches {
+			return ErrConflict
+		}
+	}
+	if maxSpoolBytes > 0 {
+		var used int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(size),0) FROM file_transfers WHERE state IN ('created','uploading','pending')`).Scan(&used); err != nil {
+			return err
+		}
+		var incoming int64
+		for _, transfer := range transfers {
+			incoming += transfer.Size
+		}
+		if incoming < 0 || used > maxSpoolBytes-incoming {
+			return ErrConflict
+		}
+	}
+	for _, transfer := range transfers {
+		if transfer.ID == "" || transfer.BatchID == "" || transfer.Basename == "" || transfer.Size < 0 || transfer.CommittedOffset != 0 || transfer.CreatedAt.IsZero() || transfer.ExpiresAt.IsZero() {
+			return ErrConflict
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO file_transfers(id,batch_id,direction,session_id,client_id,basename,size,sha256,committed_offset,state,result_code,receipt_path,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,0,'created',NULL,NULL,?,?)`, transfer.ID, transfer.BatchID, transfer.Direction, transfer.SessionID, transfer.ClientID, transfer.Basename, transfer.Size, transfer.SHA256, transfer.CreatedAt.UnixNano(), transfer.ExpiresAt.UnixNano()); err != nil {
+			return classify(err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) FileTransfer(ctx context.Context, id string) (FileTransfer, error) {
+	return scanFileTransfer(s.db.QueryRowContext(ctx, fileTransferSelect+` WHERE id=?`, id))
+}
+
+func (s *Store) FileTransfersByBatch(ctx context.Context, batchID string) ([]FileTransfer, error) {
+	if batchID == "" {
+		return nil, ErrConflict
+	}
+	rows, err := s.db.QueryContext(ctx, fileTransferSelect+` WHERE batch_id=? ORDER BY created_at,id`, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var transfers []FileTransfer
+	for rows.Next() {
+		transfer, err := scanFileTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		transfers = append(transfers, transfer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(transfers) == 0 {
+		return nil, ErrConflict
+	}
+	return transfers, nil
+}
+
+func (s *Store) CommitFileTransferOffset(ctx context.Context, id string, expected, next int64) error {
+	if expected < 0 || next < expected {
+		return ErrConflict
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE file_transfers SET committed_offset=?,state='uploading' WHERE id=? AND committed_offset=? AND state IN ('created','uploading') AND ?<=size`, next, id, expected, next)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) CompleteFileTransfer(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE file_transfers SET state=CASE direction WHEN 'pb_to_pbh' THEN 'published' ELSE 'pending' END,result_code=CASE direction WHEN 'pb_to_pbh' THEN 'published' ELSE 'pending' END WHERE id=? AND committed_offset=size AND state IN ('created','uploading')`, id)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		transfer, getErr := s.FileTransfer(ctx, id)
+		if getErr == nil && (transfer.State == "published" || transfer.State == "pending" || transfer.State == "delivered") {
+			return nil
+		}
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) CompleteFileTransferBatch(ctx context.Context, batchID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var total, ready int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN committed_offset=size AND state IN ('created','uploading') THEN 1 ELSE 0 END),0) FROM file_transfers WHERE batch_id=?`, batchID).Scan(&total, &ready); err != nil {
+		return err
+	}
+	if total < 1 || ready != total {
+		var terminal int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM file_transfers WHERE batch_id=? AND state IN ('published','pending','delivered')`, batchID).Scan(&terminal); err == nil && terminal == total {
+			return nil
+		}
+		return ErrConflict
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE file_transfers SET state=CASE direction WHEN 'pb_to_pbh' THEN 'published' ELSE 'pending' END,result_code=CASE direction WHEN 'pb_to_pbh' THEN 'published' ELSE 'pending' END WHERE batch_id=? AND committed_offset=size AND state IN ('created','uploading')`, batchID)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if int(changed) != total {
+		return ErrConflict
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CancelFileTransferBatch(ctx context.Context, batchID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE file_transfers SET state='canceled',result_code='canceled' WHERE batch_id=? AND state IN ('created','uploading','pending')`, batchID)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		var total, canceled int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN state='canceled' THEN 1 ELSE 0 END),0) FROM file_transfers WHERE batch_id=?`, batchID).Scan(&total, &canceled); err == nil && total > 0 && total == canceled {
+			return nil
+		}
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) PendingFileTransfers(ctx context.Context, clientID, sessionID string, now time.Time, limit int) ([]FileTransfer, error) {
+	if clientID == "" || sessionID == "" || limit < 1 || limit > 10 {
+		return nil, ErrConflict
+	}
+	rows, err := s.db.QueryContext(ctx, fileTransferSelect+` WHERE direction='pbh_to_pb' AND client_id=? AND session_id=? AND state='pending' AND expires_at>? ORDER BY created_at,id LIMIT ?`, clientID, sessionID, now.UnixNano(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var transfers []FileTransfer
+	for rows.Next() {
+		transfer, err := scanFileTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		transfers = append(transfers, transfer)
+	}
+	return transfers, rows.Err()
+}
+
+func (s *Store) ExpiredFileTransfers(ctx context.Context, now time.Time) ([]FileTransfer, error) {
+	rows, err := s.db.QueryContext(ctx, fileTransferSelect+` WHERE expires_at<=? AND state IN ('created','uploading','published','pending') ORDER BY expires_at,id LIMIT 100`, now.UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var transfers []FileTransfer
+	for rows.Next() {
+		transfer, err := scanFileTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		transfers = append(transfers, transfer)
+	}
+	return transfers, rows.Err()
+}
+
+func (s *Store) ExpireFileTransfers(ctx context.Context, transfers []FileTransfer) error {
+	if len(transfers) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, transfer := range transfers {
+		state, code := "canceled", "canceled"
+		if transfer.Direction == "pbh_to_pb" {
+			state, code = "failed", "delivery_timeout"
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE file_transfers SET state=?,result_code=? WHERE id=? AND expires_at<=? AND state IN ('created','uploading','published','pending')`, state, code, transfer.ID, transfer.ExpiresAt.UnixNano()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ReceiptFileTransfer(ctx context.Context, id, clientID, resultCode, receiptPath string) error {
+	state := "failed"
+	if resultCode == "stored" {
+		state = "delivered"
+	} else if resultCode == "" {
+		return ErrConflict
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE file_transfers SET state=?,result_code=?,receipt_path=? WHERE id=? AND client_id=? AND direction='pbh_to_pb' AND (state='pending' OR (state IN ('delivered','failed') AND COALESCE(result_code,'')=? AND COALESCE(receipt_path,'')=?))`, state, resultCode, nullableString(receiptPath), id, clientID, resultCode, receiptPath)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) CancelFileTransfer(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE file_transfers SET state='canceled',result_code='canceled' WHERE id=? AND state IN ('created','uploading','pending')`, id)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		transfer, getErr := s.FileTransfer(ctx, id)
+		if getErr == nil && transfer.State == "canceled" {
+			return nil
+		}
+		return ErrConflict
+	}
+	return nil
+}
+
+const fileTransferSelect = `SELECT id,batch_id,direction,session_id,client_id,basename,size,sha256,committed_offset,state,COALESCE(result_code,''),COALESCE(receipt_path,''),created_at,expires_at FROM file_transfers`
+
+func scanFileTransfer(row scanner) (FileTransfer, error) {
+	var transfer FileTransfer
+	var created, expires int64
+	err := row.Scan(&transfer.ID, &transfer.BatchID, &transfer.Direction, &transfer.SessionID, &transfer.ClientID, &transfer.Basename, &transfer.Size, &transfer.SHA256, &transfer.CommittedOffset, &transfer.State, &transfer.ResultCode, &transfer.ReceiptPath, &created, &expires)
+	if err != nil {
+		return FileTransfer{}, err
+	}
+	transfer.CreatedAt, transfer.ExpiresAt = time.Unix(0, created).UTC(), time.Unix(0, expires).UTC()
+	return transfer, nil
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {
@@ -566,12 +843,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range migrationV1 {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return err
+	if version < 1 {
+		for _, statement := range migrationV1 {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version=1"); err != nil {
+	if version < 2 {
+		for _, statement := range migrationV2 {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version=2"); err != nil {
 		return err
 	}
 	if s.hook != nil {
@@ -597,6 +883,12 @@ var migrationV1 = []string{
 	`CREATE TABLE output_events(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,start_sequence INTEGER NOT NULL,end_sequence INTEGER NOT NULL,channel INTEGER NOT NULL CHECK(channel IN (1,2)),data BLOB NOT NULL CHECK(length(data)=end_sequence-start_sequence),PRIMARY KEY(session_id,start_sequence)) STRICT`,
 	`CREATE TABLE input_decisions(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,client_id TEXT NOT NULL,attachment_id TEXT NOT NULL,generation INTEGER NOT NULL,input_id TEXT NOT NULL,request_hash BLOB NOT NULL,status TEXT NOT NULL,bytes_written INTEGER NOT NULL,error_code TEXT,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,client_id,attachment_id,generation,input_id)) STRICT`,
 	`CREATE TABLE operation_results(operation_id TEXT PRIMARY KEY,request_hash BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','completed')),result BLOB,error_code TEXT,completed_at INTEGER,expires_at INTEGER NOT NULL) STRICT`,
+}
+
+var migrationV2 = []string{
+	`CREATE TABLE file_transfers(id TEXT PRIMARY KEY,batch_id TEXT NOT NULL,direction TEXT NOT NULL CHECK(direction IN ('pb_to_pbh','pbh_to_pb')),session_id TEXT NOT NULL,client_id TEXT NOT NULL,basename TEXT NOT NULL,size INTEGER NOT NULL CHECK(size BETWEEN 0 AND 52428800),sha256 TEXT NOT NULL CHECK(length(sha256)=64),committed_offset INTEGER NOT NULL CHECK(committed_offset BETWEEN 0 AND size),state TEXT NOT NULL CHECK(state IN ('created','uploading','published','pending','delivered','failed','canceled')),result_code TEXT,receipt_path TEXT,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL) STRICT`,
+	`CREATE INDEX file_transfers_pending ON file_transfers(client_id,session_id,created_at) WHERE state='pending'`,
+	`CREATE INDEX file_transfers_expiry ON file_transfers(expires_at)`,
 }
 
 type scanner interface{ Scan(...any) error }

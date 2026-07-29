@@ -2,7 +2,7 @@
 
 The remote Paperboat runtime for hosted environments and approved user machines. It owns
 the outbound tunnel connector, PTYs, durable terminal sessions, Herdr process launch,
-image staging, preview targets, activity, health, and assigned configuration sync.
+bidirectional file transfer, preview targets, activity, health, and assigned configuration sync.
 
 Hosted deployments additionally use the helper for managed environment lifecycle hooks.
 The CLI and web applications never replace or directly administer this runtime.

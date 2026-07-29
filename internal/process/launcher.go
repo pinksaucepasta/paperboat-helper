@@ -42,6 +42,7 @@ func (l *ModeLauncher) Launch(ctx context.Context, request LaunchRequest) (sessi
 		if !ok {
 			return session.Snapshot{}, ErrLaunchRejected
 		}
+		environment = replaceEnvironment(environment, "PAPERBOAT_TERMINAL_SESSION_ID", request.ID)
 		command := pty.Command{Path: l.ShellPath, Args: []string{"-l"}, Env: environment, CWD: request.CWD, Dimensions: request.Dimensions}
 		return l.Sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: command})
 	default:

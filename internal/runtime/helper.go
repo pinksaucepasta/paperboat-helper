@@ -5,6 +5,7 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,12 +14,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	helperconfig "github.com/pinksaucepasta/paperboat-helper/internal/config"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
+	"github.com/pinksaucepasta/paperboat-helper/internal/filetransfer"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/observability"
 	"github.com/pinksaucepasta/paperboat-helper/internal/operation"
@@ -29,7 +32,6 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/server"
 	"github.com/pinksaucepasta/paperboat-helper/internal/session"
 	"github.com/pinksaucepasta/paperboat-helper/internal/store"
-	"github.com/pinksaucepasta/paperboat-helper/internal/upload"
 )
 
 var ErrHelperInvalid = errors.New("invalid helper runtime composition")
@@ -47,6 +49,7 @@ type HelperConfig struct {
 	AgentTokenFile     string
 	ShutdownTimeout    time.Duration
 	RecoveryExitSignal string
+	FileTransferPolicy *filetransfer.PolicyStore
 }
 
 type HelperDependencies struct {
@@ -99,12 +102,17 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	if config.AgentTokenFile == "" {
 		config.AgentTokenFile = filepath.Join(config.Runtime.StateRoot, "agent", "token")
 	}
+	if config.FileTransferPolicy == nil {
+		config.FileTransferPolicy = filetransfer.NewPolicyStore(filetransfer.DefaultPolicy)
+	}
 	if !filepath.IsAbs(config.AgentTokenFile) {
 		return nil, ErrHelperInvalid
 	}
 	config.AgentEnvironment = append(config.AgentEnvironment,
 		"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT=http://"+config.ListenAddress+"/v1/preview-registrations",
+		"PAPERBOAT_FILE_TRANSFER_ENDPOINT=http://"+config.ListenAddress+"/v1/file-transfers",
 		"PAPERBOAT_HELPER_AGENT_TOKEN_FILE="+config.AgentTokenFile,
+		"PAPERBOAT_WORKSPACE_ROOT="+config.WorkspaceRoot,
 	)
 	invalidPreview := dependencies.PreviewService != nil && dependencies.Previews == nil
 	invalidConfigApply := dependencies.ConfigApplyProof && dependencies.ConfigApply == nil
@@ -178,32 +186,52 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	}
 
 	healthSource := &runtimeHealthSource{}
+	writers := filetransfer.NewWriterRegistry()
 	dispatcher, err := server.NewDispatcher(server.DispatcherConfig{
 		Sessions: sessions, Health: healthSource, SessionLauncher: sessionLauncher,
 		WorkspaceRoot: config.WorkspaceRoot, Random: random,
 		Previews: dependencies.Previews, PreviewControl: dependencies.PreviewControl,
 		ConfigApply: dependencies.ConfigApply,
 		Updates:     dependencies.Updates,
+		Writers:     writers,
 	})
 	if err != nil {
 		return nil, err
 	}
-	stager, err := upload.New(upload.Config{
-		Root:          config.Runtime.EffectiveUploadRoot(),
-		MaxConcurrent: resources.MaxConcurrentUploads, Random: random,
+	transferService, err := filetransfer.New(filetransfer.Config{
+		Root: filepath.Join(config.Runtime.StateRoot, "file-transfers"), Store: durable,
+		Random: random, Policy: config.FileTransferPolicy,
 	})
 	if err != nil {
 		return nil, err
 	}
-	uploadHandler, err := server.NewUploadHandler(server.UploadHandlerConfig{
-		Stager: stager, Journal: journal, Authorizer: dependencies.Authorizer,
-		MaxConcurrent:    resources.MaxConcurrentUploads,
-		MutationDeadline: config.Runtime.Limits.MutationDeadline,
+	transferHandler, err := server.NewFileTransferHandler(server.FileTransferHandlerConfig{
+		Service: transferService, Journal: journal, Authorizer: dependencies.Authorizer,
+		AllowDirection: func(_ server.Authorization, direction string) bool { return direction == "pb_to_pbh" },
 	})
 	if err != nil {
 		return nil, err
 	}
-	providers := []protocol.CapabilityProvider{dispatcher, uploadHandler}
+	agentTransferHandler, err := server.NewFileTransferHandler(server.FileTransferHandlerConfig{
+		Service: transferService, Journal: journal, Authorizer: func(string) (server.Authorizer, error) {
+			return loopbackAgentAuthorizer{binding: "helper-agent:" + config.EnvironmentID}, nil
+		},
+		AllowDirection: func(_ server.Authorization, direction string) bool { return direction == "pbh_to_pb" },
+		ResolveClient: func(_ server.Authorization, direction, sessionID string) (string, error) {
+			if direction != "pbh_to_pb" {
+				return "", filetransfer.ErrNoActiveWriter
+			}
+			return writers.Recipient(sessionID)
+		},
+		Owns: func(_ server.Authorization, transfer store.FileTransfer) bool {
+			return transfer.Direction == "pbh_to_pb"
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	transferRoutes := agentFileTransferMux{token: agentToken, agent: agentTransferHandler, public: transferHandler}
+	providers := []protocol.CapabilityProvider{dispatcher}
 	if dependencies.HostedLifecycle != nil {
 		providers = append(providers, dependencies.HostedLifecycle)
 	}
@@ -248,7 +276,8 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/runtime", websocketHandler)
-	mux.Handle("/v1/uploads", uploadHandler)
+	mux.Handle("/v1/file-transfers", transferRoutes)
+	mux.Handle("/v1/file-transfers/", transferRoutes)
 	if dependencies.Previews != nil && dependencies.PreviewControl != nil && config.EnvironmentID != "" {
 		agentHandler, agentErr := preview.NewAgentHandler(preview.AgentHandlerConfig{Token: agentToken, EnvironmentID: config.EnvironmentID, Registry: dependencies.Previews, Control: dependencies.PreviewControl, RoutesChanged: dependencies.PreviewRoutesChanged})
 		if agentErr != nil {
@@ -259,7 +288,11 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(writer).Encode(healthSource.Snapshot())
+		snapshot := healthSource.Snapshot()
+		_ = json.NewEncoder(writer).Encode(struct {
+			health.Snapshot
+			FileTransferPolicy filetransfer.Policy `json:"file_transfer_policy"`
+		}{Snapshot: snapshot, FileTransferPolicy: config.FileTransferPolicy.Current()})
 	})
 	if dependencies.Metrics != nil {
 		mux.Handle("/metrics", dependencies.Metrics.Handler())
@@ -269,9 +302,11 @@ func NewHelper(ctx context.Context, config HelperConfig, dependencies HelperDepe
 		return nil, err
 	}
 	components := make([]Component, 0, 8)
+	transferCleanup := &filetransfer.CleanupWorker{Service: transferService}
 	components = append(components,
 		Component{Capability: "storage", Required: true, Service: shutdownService{shutdown: func(context.Context) error { return durable.Close() }}},
 		Component{Capability: "sessions", Required: true, Service: shutdownService{shutdown: sessions.ShutdownForRecovery}},
+		Component{Capability: "file_transfer_cleanup", Required: true, Service: transferCleanup},
 	)
 	if dependencies.AuthorizationService != nil {
 		components = append(components, Component{Capability: "authorization", Required: false, Service: dependencies.AuthorizationService})
@@ -397,6 +432,31 @@ func (r *lockedReader) Read(buffer []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.reader.Read(buffer)
+}
+
+type loopbackAgentAuthorizer struct{ binding string }
+
+func (a loopbackAgentAuthorizer) Authorize(context.Context, protocol.Frame) (server.Authorization, error) {
+	if a.binding == "" {
+		return server.Authorization{}, ErrHelperInvalid
+	}
+	return server.Authorization{JournalBinding: a.binding}, nil
+}
+
+type agentFileTransferMux struct {
+	token         string
+	agent, public http.Handler
+}
+
+func (m agentFileTransferMux) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	authorization := request.Header.Get("Authorization")
+	scheme, token, ok := strings.Cut(authorization, " ")
+	agent := ok && scheme == "Bearer" && len(token) == len(m.token) && subtle.ConstantTimeCompare([]byte(token), []byte(m.token)) == 1
+	if agent {
+		m.agent.ServeHTTP(writer, request)
+		return
+	}
+	m.public.ServeHTTP(writer, request)
 }
 
 type runtimeHealthSource struct {

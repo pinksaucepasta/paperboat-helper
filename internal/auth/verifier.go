@@ -42,28 +42,40 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Cause }
 
 type Claims struct {
-	Issuer              string   `json:"iss"`
-	Audience            string   `json:"aud"`
-	Subject             string   `json:"sub"`
-	JTI                 string   `json:"jti"`
-	IssuedAt            int64    `json:"iat"`
-	ExpiresAt           int64    `json:"exp"`
-	Scope               []string `json:"scope"`
-	CredentialClass     string   `json:"credential_class"`
-	EnvironmentID       string   `json:"environment_id,omitempty"`
-	UserID              string   `json:"user_id,omitempty"`
-	CLIClientSessionID  string   `json:"cli_client_session_id,omitempty"`
-	HelperID            string   `json:"helper_id,omitempty"`
-	SessionID           string   `json:"session_id,omitempty"`
-	AssignmentID        string   `json:"assignment_id,omitempty"`
-	WarningRevision     string   `json:"warning_revision,omitempty"`
-	ConnectorGeneration uint64   `json:"connector_generation,omitempty"`
-	EdgePool            string   `json:"edge_pool,omitempty"`
-	EdgeNodeID          string   `json:"edge_node_id,omitempty"`
-	CounterEpoch        string   `json:"counter_epoch,omitempty"`
+	Issuer              string              `json:"iss"`
+	Audience            string              `json:"aud"`
+	Subject             string              `json:"sub"`
+	JTI                 string              `json:"jti"`
+	IssuedAt            int64               `json:"iat"`
+	ExpiresAt           int64               `json:"exp"`
+	Scope               []string            `json:"scope"`
+	CredentialClass     string              `json:"credential_class"`
+	EnvironmentID       string              `json:"environment_id,omitempty"`
+	UserID              string              `json:"user_id,omitempty"`
+	CLIClientSessionID  string              `json:"cli_client_session_id,omitempty"`
+	HelperID            string              `json:"helper_id,omitempty"`
+	SessionID           string              `json:"session_id,omitempty"`
+	AssignmentID        string              `json:"assignment_id,omitempty"`
+	WarningRevision     string              `json:"warning_revision,omitempty"`
+	ConnectorGeneration uint64              `json:"connector_generation,omitempty"`
+	EdgePool            string              `json:"edge_pool,omitempty"`
+	EdgeNodeID          string              `json:"edge_node_id,omitempty"`
+	FileTransferPolicy  *FileTransferPolicy `json:"file_transfer_policy,omitempty"`
+	CounterEpoch        string              `json:"counter_epoch,omitempty"`
 	Confirmation        *struct {
 		JKT string `json:"jkt"`
 	} `json:"cnf,omitempty"`
+}
+
+type FileTransferPolicy struct {
+	Revision               string `json:"revision"`
+	MaxFileBytes           int64  `json:"max_file_bytes"`
+	MaxBatchFiles          int    `json:"max_batch_files"`
+	MaxBatchBytes          int64  `json:"max_batch_bytes"`
+	MaxConcurrentTransfers int    `json:"max_concurrent_transfers"`
+	RetentionSeconds       int64  `json:"retention_seconds"`
+	DeliveryTimeoutSeconds int64  `json:"delivery_timeout_seconds"`
+	MaxPendingSpoolBytes   int64  `json:"max_pending_spool_bytes"`
 }
 
 type Policy struct {

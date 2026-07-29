@@ -53,7 +53,7 @@
       "id": "credentials.classes",
       "path": "credentials/classes.json",
       "type": "credential-matrix",
-      "sha256": "65d44277a4aa33b727106fe20fdef26dea4410c091d863189c749ee2bc9c5647",
+      "sha256": "13456290dcbddcf995bb268dd0e855de975cd581956c9a92fd01a61c098ffec5",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
@@ -276,7 +276,7 @@
       "id": "helper.operations",
       "path": "helper/operations.md",
       "type": "specification",
-      "sha256": "3ab9e22b3abd10e70ac5e340b2c542d182a20644a9162e2a9e7ef875a4c0ef69",
+      "sha256": "ae250cfddc27eded89fdbe4dc3a0bf9a340c7bcc6c359842373bffb11aacbfe8",
       "owner": "helper",
       "review": "preview-ownership-review",
       "consumers": [
@@ -290,7 +290,7 @@
       "id": "helper.profiles",
       "path": "helper/profiles.json",
       "type": "capability-matrix",
-      "sha256": "616a162e5c22e68a08add4254f612c4cb7bb9bd5394d382d22102aa5130a7eca",
+      "sha256": "04a67333b0ca12a001035f9eccf7682ee9c37b9af9b0214332a9e89990b1b930",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -354,7 +354,7 @@
       "id": "credentials.claims",
       "path": "schemas/credentials/claims.schema.json",
       "type": "json-schema",
-      "sha256": "becdc96c96c386aa2b8e212649bca32f5704e4a24a39ff154a650b12e32a23eb",
+      "sha256": "fd42a8aae216dd02c1140201317b5cce627b24b1bb89997f8a47d8f3584d4df6",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
@@ -368,7 +368,7 @@
       "id": "edge.admission",
       "path": "schemas/edge/admission.schema.json",
       "type": "json-schema",
-      "sha256": "e09f11b228da95447a60b7b104d7703ec7b629fc64e23e6e079dde8cd7c43ee6",
+      "sha256": "8bfe430fb1f5329fa7a07d6605def2edbfd9f15a19237d9cdcd21a3166253478",
       "owner": "tunnel",
       "review": "initial-review",
       "consumers": [
@@ -406,7 +406,7 @@
       "id": "environment.connection.v1",
       "path": "schemas/environment/connection-v1.schema.json",
       "type": "json-schema",
-      "sha256": "e2cb24c40a5ac1ecf56d223852ef29c2184735aac7c1a85161fdf44b3f50c68b",
+      "sha256": "f55f851ae490b4df64bffcfe61cbbcb313095855a8667b343b2193f7a7c62ce8",
       "owner": "server",
       "review": "frozen-review",
       "consumers": [

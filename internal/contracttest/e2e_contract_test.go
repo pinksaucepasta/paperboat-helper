@@ -31,7 +31,7 @@ func newFakePeer() *fakePeer {
 	return &fakePeer{
 		version: "1.0",
 		capabilities: map[string]bool{
-			"terminal.v2": true, "upload.v1": true, "preview.public.v1": true,
+			"terminal.v2": true, "preview.public.v1": true,
 			"config.apply.v1": true, "health.v1": true,
 		},
 		earliestSequence: 1024,

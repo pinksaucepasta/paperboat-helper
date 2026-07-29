@@ -86,6 +86,7 @@ var allowedEnvironment = map[string]bool{
 	"TERM": true, "COLORTERM": true, "TERM_PROGRAM": true, "TERM_PROGRAM_VERSION": true,
 	"LANG": true, "LC_ALL": true, "LC_CTYPE": true, "NO_COLOR": true,
 	"PAPERBOAT_PREVIEW_REGISTRATION_ENDPOINT": true, "PAPERBOAT_HELPER_AGENT_TOKEN_FILE": true,
+	"PAPERBOAT_FILE_TRANSFER_ENDPOINT": true, "PAPERBOAT_WORKSPACE_ROOT": true, "PAPERBOAT_TERMINAL_SESSION_ID": true,
 }
 
 var allowedClientEnvironment = map[string]bool{
@@ -142,6 +143,7 @@ func (s *Supervisor) Launch(ctx context.Context, request LaunchRequest) (session
 	environment = replaceEnvironment(environment, "XDG_CONFIG_HOME", stateRoot)
 	environment = replaceEnvironment(environment, "HERDR_SOCKET_PATH", serverSocket)
 	environment = replaceEnvironment(environment, "HERDR_CLIENT_SOCKET_PATH", clientSocket)
+	environment = replaceEnvironment(environment, "PAPERBOAT_TERMINAL_SESSION_ID", request.ID)
 	command := pty.Command{Path: s.config.Executable, Args: []string{"--no-session"}, Env: environment, CWD: request.CWD, Dimensions: request.Dimensions}
 	return s.config.Sessions.Create(ctx, session.CreateRequest{ID: request.ID, Name: request.Name, Command: command})
 }

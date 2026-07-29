@@ -9,12 +9,12 @@ import (
 )
 
 func TestBYODNegotiationFiltersHostedAndUnprovedConfig(t *testing.T) {
-	available := map[string]bool{"terminal.v2": true, "health.v1": true, "upload.v1": true, "config.apply.v1": true, "hosted.lifecycle.v1": true}
-	w, err := (Negotiator{Profile: config.BYOD, Available: available}).Negotiate("2.0", "2.0", []string{"terminal.v2", "health.v1", "upload.v1", "config.apply.v1", "hosted.lifecycle.v1", "future.v1"})
+	available := map[string]bool{"terminal.v2": true, "health.v1": true, "config.apply.v1": true, "hosted.lifecycle.v1": true}
+	w, err := (Negotiator{Profile: config.BYOD, Available: available}).Negotiate("2.0", "2.0", []string{"terminal.v2", "health.v1", "config.apply.v1", "hosted.lifecycle.v1", "future.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(w.Capabilities, []string{"health.v1", "terminal.v2", "upload.v1"}) {
+	if !slices.Equal(w.Capabilities, []string{"health.v1", "terminal.v2"}) {
 		t.Fatalf("capabilities=%v", w.Capabilities)
 	}
 }
@@ -42,8 +42,8 @@ type capabilityProvider []string
 func (p capabilityProvider) Capabilities() []string { return append([]string(nil), p...) }
 
 func TestAvailableCapabilitiesDeriveFromImplementedProviders(t *testing.T) {
-	available, err := AvailableCapabilities(capabilityProvider{"terminal.v2", "health.v1"}, capabilityProvider{"upload.v1"})
-	if err != nil || !available["upload.v1"] || available["config.apply.v1"] {
+	available, err := AvailableCapabilities(capabilityProvider{"terminal.v2", "health.v1"}, capabilityProvider{"preview.public.v1"})
+	if err != nil || !available["preview.public.v1"] || available["config.apply.v1"] {
 		t.Fatalf("available=%v err=%v", available, err)
 	}
 	for _, providers := range [][]CapabilityProvider{{capabilityProvider{"terminal.v2"}}, {capabilityProvider{"terminal.v2", "health.v1"}, capabilityProvider{"health.v1"}}, {nil}} {

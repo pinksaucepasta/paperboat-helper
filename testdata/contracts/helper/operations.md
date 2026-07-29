@@ -1,16 +1,60 @@
 # Non-Terminal Helper Operations 1.0
 
-## File staging
+## File transfer
 
-`upload.v1` accepts authenticated streaming multipart data with exactly one file. The
-default maximum is 50 MiB and the credential may lower it. Any syntactically valid MIME
-type is accepted. Names are reduced to a safe basename. Absolute paths, traversal, NUL, device
-files, hard links, and symlinks are rejected. The helper writes to a private temporary file,
-fsyncs, atomically publishes a helper-generated scoped path, and returns its SHA-256. A
-repeated operation ID is idempotent. Partial files are removed on failure or cancellation.
-Staged files expire after 24 hours by default and never later than the credential expiry.
-Concurrent uploads are limited by helper configuration and excess work returns
-`resource_limit` without reading an unbounded body.
+`/v1/file-transfers` accepts opaque regular files in either direction with resumable
+HEAD/PATCH content, SHA-256 verification, idempotent operation IDs, and atomic batch
+publication. Defaults are 50 MiB per file, ten files and 500 MiB per batch, and two active
+streams. MIME is not inspected or restricted. `pb` uses exact `file:transfer` scope;
+`pbh send` uses the durable loopback agent token. Remote files remain for seven days.
+Pending helper-to-CLI deliveries remain for ten minutes within a 1 GiB spool and are pinned
+to one active writer. Cancellation, rejection, checksum failure, expiry, and typed storage
+failures clean partial content.
+
+The same manifest shape is returned for both directions:
+
+```json
+{
+  "transfer_id": "ft_...",
+  "batch_id": "fb_...",
+  "direction": "pb_to_pbh",
+  "session_id": "ses_...",
+  "basename": "archive.bin",
+  "size": 42,
+  "sha256": "lowercase-hex-sha256",
+  "committed_offset": 42,
+  "state": "published",
+  "result_code": "published",
+  "created_at": "2026-07-29T12:00:00Z",
+  "expires_at": "2026-08-05T12:00:00Z"
+}
+```
+
+Recipient client IDs and helper filesystem paths are internal and never appear in a
+manifest. A published `pb_to_pbh` completion result may separately return its opaque
+remote path. A `pbh_to_pb` receipt may return only `Paperboat Inbox/<name>`.
+
+| Method | Resource | Contract |
+| --- | --- | --- |
+| `POST` | `/v1/file-transfers` | Create one idempotent batch and one manifest per declared file. |
+| `GET` | `/v1/file-transfers/{id}` | Inspect current manifest state and result. |
+| `HEAD` | `/v1/file-transfers/{id}/content` | Return committed offset, length, digest, and strong ETag. |
+| `PATCH` | `/v1/file-transfers/{id}/content` | Append `application/offset+octet-stream` at exact `Upload-Offset`. |
+| `POST` | `/v1/file-transfers/{id}/complete` | Verify every file and atomically publish or offer the entire batch. |
+| `GET` | `/v1/file-transfers/pending?session_id=...&wait_seconds=...` | Long-poll offers pinned to the authenticated CLI client. |
+| `GET` | `/v1/file-transfers/{id}/content` | Download with strong `If-Match`, byte `Range`, and resume support. |
+| `POST` | `/v1/file-transfers/{id}/receipt` | Record identical idempotent durable-storage success or a typed failure. |
+| `DELETE` | `/v1/file-transfers/{id}` | Cancel the complete batch and remove incomplete or pending content. |
+
+HTTP/3 and HTTP/2 use identical transfer IDs and helper state. An application HTTP status
+never selects another transport. An uncertain upload is followed by `HEAD`; an interrupted
+download is resumed only after hashing the private partial file. Credential refresh retries
+once with the same operation and transfer IDs. Credential expiry does not alter resource
+retention or state.
+
+Stable file-transfer errors are `invalid_path`, `invalid_size`, `batch_limit`,
+`offset_conflict`, `digest_mismatch`, `no_active_writer`, `recipient_unavailable`,
+`storage_unavailable`, `resource_limit`, `canceled`, and `delivery_timeout`.
 
 ## Preview identity and readiness
 

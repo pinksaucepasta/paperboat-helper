@@ -13,6 +13,7 @@ import (
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/bootstrap"
 	"github.com/pinksaucepasta/paperboat-helper/internal/configapply"
+	"github.com/pinksaucepasta/paperboat-helper/internal/filetransfer"
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
 	"github.com/pinksaucepasta/paperboat-helper/internal/history"
 	"github.com/pinksaucepasta/paperboat-helper/internal/operation"
@@ -41,6 +42,7 @@ type DispatcherConfig struct {
 	WorkspaceRoot   string
 	Random          io.Reader
 	Now             func() time.Time
+	Writers         *filetransfer.WriterRegistry
 }
 
 type Dispatcher struct{ config DispatcherConfig }
@@ -49,6 +51,7 @@ type terminalOutputStream struct {
 	manager      *session.Manager
 	sessionID    string
 	attachmentID string
+	writers      *filetransfer.WriterRegistry
 }
 
 const terminalExitObservationInterval = 100 * time.Millisecond
@@ -148,7 +151,11 @@ func (d *Dispatcher) HandleTerminalInput(_ context.Context, authorization Author
 	if authorization.ClientID == "" || sessionID == "" || attachmentID == "" || generation == 0 || (authorization.SessionID != "" && authorization.SessionID != sessionID) {
 		return session.ErrInvalidInput
 	}
-	return d.config.Sessions.WriteStream(sessionID, attachmentID, generation, data)
+	err := d.config.Sessions.WriteStream(sessionID, attachmentID, generation, data)
+	if err == nil && d.config.Writers != nil {
+		d.config.Writers.Input(sessionID, attachmentID, authorization.ClientID, d.config.Now())
+	}
+	return err
 }
 
 func (d *Dispatcher) HandleTerminalACK(_ context.Context, authorization Authorization, sessionID, attachmentID string, nextSequence uint64) error {
@@ -179,13 +186,16 @@ func (d *Dispatcher) HandleControl(_ context.Context, authorization Authorizatio
 		err = d.config.Sessions.Acknowledge(control.SessionID, control.AttachmentID, control.NextSequence)
 	case "detach":
 		err = d.config.Sessions.Detach(control.SessionID, control.AttachmentID)
+		if err == nil && d.config.Writers != nil {
+			d.config.Writers.Detach(control.SessionID, control.AttachmentID)
+		}
 	default:
 		return failure("invalid_request")
 	}
 	return domainResult(struct{}{}, err)
 }
 
-func (d *Dispatcher) OpenStream(_ context.Context, _ Authorization, capability string, payload json.RawMessage, outcome operation.Outcome, replay bool) (OutputStream, bool, error) {
+func (d *Dispatcher) OpenStream(_ context.Context, authorization Authorization, capability string, payload json.RawMessage, outcome operation.Outcome, replay bool) (OutputStream, bool, error) {
 	if capability != "terminal.v2" || outcome.ErrorCode != "" {
 		return nil, false, nil
 	}
@@ -210,7 +220,10 @@ func (d *Dispatcher) OpenStream(_ context.Context, _ Authorization, capability s
 			return nil, false, err
 		}
 	}
-	return &terminalOutputStream{manager: d.config.Sessions, sessionID: request.SessionID, attachmentID: response.AttachmentID}, true, nil
+	if d.config.Writers != nil {
+		d.config.Writers.Attach(request.SessionID, response.AttachmentID, authorization.ClientID)
+	}
+	return &terminalOutputStream{manager: d.config.Sessions, sessionID: request.SessionID, attachmentID: response.AttachmentID, writers: d.config.Writers}, true, nil
 }
 
 func (s *terminalOutputStream) Next(ctx context.Context) (protocol.BinaryFrame, error) {
@@ -255,7 +268,13 @@ func (s *terminalOutputStream) Next(ctx context.Context) (protocol.BinaryFrame, 
 	}
 }
 
-func (s *terminalOutputStream) Close() error { return s.manager.Detach(s.sessionID, s.attachmentID) }
+func (s *terminalOutputStream) Close() error {
+	err := s.manager.Detach(s.sessionID, s.attachmentID)
+	if s.writers != nil {
+		s.writers.Detach(s.sessionID, s.attachmentID)
+	}
+	return err
+}
 
 type terminalRequest struct {
 	Action         string            `json:"action"`
@@ -362,7 +381,11 @@ func (d *Dispatcher) terminal(ctx context.Context, authorization Authorization, 
 		// structured-frame limit and avoids delivering the same output twice.
 		return result(newTerminalAttachResponse(attachmentID, value))
 	case "detach":
-		return domainResult(struct{}{}, d.config.Sessions.Detach(request.SessionID, request.AttachmentID))
+		err := d.config.Sessions.Detach(request.SessionID, request.AttachmentID)
+		if err == nil && d.config.Writers != nil {
+			d.config.Writers.Detach(request.SessionID, request.AttachmentID)
+		}
+		return domainResult(struct{}{}, err)
 	case "resize":
 		err := d.config.Sessions.Resize(request.SessionID, request.AttachmentID, pty.Dimensions{Columns: request.Columns, Rows: request.Rows}, d.config.Now())
 		return domainResult(struct{}{}, err)

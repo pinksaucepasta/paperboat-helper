@@ -10,7 +10,7 @@ VERSION ?= $(shell ./tools/release-version.sh current)
 COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Version=$(VERSION) -X github.com/pinksaucepasta/paperboat-helper/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: artifact-manifest build check clean complete contracts crash cross-build fmt fmt-check generate integration platform race security soak test tidy verify-toolchain vet
+.PHONY: artifact-manifest build check clean complete contracts crash cross-build fmt fmt-check generate integration platform race real-file-transfer-integration security soak test tidy verify-toolchain vet
 
 contracts:
 	@./testdata/contracts/validate.sh
@@ -50,7 +50,11 @@ race:
 	$(GO) test -race ./...
 
 integration: verify-toolchain contracts
-	$(GO) test -race ./internal/connector/testharness ./internal/process ./internal/preview ./internal/runtime ./internal/server ./internal/upload
+	$(GO) test -race ./internal/connector/testharness ./internal/process ./internal/preview ./internal/runtime ./internal/server
+
+real-file-transfer-integration: verify-toolchain
+	@test -x "$(PAPERBOAT_REAL_CADDY_BINARY)" || { echo "PAPERBOAT_REAL_CADDY_BINARY must name the pinned custom Caddy binary" >&2; exit 1; }
+	PAPERBOAT_REAL_BLOCK_UDP=1 $(GO) test ./internal/server -run TestRealCaddyFRPFileTransferHTTP3AndHTTP2 -count=1 -v
 
 platform: verify-toolchain
 	$(GO) test -race ./internal/process ./internal/pty ./internal/service ./internal/session ./internal/store ./internal/update
@@ -58,10 +62,9 @@ platform: verify-toolchain
 crash: verify-toolchain
 	$(GO) test -race ./internal/store -run 'TestProcessCrashBefore(MigrationCommitReopensCleanly|AppendCommitPreservesAcknowledgedSequence)' -count=20
 	$(GO) test -race ./internal/update -run 'TestRecovery(MatrixPreservesOrRestoresVerifiedArtifact|RejectsInvalidJournalWithoutDeletingUnexplainedState)' -count=10
-	$(GO) test -race ./internal/upload -run 'TestCleanup(ResumesInterruptedTombstoneStates|PreservesAmbiguousHardLinkedDeviceAndDuplicateMetadata)' -count=10
 
 security: verify-toolchain contracts
-	$(GO) test -race ./internal/auth ./internal/connector ./internal/identity ./internal/protocol ./internal/server ./internal/update ./internal/upload
+	$(GO) test -race ./internal/auth ./internal/connector ./internal/identity ./internal/protocol ./internal/server ./internal/update
 
 soak: verify-toolchain
 	$(GO) test -race ./internal/connector/testharness -run TestRepeatedConnectorLifecycleRetainsNoClients -count=5

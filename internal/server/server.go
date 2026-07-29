@@ -1024,8 +1024,6 @@ func componentForCapability(capability string) string {
 	switch capability {
 	case "terminal.v2":
 		return "session"
-	case "upload.v1":
-		return "upload"
 	case "preview.public.v1":
 		return "preview"
 	case "update.signed.v1":
