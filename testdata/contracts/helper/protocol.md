@@ -1,4 +1,4 @@
-# Helper Application Protocol 2.0
+# Helper Application Protocol 1.0
 
 The application protocol runs through the Paperboat edge over either WSS or native QUIC.
 The bearer credential is authenticated once on the native control stream or WSS connection.
@@ -7,7 +7,7 @@ frames use the connection-local stream binding established by attach.
 
 ## Negotiation
 
-The client sends `hello` for exactly version `2.0` before any operation and the helper
+The client sends `hello` for exactly version `1.0` before any operation and the helper
 replies with `welcome`. Failure returns `protocol_incompatible` and closes without creating
 or changing runtime state. Protocol 1.x is not supported. Required capabilities must be
 selected exactly; optional unknown capabilities are ignored.
@@ -42,7 +42,7 @@ their roles are fixed. Unknown kinds, zero or oversized lengths, malformed JSON,
 truncated records are protocol errors. Fragmentation does not alter record boundaries.
 
 Native QUIC uses ALPN `paperboat-terminal/1` on UDP 443. WSS continues at `/v1/runtime`
-with subprotocol `paperboat.terminal.v2`. Both transports use the same scoped bearer
+with subprotocol `paperboat.terminal.v1`. Both transports use the same scoped bearer
 credential, negotiation, application frames, limits, authorization, session state, and
 close semantics. Auxiliary streams are usable only after control authorization succeeds;
 duplicates, incorrect roles or bindings, and incomplete sets are rejected. Control loss
@@ -51,9 +51,16 @@ closes the attachment, and uncertain input is never replayed.
 Structured lifecycle frames are UTF-8 JSON. Attach returns a nonzero connection-local
 `uint32 stream_id`.
 Terminal input, output, cumulative ACK and resize are fixed-header binary messages defined
-by `fixtures/helper/terminal-v2.json`; they carry the stream ID rather than string session
+by `fixtures/helper/terminal-v1.json`; they carry the stream ID rather than string session
 or attachment identifiers. Input and resize sequences start at one for each attached stream
 and remain contiguous. Input frames receive no per-frame response and are never replayed.
+
+Terminal output uses the big-endian fields `opcode:u8`, `channel:u8`, `encoding:u8`,
+`stream_id:u32`, `start_sequence:u64`, `uncompressed_length:u32`, and payload. Encoding
+`0` is raw and `1` is one independent Zstandard frame. Raw payload length must equal the
+declared length; Zstandard must decode to exactly that length without a dictionary,
+concatenated frame, or trailing content. The declared length is bounded by the terminal
+frame limit before decoding. Sequences and ACKs always count decoded PTY bytes.
 
 After all queued terminal bytes have been delivered, an exited or closed terminal emits
 a structured `event` frame with `event: terminal_stream_end`, the session ID, final

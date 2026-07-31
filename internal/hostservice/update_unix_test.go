@@ -224,7 +224,7 @@ func signedUpdatePair(t *testing.T, workerBody, hostBody []byte) (bootstrap.Arti
 	}
 	sign := func(kind string, body []byte) bootstrap.ArtifactManifest {
 		digest := sha256.Sum256(body)
-		manifest := bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV2, Kind: kind, Version: "2026.07.27", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: "https://updates.example.test/" + kind, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
+		manifest := bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV1, Kind: kind, Version: "2026.07.27", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: "https://updates.example.test/" + kind, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
 		payload, _ := json.Marshal(struct {
 			Architecture string `json:"architecture"`
 			ByteLength   int64  `json:"byte_length"`

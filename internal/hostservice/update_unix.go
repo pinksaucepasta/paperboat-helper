@@ -190,7 +190,7 @@ func (m *UpdateManager) validate() error {
 }
 
 func verifyUpdatePair(config UpdateConfig, worker, host bootstrap.ArtifactManifest) error {
-	if bootstrap.VerifyArtifactManifest(worker, config.PublicKey) != nil || bootstrap.VerifyArtifactManifest(host, config.PublicKey) != nil || worker.Schema != bootstrap.ArtifactSchemaV2 || host.Schema != bootstrap.ArtifactSchemaV2 || worker.Kind != bootstrap.ArtifactKindWorker || host.Kind != bootstrap.ArtifactKindHostService || worker.Version != host.Version {
+	if bootstrap.VerifyArtifactManifest(worker, config.PublicKey) != nil || bootstrap.VerifyArtifactManifest(host, config.PublicKey) != nil || worker.Schema != bootstrap.ArtifactSchemaV1 || host.Schema != bootstrap.ArtifactSchemaV1 || worker.Kind != bootstrap.ArtifactKindWorker || host.Kind != bootstrap.ArtifactKindHostService || worker.Version != host.Version {
 		return ErrUpdateInvalid
 	}
 	if worker.Platform != runtime.GOOS || host.Platform != runtime.GOOS || worker.Architecture != runtime.GOARCH || host.Architecture != runtime.GOARCH {

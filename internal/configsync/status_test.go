@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,11 +14,12 @@ func TestStatusRoundTripAndCanonicalStates(t *testing.T) {
 	path := filepath.Join(root, "status.json")
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	status := Status{
-		State: "conflict", RepositoryID: "repo", AssignmentID: "assignment", EnvironmentID: "environment",
+		State: "conflict", Mode: ModeBidirectional, RepositoryID: "repo", AssignmentID: "assignment", EnvironmentID: "environment",
 		HelperID: "helper", HelperGeneration: 2, WarningRevision: "warning-1", PolicyRevision: "policy-1",
-		KeyVersion: 3, SyncRevision: 7, RemoteRevision: "head", UpdatedAt: now,
-		PendingPathCount: 1, Conflicts: []PathSummary{{Path: ".config/tool/settings.json", Bytes: 42, Reason: "changed_both"}},
-		ErrorCode: "config_conflict", RecoveryActions: []string{"keep_local", "keep_remote", "externally_resolved"},
+		SyncRevision: 7, RemoteRevision: "head", UpdatedAt: now,
+		PendingCleanPathCount: 1, ManifestHealth: "healthy", ManifestRevision: strings.Repeat("a", 64),
+		ManagedPathCount: 2, Conflicts: []PathSummary{{Path: ".config/tool/settings.json", Bytes: 42, Reason: "changed_both"}},
+		ErrorCode: "config_conflict", RecoveryActions: []string{"keep_local", "keep_remote"},
 	}
 	if err := WriteStatus(path, status, 10); err != nil {
 		t.Fatal(err)

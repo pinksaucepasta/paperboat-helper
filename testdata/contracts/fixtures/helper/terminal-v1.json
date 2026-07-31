@@ -1,0 +1,151 @@
+{
+  "version": "1.0.0",
+  "websocket_subprotocol": "paperboat.terminal.v1",
+  "message_framing": "one_websocket_message_per_application_frame",
+  "byte_order": "big_endian",
+  "opcodes": {
+    "input": 1,
+    "output": 2,
+    "ack": 3,
+    "resize": 4
+  },
+  "channels": {
+    "stdout": 1,
+    "stderr": 2
+  },
+  "output": {
+    "header_bytes": 19,
+    "encodings": {
+      "raw": 0,
+      "zstd": 1
+    },
+    "max_record_bytes": 262144,
+    "max_uncompressed_bytes": 262125
+  },
+  "cases": [
+    {
+      "case": "input",
+      "valid": true,
+      "wire_base64": "AQAAAAcAAAAAAAAACQAB/w==",
+      "expected": {
+        "stream_id": 7,
+        "input_sequence": 9,
+        "bytes_base64": "AAH/"
+      }
+    },
+    {
+      "case": "output-stderr",
+      "valid": true,
+      "wire_base64": "AgIAAAAACAAAAAAAAAAKAAAAA2Vycg==",
+      "expected": {
+        "channel": 2,
+        "stream_id": 8,
+        "start_sequence": 10,
+        "end_sequence": 13,
+        "bytes_base64": "ZXJy"
+      }
+    },
+    {
+      "case": "ack",
+      "valid": true,
+      "wire_base64": "AwAAAAkAAAAAAAAAew==",
+      "expected": {
+        "stream_id": 9,
+        "next_output_sequence": 123
+      }
+    },
+    {
+      "case": "resize",
+      "valid": true,
+      "wire_base64": "BAAAAAoAeAAoAAAAAAAAAAI=",
+      "expected": {
+        "stream_id": 10,
+        "columns": 120,
+        "rows": 40,
+        "resize_sequence": 2
+      }
+    },
+    {
+      "case": "zero-stream-id",
+      "valid": false,
+      "wire_base64": "AQAAAAAAAAAAAAAAAAABeA==",
+      "error": "invalid_frame"
+    },
+    {
+      "case": "unknown-opcode",
+      "valid": false,
+      "wire_base64": "Yw==",
+      "error": "unsupported_channel"
+    },
+    {
+      "case": "oversized-input",
+      "valid": false,
+      "declared_bytes": 262145,
+      "error": "frame_too_large"
+    },
+    {
+      "case": "output-zstd-agent-log",
+      "valid": true,
+      "wire_base64": "AgEBAAAACQAAAAAAAAANAAAH0Ci1L/1g0AaVAABQYWdlbnQtbG9nCgFUCgMuwzc=",
+      "expected": {
+        "channel": 1,
+        "encoding": 1,
+        "stream_id": 9,
+        "start_sequence": 13,
+        "end_sequence": 2013,
+        "decoded_bytes": 2000,
+        "decoded_sha256": "fb697f2b207fc73bdc89185723190d2bbf5b1cd1423aafc4d6554d90be143010"
+      }
+    },
+    {
+      "case": "output-unknown-encoding",
+      "valid": false,
+      "wire_base64": "AgEHAAAACQAAAAAAAAANAAAH0Ci1L/1g0AaVAABQYWdlbnQtbG9nCgFUCgMuwzc=",
+      "error": "invalid_frame"
+    },
+    {
+      "case": "output-zstd-length-mismatch",
+      "valid": false,
+      "wire_base64": "AgEBAAAACQAAAAAAAAANAAAHzyi1L/1g0AaVAABQYWdlbnQtbG9nCgFUCgMuwzc=",
+      "error": "invalid_frame"
+    },
+    {
+      "case": "output-zstd-trailing-data",
+      "valid": false,
+      "wire_base64": "AgEBAAAACQAAAAAAAAANAAAH0Ci1L/1g0AaVAABQYWdlbnQtbG9nCgFUCgMuwzcA",
+      "error": "invalid_frame"
+    },
+    {
+      "case": "output-raw-max",
+      "valid": true,
+      "generated": {
+        "encoding": 0,
+        "stream_id": 1,
+        "start_sequence": 0,
+        "payload_byte": 120,
+        "uncompressed_length": 262125
+      },
+      "expected": {
+        "end_sequence": 262125
+      }
+    },
+    {
+      "case": "output-zstd-declared-too-large",
+      "valid": false,
+      "wire_base64": "AgEBAAAAAQAAAAAAAAAAAAP/7ig=",
+      "error": "invalid_frame"
+    },
+    {
+      "case": "output-sequence-overflow",
+      "valid": false,
+      "wire_base64": "AgEAAAAAAf/////////+AAAAA2FiYw==",
+      "error": "invalid_frame"
+    },
+    {
+      "case": "output-zero-declared-length",
+      "valid": false,
+      "wire_base64": "AgEAAAAAAQAAAAAAAAAAAAAAAHg=",
+      "error": "invalid_frame"
+    }
+  ]
+}

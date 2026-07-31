@@ -45,7 +45,7 @@ func classifyFrame(c frameCase) string {
 	default:
 		return "unsupported_message_type"
 	}
-	if c.Frame.RequestID == "" || c.Frame.Version != "2.0" {
+	if c.Frame.RequestID == "" || c.Frame.Version != "1.0" {
 		return "invalid_frame"
 	}
 	return ""

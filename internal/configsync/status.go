@@ -32,42 +32,52 @@ type PathSummary struct {
 }
 
 type Status struct {
-	State            string `json:"state"`
-	RepositoryID     string `json:"repository_id,omitempty"`
-	AssignmentID     string `json:"assignment_id,omitempty"`
-	EnvironmentID    string `json:"environment_id,omitempty"`
-	HelperID         string `json:"helper_id,omitempty"`
-	HelperGeneration int64  `json:"helper_generation,omitempty"`
-	WarningRevision  string `json:"warning_revision,omitempty"`
-	PolicyRevision   string `json:"policy_revision,omitempty"`
-	KeyVersion       int64  `json:"key_version,omitempty"`
-	SyncRevision     int64  `json:"sync_revision"`
-	RemoteRevision   string `json:"remote_revision,omitempty"`
-	LeaseID          string `json:"lease_id,omitempty"`
-	FencingToken     int64  `json:"fencing_token,omitempty"`
+	State                 string         `json:"state"`
+	Mode                  AssignmentMode `json:"mode"`
+	RepositoryID          string         `json:"repository_id,omitempty"`
+	AssignmentID          string         `json:"assignment_id,omitempty"`
+	EnvironmentID         string         `json:"environment_id,omitempty"`
+	HelperID              string         `json:"helper_id,omitempty"`
+	HelperGeneration      int64          `json:"helper_generation,omitempty"`
+	WarningRevision       string         `json:"warning_revision,omitempty"`
+	PolicyRevision        string         `json:"policy_revision,omitempty"`
+	SyncRevision          int64          `json:"sync_revision"`
+	RemoteRevision        string         `json:"remote_revision,omitempty"`
+	ManifestHealth        string         `json:"manifest_health,omitempty"`
+	ManifestRevision      string         `json:"manifest_revision,omitempty"`
+	ManagedPathCount      int            `json:"managed_path_count"`
+	PendingCleanPathCount int            `json:"pending_clean_path_count"`
+	LastAppliedRevision   string         `json:"last_applied_revision,omitempty"`
+	LastPublishedRevision string         `json:"last_published_revision,omitempty"`
+	LeaseID               string         `json:"lease_id,omitempty"`
+	FencingToken          int64          `json:"fencing_token,omitempty"`
 
-	LastAttemptAt     *time.Time    `json:"last_attempt_at,omitempty"`
-	LastSuccessfulAt  *time.Time    `json:"last_successful_sync_at,omitempty"`
-	UpdatedAt         time.Time     `json:"updated_at"`
-	PendingPathCount  int           `json:"pending_path_count"`
-	ClassifierPending []PathSummary `json:"classifier_pending,omitempty"`
-	Skipped           []PathSummary `json:"skipped,omitempty"`
-	Conflicts         []PathSummary `json:"conflicts,omitempty"`
-	ErrorCode         string        `json:"error_code,omitempty"`
-	RecoveryActions   []string      `json:"recovery_actions,omitempty"`
+	LastAttemptAt    *time.Time    `json:"last_attempt_at,omitempty"`
+	LastSuccessfulAt *time.Time    `json:"last_successful_sync_at,omitempty"`
+	UpdatedAt        time.Time     `json:"updated_at"`
+	Skipped          []PathSummary `json:"skipped,omitempty"`
+	Conflicts        []PathSummary `json:"conflicts,omitempty"`
+	ErrorCode        string        `json:"error_code,omitempty"`
+	RecoveryActions  []string      `json:"recovery_actions,omitempty"`
 }
 
 func (s Status) Validate(summaryLimit int) error {
 	if _, ok := canonicalStates[s.State]; !ok || summaryLimit < 1 || summaryLimit > 1000 ||
-		s.SyncRevision < 0 || s.PendingPathCount < 0 || s.HelperGeneration < 0 || s.KeyVersion < 0 ||
+		s.SyncRevision < 0 || !s.Mode.Valid() || s.ManagedPathCount < 0 || s.PendingCleanPathCount < 0 ||
+		s.HelperGeneration < 0 ||
 		s.FencingToken < 0 || s.UpdatedAt.IsZero() || len(s.RemoteRevision) > 256 ||
-		len(s.LeaseID) > 128 || len(s.ErrorCode) > 64 ||
+		len(s.LeaseID) > 128 || len(s.ErrorCode) > 64 || len(s.ManifestRevision) > 64 ||
+		len(s.LastAppliedRevision) > 256 || len(s.LastPublishedRevision) > 256 ||
 		(s.ErrorCode != "" && !safeStatusCode.MatchString(s.ErrorCode)) ||
-		len(s.ClassifierPending) > summaryLimit || len(s.Skipped) > summaryLimit || len(s.Conflicts) > summaryLimit ||
+		len(s.Skipped) > summaryLimit || len(s.Conflicts) > summaryLimit ||
 		len(s.RecoveryActions) > 8 {
 		return ErrStatusInvalid
 	}
-	for _, group := range [][]PathSummary{s.ClassifierPending, s.Skipped, s.Conflicts} {
+	if s.ManifestHealth != "" && s.ManifestHealth != "healthy" && s.ManifestHealth != "empty" &&
+		s.ManifestHealth != "missing" && s.ManifestHealth != "invalid" {
+		return ErrStatusInvalid
+	}
+	for _, group := range [][]PathSummary{s.Skipped, s.Conflicts} {
 		for _, item := range group {
 			if !safeRelativeStatusPath(item.Path) || item.Bytes < 0 || !safeStatusCode.MatchString(item.Reason) ||
 				(item.Revision != "" && !safeConflictRevision(item.Revision)) {

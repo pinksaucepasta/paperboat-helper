@@ -72,7 +72,7 @@ func admissionSourceFor(t *testing.T, responseBody func(admissionRequest) string
 }
 
 func validAdmissionResponse(input admissionRequest) string {
-	encoded, _ := json.Marshal(admissionResponse{OperationID: input.OperationID, EnvironmentID: input.EnvironmentID, HelperID: input.HelperID, Generation: 3, EdgePool: input.EdgePool, EdgeNodeID: "edge_1", EdgeEndpoint: EdgeEndpoint{Host: "edge.test", Port: 7000}, Routes: []RouteHandoff{{RouteID: "route_1", Revision: 1, Kind: "helper_https_wss", PublicHost: "helper.test", ProxyName: "helper_1", LocalTarget: RouteTarget{Host: "127.0.0.1", Port: 8080}}}, ProtocolVersion: "1.0", Capabilities: []string{"terminal.v2"}, Credential: "test-only-connector-admission-credential", FileTransferPolicy: testFileTransferPolicy()})
+	encoded, _ := json.Marshal(admissionResponse{OperationID: input.OperationID, EnvironmentID: input.EnvironmentID, HelperID: input.HelperID, Generation: 3, EdgePool: input.EdgePool, EdgeNodeID: "edge_1", EdgeEndpoint: EdgeEndpoint{Host: "edge.test", Port: 7000}, Routes: []RouteHandoff{{RouteID: "route_1", Revision: 1, Kind: "helper_https_wss", PublicHost: "helper.test", ProxyName: "helper_1", LocalTarget: RouteTarget{Host: "127.0.0.1", Port: 8080}}}, ProtocolVersion: "1.0", Capabilities: []string{"terminal.v1"}, Credential: "test-only-connector-admission-credential", FileTransferPolicy: testFileTransferPolicy()})
 	return string(encoded)
 }
 
@@ -127,7 +127,7 @@ func TestHTTPSAdmissionSourceRejectsMalformedCrossBindingAndReplay(t *testing.T)
 		},
 		"capability": func(input admissionRequest) string {
 			valid := validAdmissionResponse(input)
-			return strings.Replace(valid, `"terminal.v2"`, `"BAD"`, 1)
+			return strings.Replace(valid, `"terminal.v1"`, `"BAD"`, 1)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

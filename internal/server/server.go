@@ -600,7 +600,7 @@ func (s *Server) startRequest(frame protocol.Frame, writer *lockedWriter, author
 func (s *terminalConnectionState) bind(authorization Authorization, frame protocol.Frame, outcome operation.Outcome) (uint32, error) {
 	var request terminalRequest
 	var response terminalAttachResponse
-	if frame.Capability != "terminal.v2" || decodeStrict(frame.Payload, &request) != nil || request.Action != "attach" || json.Unmarshal(outcome.Result, &response) != nil || request.SessionID == "" || response.AttachmentID == "" || response.Session.Snapshot.Generation == 0 {
+	if frame.Capability != "terminal.v1" || decodeStrict(frame.Payload, &request) != nil || request.Action != "attach" || json.Unmarshal(outcome.Result, &response) != nil || request.SessionID == "" || response.AttachmentID == "" || response.Session.Snapshot.Generation == 0 {
 		return 0, errors.New("invalid terminal attachment binding")
 	}
 	if !authorization.ExpiresAt.IsZero() && !time.Now().UTC().Before(authorization.ExpiresAt) {
@@ -669,7 +669,7 @@ func (s *Server) stream(ctx context.Context, writer *lockedWriter, conn Connecti
 		if err != nil {
 			var streamEnd *StreamEnd
 			if errors.As(err, &streamEnd) {
-				_ = writer.write(protocol.Frame{Type: "event", RequestID: "stream", Version: protocol.ProtocolVersion, Capability: "terminal.v2", Payload: streamEnd.Payload})
+				_ = writer.write(protocol.Frame{Type: "event", RequestID: "stream", Version: protocol.ProtocolVersion, Capability: "terminal.v1", Payload: streamEnd.Payload})
 				return
 			}
 			var streamError *StreamError
@@ -1022,7 +1022,7 @@ func (s *Server) recordOperation(component, result string) {
 
 func componentForCapability(capability string) string {
 	switch capability {
-	case "terminal.v2":
+	case "terminal.v1":
 		return "session"
 	case "preview.public.v1":
 		return "preview"

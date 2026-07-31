@@ -3,59 +3,57 @@ package configsync
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-
-	"filippo.io/age"
 )
 
-func TestEncryptedRepositoryFormatAndUnsafeSourceValidation(t *testing.T) {
+func TestPlaintextRepositoryRejectsUnsafeChezmoiSource(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(root, "run_once_bad"), []byte("unsafe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	format := EncryptedRepositoryFormat{
-		Format: "paperboat-chezmoi-age", Version: 1, KeyVersion: 1,
-		Recipient: identity.Recipient().String(),
-	}
-	if err := WriteEncryptedRepositoryFormat(root, format); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := ReadEncryptedRepositoryFormat(root); err != nil || got != format {
-		t.Fatalf("format = %#v, %v", got, err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "run_once_bad"), []byte("encrypted"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateEncryptedRepository(root); err == nil {
+	if err := ValidateConfigRepository(root); err == nil {
 		t.Fatal("executable chezmoi source accepted")
 	}
 }
 
-func TestWriteAgeIdentityUsesPrivateCreateOnceFile(t *testing.T) {
+func TestChezmoiSourceConfiguresPlaintextAndAddWithoutEncryption(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, "private", "identity.txt")
-	if err := WriteAgeIdentity(path, "AGE-SECRET-KEY-TEST"); err != nil {
+	runtimeRoot := filepath.Join(root, "runtime")
+	sourceRoot := filepath.Join(root, "source")
+	homeRoot := filepath.Join(root, "home")
+	for _, path := range []string{runtimeRoot, sourceRoot, homeRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	argumentsPath := filepath.Join(root, "arguments")
+	binary := filepath.Join(root, "chezmoi")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argumentsPath + "\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
-		t.Fatalf("identity mode = %v, %v", info.Mode(), err)
-	}
-	if err := WriteAgeIdentity(path, "replacement"); err == nil {
-		t.Fatal("identity overwrite accepted")
-	}
-	if err := EnsureAgeIdentity(path, "replacement"); err != nil {
+	source, err := NewChezmoiSource(ChezmoiSourceConfig{
+		Binary: binary, RuntimeRoot: runtimeRoot, SourceRoot: sourceRoot, HomeRoot: homeRoot,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	value, err := os.ReadFile(path)
-	if err != nil || string(value) != "replacement\n" {
-		t.Fatalf("identity = %q, %v", value, err)
+	if err := source.Add(t.Context(), []string{"config.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := os.ReadFile(filepath.Join(runtimeRoot, "chezmoi.toml"))
+	if err != nil || strings.Contains(string(config), "encryption") || strings.Contains(string(config), "age") {
+		t.Fatalf("chezmoi config = %q, %v", config, err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil || strings.Contains(string(arguments), "encrypt") {
+		t.Fatalf("chezmoi arguments = %q, %v", arguments, err)
 	}
 }

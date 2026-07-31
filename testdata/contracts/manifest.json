@@ -6,22 +6,22 @@
       "id": "cli.behavior",
       "path": "cli/behavior.json",
       "type": "command-behavior",
-      "sha256": "6710acc10156d848f119e3d5c0ee24157ac8a83d39652f9844da8d078221ef64",
+      "sha256": "0c52606834b8309a404a999d7c672d6e5feb77ae298da743f11cc6bc1251a14c",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
       "id": "cli.command-tree",
       "path": "cli/command-tree.json",
       "type": "command-tree",
-      "sha256": "08d25e6e1c66d6577f591228485f2a2ab578c75093d31993a654d34bc7ed382b",
+      "sha256": "fc449e0c425abdb7bbc06e68fa2a0b421a0b931ccebc5fdbc340432a60f2ce17",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
@@ -32,18 +32,18 @@
       "owner": "cli",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
       "id": "compatibility.matrix",
       "path": "compatibility/matrix.json",
       "type": "matrix",
-      "sha256": "480c2a65034c6fc8677848f25341925f7a27c3cca4bc08ba186ed9bebb91240d",
+      "sha256": "363eaeff1e345a7f82bb836d38d7a43ee4f33af84427302bc4ca32f845f9d6d5",
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -53,11 +53,11 @@
       "id": "credentials.classes",
       "path": "credentials/classes.json",
       "type": "credential-matrix",
-      "sha256": "13456290dcbddcf995bb268dd0e855de975cd581956c9a92fd01a61c098ffec5",
+      "sha256": "5ab120cf54db1e13b9e27756e4339c823a74fa0415acbe87a4597f523422fa82",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -67,11 +67,11 @@
       "id": "credentials.lifecycle",
       "path": "credentials/lifecycle.md",
       "type": "specification",
-      "sha256": "0cb0af3e06a51b3a526fa69dde613db8eafa79a52fb5cf7472483c1d8eee2d57",
+      "sha256": "a4e61545b27de43692703bbb53924ca682c22df7eeeee78327e5a1ad45f9ba5b",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -81,7 +81,7 @@
       "id": "edge.control",
       "path": "edge/control.md",
       "type": "specification",
-      "sha256": "89d26cc5af8b38eb45474c86929a99014db1186fae816dc7530e91732fc8bee4",
+      "sha256": "2fb014380ee19cd86b7f3eff0bf071b00ae8339447f2109889dd51e42c66c237",
       "owner": "tunnel",
       "review": "initial-review",
       "consumers": [
@@ -98,7 +98,7 @@
       "owner": "cli",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
@@ -109,18 +109,18 @@
       "owner": "cli",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
       "id": "compatibility.pairs",
       "path": "fixtures/compatibility/pairs.ndjson",
       "type": "compatibility-vectors",
-      "sha256": "28e22f9673e3b79ed57877c58e9113aa756e5d3ea582eefbf4340c61fc6a466b",
+      "sha256": "0889478d760b43eeaa9daf80bca60574d01aa2083935522e5a417f6ac0999be8",
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -130,10 +130,11 @@
       "id": "config-sync.lifecycle.vectors",
       "path": "fixtures/config-sync/lifecycle.json",
       "type": "lifecycle-vectors",
-      "sha256": "d223f6f072857026b9a16de8b03e155a342494c91929d8a49971af22929eaadd",
+      "sha256": "62af015f83cb5b94e34f99abd7dae4fb8bf5cff708011128ec618aa443bcb305",
       "owner": "server-helper",
       "review": "approved-review",
       "consumers": [
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -146,7 +147,7 @@
       "owner": "server",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -156,11 +157,11 @@
       "id": "credentials.terminal-operation.ed25519",
       "path": "fixtures/credentials/terminal-operation.ed25519.json",
       "type": "signing-vector",
-      "sha256": "b3e162677079240670a33d8b00eab72f0cc1a906a17ea113c828240af4e89610",
+      "sha256": "713c8e2f422958d971dff5422e69cf3b9fc8686f747947bfb8461c5f547cfb2c",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -170,10 +171,11 @@
       "id": "edge.control.vectors",
       "path": "fixtures/edge/control.ndjson",
       "type": "operation-vectors",
-      "sha256": "b3e50127c348ffd60741e43e16ab904d71df8c057d3b8eb610ac60dbf4c4f6e6",
+      "sha256": "26f16f3ae6815571c19d9c4993f8f76dfe4cba782340852438ba1e103fe767fb",
       "owner": "tunnel",
       "review": "initial-review",
       "consumers": [
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -183,11 +185,11 @@
       "id": "helper.frame.vectors",
       "path": "fixtures/helper/frames.ndjson",
       "type": "wire-vectors",
-      "sha256": "df9d64c64ccb0e40e4328f254b5a657cee142148b37c53d3f1ed47284d20fbd2",
+      "sha256": "3ef9a7eb96e21535214ddf53e6a6b6a70d12a884ed9771d1378b4cc3878bf8db",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-tunnel"
       ]
@@ -196,26 +198,39 @@
       "id": "helper.operation.vectors",
       "path": "fixtures/helper/operations.ndjson",
       "type": "operation-vectors",
-      "sha256": "b8390e2e58daba0ffcdf161cfe6326ee35af4cbd649e66544ec8e6cc4df07742",
+      "sha256": "a7caf310cc248bcffcea82eff826f383703bec0859fbae8d8dc480f13a12b288",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
     },
     {
-      "id": "helper.terminal-v2.vectors",
-      "path": "fixtures/helper/terminal-v2.json",
+      "id": "helper.terminal-v1.vectors",
+      "path": "fixtures/helper/terminal-v1.json",
       "type": "wire-vectors",
-      "sha256": "ec3aefab299380d3e10128f96f5f537a316e778aa4e8aa6e21284811fac4e3ea",
+      "sha256": "98b8df75882b0db719a451b77e7fca4746eabddf76c530fbc04a694e8004ddf5",
       "owner": "helper",
-      "review": "protocol-2-review",
+      "review": "protocol-1-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
+        "paperboat-tunnel"
+      ]
+    },
+    {
+      "id": "helper.terminal-compression.workloads",
+      "path": "fixtures/helper/terminal-compression-workloads.json",
+      "type": "benchmark-workloads",
+      "sha256": "9c38f897ae8a6cc451b2b0bcc5f2d4da37be0412779204875830868e174bc6a4",
+      "owner": "helper",
+      "review": "terminal-compression-review",
+      "consumers": [
+        "paperboat",
+        "paperboat-helper",
         "paperboat-tunnel"
       ]
     },
@@ -227,7 +242,7 @@
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -237,11 +252,11 @@
       "id": "helper.handshake.negative.unknown-required-field",
       "path": "fixtures/negative/handshake-unknown-required-field.json",
       "type": "negative-fixture",
-      "sha256": "3649cf2d3c9e3ea7c65694cefcd49702da1d990b86cb50f32ad7f35af8f8a78d",
+      "sha256": "be27e5b8768470e7e8468322fd1b596641ba1df63fc9a15671e32e1a905db918",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -254,7 +269,7 @@
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -267,7 +282,7 @@
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -276,11 +291,11 @@
       "id": "helper.operations",
       "path": "helper/operations.md",
       "type": "specification",
-      "sha256": "ae250cfddc27eded89fdbe4dc3a0bf9a340c7bcc6c359842373bffb11aacbfe8",
+      "sha256": "b6ee87e26f8ca698469ab577dec056317615724a29b5d7906793e178e0443ae4",
       "owner": "helper",
       "review": "preview-ownership-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -290,7 +305,7 @@
       "id": "helper.profiles",
       "path": "helper/profiles.json",
       "type": "capability-matrix",
-      "sha256": "04a67333b0ca12a001035f9eccf7682ee9c37b9af9b0214332a9e89990b1b930",
+      "sha256": "393a412b92e0da4d538c9709ce2aa905de13734c11aca2864bcf9e8e1a4e030d",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
@@ -302,11 +317,11 @@
       "id": "helper.protocol",
       "path": "helper/protocol.md",
       "type": "specification",
-      "sha256": "7e6ffd0fa6ca4aec0b263d881c24ad90112cde1e8466b39d563f8c00d592e12a",
+      "sha256": "2c5de79a10d6b0d59f6d78ea2c61b9a7e51b0b12719e2711483be848d9502c52",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-tunnel"
       ]
@@ -319,7 +334,7 @@
       "owner": "operations",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -333,7 +348,7 @@
       "owner": "cli",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
@@ -344,7 +359,7 @@
       "owner": "platform",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -354,11 +369,11 @@
       "id": "credentials.claims",
       "path": "schemas/credentials/claims.schema.json",
       "type": "json-schema",
-      "sha256": "fd42a8aae216dd02c1140201317b5cce627b24b1bb89997f8a47d8f3584d4df6",
+      "sha256": "91ac267d1fa0f4c8ccd230abbeac058dda08a450b0b242478d9bf8dc67a75291",
       "owner": "server",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -368,7 +383,7 @@
       "id": "edge.admission",
       "path": "schemas/edge/admission.schema.json",
       "type": "json-schema",
-      "sha256": "8bfe430fb1f5329fa7a07d6605def2edbfd9f15a19237d9cdcd21a3166253478",
+      "sha256": "8409477ba5f23f35e49bc59f3c16295832c4fe86836d6024573679eae4062a4d",
       "owner": "tunnel",
       "review": "initial-review",
       "consumers": [
@@ -381,7 +396,7 @@
       "id": "edge.route",
       "path": "schemas/edge/route.schema.json",
       "type": "json-schema",
-      "sha256": "864072d65aafe502d1bf069972de712dec0df0bad8bbc6e24838d7d1a08954ec",
+      "sha256": "2302950a1be2e455154ca46627f1213ede57feaeeb02d96fe7d480071f2c8668",
       "owner": "tunnel",
       "review": "initial-review",
       "consumers": [
@@ -406,11 +421,11 @@
       "id": "environment.connection.v1",
       "path": "schemas/environment/connection-v1.schema.json",
       "type": "json-schema",
-      "sha256": "8f3e3afd066b5b0996088ee89707828e0cdb98fd2a08fcb441d5a9afdc9939ba",
+      "sha256": "83dac12dc07646b2f089229be1ad34d65207259465a178cc59a6d2249210da96",
       "owner": "server",
       "review": "frozen-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-server"
       ]
     },
@@ -418,11 +433,11 @@
       "id": "helper.frame",
       "path": "schemas/helper/frame.schema.json",
       "type": "json-schema",
-      "sha256": "daa997b4b9e850e7953a3445e2d31fb98e282eafa8108c5047e85bf9b1b5f413",
+      "sha256": "21572e8016c512c065c6f80cad7294168129ed722b3581acba118e71d0fc6b83",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-tunnel"
       ]
@@ -431,11 +446,11 @@
       "id": "helper.handshake",
       "path": "schemas/helper/handshake.schema.json",
       "type": "json-schema",
-      "sha256": "f3211309f9c1668776b41648706647bac6bbc07809c5e652ed3a1a76051b5b53",
+      "sha256": "cb378f40d8ea9a817eba4e5a323822a2b50fd389e7b8a8d72fdff9aa51c97554",
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -448,7 +463,7 @@
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -461,7 +476,7 @@
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -474,7 +489,7 @@
       "owner": "security",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -488,7 +503,7 @@
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper"
       ]
     },
@@ -500,6 +515,7 @@
       "owner": "server",
       "review": "preview-ownership-review",
       "consumers": [
+        "paperboat",
         "paperboat-helper",
         "paperboat-server",
         "paperboat-tunnel"
@@ -513,7 +529,7 @@
       "owner": "helper",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli",
+        "paperboat",
         "paperboat-helper",
         "paperboat-server"
       ]
@@ -522,11 +538,11 @@
       "id": "cli.command.transcripts",
       "path": "transcripts/cli/commands.json",
       "type": "transcripts",
-      "sha256": "588d412a9c58cea6f5e8e455b18faec651fc6c9e8976100428a281d02eccd268",
+      "sha256": "705fac8de454ca3d04c0a37a1eb09377de5eaff66fe47bda95a0f9aa5079ce6e",
       "owner": "cli",
       "review": "preview-ownership-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
@@ -537,7 +553,7 @@
       "owner": "cli",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     },
     {
@@ -548,7 +564,7 @@
       "owner": "cli",
       "review": "initial-review",
       "consumers": [
-        "paperboat-cli"
+        "paperboat"
       ]
     }
   ]

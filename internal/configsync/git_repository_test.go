@@ -22,8 +22,8 @@ func (s staticAccessSource) RepositoryAccess(context.Context) (RepositoryAccess,
 type committingReconciler struct{}
 
 func (committingReconciler) Reconcile(_ context.Context, root string, remote RemoteSnapshot) (PreparedPublication, error) {
-	path := filepath.Join(root, "encrypted_dot_config.age")
-	if err := os.WriteFile(path, []byte("age-encrypted-data"), 0o600); err != nil {
+	path := filepath.Join(root, "dot_config")
+	if err := os.WriteFile(path, []byte("plaintext-config"), 0o600); err != nil {
 		return PreparedPublication{}, err
 	}
 	repository, err := git.PlainOpen(root)
@@ -34,7 +34,7 @@ func (committingReconciler) Reconcile(_ context.Context, root string, remote Rem
 	if err != nil {
 		return PreparedPublication{}, err
 	}
-	if _, err := worktree.Add("encrypted_dot_config.age"); err != nil {
+	if _, err := worktree.Add("dot_config"); err != nil {
 		return PreparedPublication{}, err
 	}
 	hash, err := worktree.Commit("paperboat config sync", &git.CommitOptions{Author: &object.Signature{Name: "Paperboat", Email: "config@paperboat.invalid", When: time.Unix(1, 0).UTC()}})
@@ -55,14 +55,14 @@ func TestGitRepositoryFetchPublishAndObserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(seedPath, ".paperboat-format"), []byte("paperboat-chezmoi-age-v1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(seedPath, ".pbinclude"), []byte(".config\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	worktree, _ := seed.Worktree()
-	if _, err := worktree.Add(".paperboat-format"); err != nil {
+	if _, err := worktree.Add(".pbinclude"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := worktree.Commit("initialize encrypted config", &git.CommitOptions{Author: &object.Signature{Name: "Paperboat", Email: "config@paperboat.invalid", When: time.Unix(1, 0).UTC()}}); err != nil {
+	if _, err := worktree.Commit("initialize config", &git.CommitOptions{Author: &object.Signature{Name: "Paperboat", Email: "config@paperboat.invalid", When: time.Unix(1, 0).UTC()}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := seed.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{barePath}}); err != nil {

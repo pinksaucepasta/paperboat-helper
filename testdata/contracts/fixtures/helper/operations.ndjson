@@ -4,4 +4,4 @@
 {"case":"preview-register","valid":true,"operation":"preview.register","input":{"logical_name":"web","target_host":"127.0.0.1","target_port":3000,"public_acknowledgement":true}}
 {"case":"preview-private-request","valid":false,"operation":"preview.register","error":"unsupported_preview_policy","input":{"logical_name":"web","target_port":3000,"access":"private"}}
 {"case":"config-stale-revision","valid":false,"operation":"config.apply","error":"config_revision_conflict","input":{"assignment_id":"asg_test_01","expected_revision":"rev_1","observed_revision":"rev_2"}}
-{"case":"readiness-degraded","valid":true,"operation":"readiness","result":{"live":true,"version":"2.0.0","checked_at":"2026-01-01T00:00:00Z","capabilities":{"terminal.v2":{"state":"ready"},"preview.public.v1":{"state":"degraded","reason":"target_unhealthy","retry_after_ms":1000}}}}
+{"case":"readiness-degraded","valid":true,"operation":"readiness","result":{"live":true,"version":"1.0.0","checked_at":"2026-01-01T00:00:00Z","capabilities":{"terminal.v1":{"state":"ready"},"preview.public.v1":{"state":"degraded","reason":"target_unhealthy","retry_after_ms":1000}}}}

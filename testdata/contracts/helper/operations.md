@@ -2,23 +2,25 @@
 
 ## File transfer
 
-`/v1/file-transfers` accepts opaque regular files in either direction with resumable
+`/v1/file-transfers` accepts opaque regular files between identified machines with resumable
 HEAD/PATCH content, SHA-256 verification, idempotent operation IDs, and atomic batch
 publication. Defaults are 50 MiB per file, ten files and 500 MiB per batch, and two active
-streams. MIME is not inspected or restricted. `pb` uses exact `file:transfer` scope;
-`pbh send` uses the durable loopback agent token. Remote files remain for seven days.
-Pending helper-to-CLI deliveries remain for ten minutes within a 1 GiB spool and are pinned
+streams. MIME is not inspected or restricted. `pb send <path> --to <machine>` obtains an
+exact `file:transfer` credential bound to the owned source and destination machine IDs.
+Files remain for seven days. Pending deliveries to an attached interactive machine remain
+for ten minutes within a 1 GiB spool and are pinned
 to one active writer. Cancellation, rejection, checksum failure, expiry, and typed storage
 failures clean partial content.
 
-The same manifest shape is returned for both directions:
+The same machine-addressed manifest is returned for every transfer:
 
 ```json
 {
   "transfer_id": "ft_...",
   "batch_id": "fb_...",
-  "direction": "pb_to_pbh",
-  "session_id": "ses_...",
+  "source_machine_id": "mch_source",
+  "destination_machine_id": "mch_destination",
+  "initiating_user_id": "usr_...",
   "basename": "archive.bin",
   "size": 42,
   "sha256": "lowercase-hex-sha256",
@@ -30,9 +32,9 @@ The same manifest shape is returned for both directions:
 }
 ```
 
-Recipient client IDs and helper filesystem paths are internal and never appear in a
-manifest. A published `pb_to_pbh` completion result may separately return its opaque
-remote path. A `pbh_to_pb` receipt may return only `Paperboat Inbox/<name>`.
+`session_id` is optional context. Recipient client IDs and machine filesystem paths are
+internal and never appear in a manifest. A published completion result may separately
+return its opaque Paperboat Inbox path.
 
 | Method | Resource | Contract |
 | --- | --- | --- |
@@ -46,7 +48,7 @@ remote path. A `pbh_to_pb` receipt may return only `Paperboat Inbox/<name>`.
 | `POST` | `/v1/file-transfers/{id}/receipt` | Record identical idempotent durable-storage success or a typed failure. |
 | `DELETE` | `/v1/file-transfers/{id}` | Cancel the complete batch and remove incomplete or pending content. |
 
-HTTP/3 and HTTP/2 use identical transfer IDs and helper state. An application HTTP status
+HTTP/3 and HTTP/2 use identical transfer IDs and machine-runtime state. An application HTTP status
 never selects another transport. An uncertain upload is followed by `HEAD`; an interrupted
 download is resumed only after hashing the private partial file. Credential refresh retries
 once with the same operation and transfer IDs. Credential expiry does not alter resource
@@ -59,7 +61,7 @@ Stable file-transfer errors are `invalid_path`, `invalid_size`, `batch_limit`,
 ## Preview identity and readiness
 
 Preview registration, listing, and removal are agent operations handled by the local
-`paperboat-helper`. Every operation is bound to the helper's assigned environment;
+the `pb` host runtime. Every operation is bound to the machine's assigned environment;
 cross-environment IDs, names, state, and URLs are rejected and never disclosed. A
 successful registration response returns the public URL to the calling agent, which
 surfaces it in the existing terminal session. `pb` and the dashboard may list the user's

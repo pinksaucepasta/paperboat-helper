@@ -9,7 +9,7 @@ import (
 )
 
 func validFrame() Frame {
-	return Frame{Type: "request", RequestID: "req_1", Version: "2.0", OperationID: "op_00000001", Capability: "terminal.v2", DeadlineMS: 1000, Payload: []byte(`{"action":"list"}`)}
+	return Frame{Type: "request", RequestID: "req_1", Version: "1.0", OperationID: "op_00000001", Capability: "terminal.v1", DeadlineMS: 1000, Payload: []byte(`{"action":"list"}`)}
 }
 
 func TestFrameRoundTripWithFragmentedReader(t *testing.T) {
@@ -25,8 +25,8 @@ func TestFrameRoundTripWithFragmentedReader(t *testing.T) {
 
 func TestReadFrameAcceptsCoalescedFrames(t *testing.T) {
 	var wire bytes.Buffer
-	first := Frame{Type: "heartbeat", RequestID: "req_1", Version: "2.0"}
-	second := Frame{Type: "heartbeat", RequestID: "req_2", Version: "2.0"}
+	first := Frame{Type: "heartbeat", RequestID: "req_1", Version: "1.0"}
+	second := Frame{Type: "heartbeat", RequestID: "req_2", Version: "1.0"}
 	if err := WriteFrame(&wire, first); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestFrameRejectsOversizeBeforeAllocation(t *testing.T) {
 }
 
 func TestFrameRejectsUnknownFieldsAndInvalidUTF8(t *testing.T) {
-	for _, payload := range [][]byte{[]byte(`{"type":"heartbeat","request_id":"r","version":"2.0","wat":1}`), {0xff}} {
+	for _, payload := range [][]byte{[]byte(`{"type":"heartbeat","request_id":"r","version":"1.0","wat":1}`), {0xff}} {
 		var wire bytes.Buffer
 		var p [4]byte
 		binary.BigEndian.PutUint32(p[:], uint32(len(payload)))

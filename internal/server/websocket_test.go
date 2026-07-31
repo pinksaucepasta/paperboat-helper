@@ -72,7 +72,7 @@ func (s *oneFrameStream) Next(ctx context.Context) (protocol.BinaryFrame, error)
 	if s.ready {
 		s.ready = false
 		s.mu.Unlock()
-		return protocol.BinaryFrame{Channel: protocol.Stdout, StartSequence: 7, Data: []byte("output")}, nil
+		return protocol.BinaryFrame{Channel: protocol.Stdout, StartSequence: 7, Data: bytes.Repeat([]byte("agent output\r\n"), 200)}, nil
 	}
 	s.mu.Unlock()
 	<-ctx.Done()
@@ -84,7 +84,7 @@ func websocketTestHandler(t *testing.T, tokenSeen *string) *WebSocketHandler {
 	t.Helper()
 	journal, _ := operation.NewJournal(16)
 	server, err := New(Config{
-		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v2": true, "health.v1": true}},
+		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v1": true, "health.v1": true}},
 		Journal:    journal, Handler: websocketDomainHandler{}, MaxConcurrent: 4,
 		HeartbeatInterval: time.Hour, PeerTimeout: 2 * time.Hour, MutationDeadline: 5 * time.Minute,
 	})
@@ -194,7 +194,7 @@ func TestWebSocketTransportFragmentsStructuredAndSeparatesBinary(t *testing.T) {
 	headers := http.Header{"Authorization": []string{"Bearer signed-credential"}}
 	connection, cleanup := dialPipe(t, handler, headers, []string{DefaultWebSocketSubprotocol})
 	defer cleanup()
-	wire, _ := json.Marshal(protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)})
+	wire, _ := json.Marshal(protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)})
 	if err := connection.Write(context.Background(), websocket.MessageText, wire); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestWebSocketTransportFragmentsStructuredAndSeparatesBinary(t *testing.T) {
 	if err != nil || welcome.Type != "welcome" {
 		t.Fatalf("welcome=%#v err=%v", welcome, err)
 	}
-	request, _ := json.Marshal(protocol.Frame{Type: "request", RequestID: "req_stream", Version: "2.0", OperationID: "op_stream_0001", Capability: "terminal.v2", DeadlineMS: 1000, Payload: json.RawMessage(`{"action":"attach","session_id":"ses_test"}`)})
+	request, _ := json.Marshal(protocol.Frame{Type: "request", RequestID: "req_stream", Version: "1.0", OperationID: "op_stream_0001", Capability: "terminal.v1", DeadlineMS: 1000, Payload: json.RawMessage(`{"action":"attach","session_id":"ses_test"}`)})
 	if err := connection.Write(context.Background(), websocket.MessageText, request); err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +224,11 @@ func TestWebSocketTransportFragmentsStructuredAndSeparatesBinary(t *testing.T) {
 	if err != nil || messageType != websocket.MessageBinary {
 		t.Fatalf("binary type=%v err=%v", messageType, err)
 	}
+	if encoded[2] != protocol.TerminalOutputZstd {
+		t.Fatalf("output encoding=%d", encoded[2])
+	}
 	binary, err := protocol.DecodeTerminalOutput(encoded)
-	if err != nil || binary.StreamID != 1 || binary.StartSequence != 7 || string(binary.Data) != "output" {
+	if err != nil || binary.StreamID != 1 || binary.StartSequence != 7 || !bytes.Equal(binary.Data, bytes.Repeat([]byte("agent output\r\n"), 200)) {
 		t.Fatalf("binary=%#v err=%v", binary, err)
 	}
 	if seen != "signed-credential" {

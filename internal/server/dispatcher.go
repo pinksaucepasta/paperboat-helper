@@ -67,7 +67,7 @@ func NewDispatcher(config DispatcherConfig) (*Dispatcher, error) {
 }
 
 func (d *Dispatcher) Capabilities() []string {
-	capabilities := []string{"terminal.v2", "health.v1"}
+	capabilities := []string{"terminal.v1", "health.v1"}
 	if d.config.Previews != nil {
 		capabilities = append(capabilities, "preview.public.v1")
 	}
@@ -82,7 +82,7 @@ func (d *Dispatcher) Capabilities() []string {
 
 func (d *Dispatcher) Handle(ctx context.Context, authorization Authorization, capability string, payload json.RawMessage) operation.Outcome {
 	switch capability {
-	case "terminal.v2":
+	case "terminal.v1":
 		return d.terminal(ctx, authorization, payload)
 	case "preview.public.v1":
 		return d.preview(ctx, authorization, payload)
@@ -196,7 +196,7 @@ func (d *Dispatcher) HandleControl(_ context.Context, authorization Authorizatio
 }
 
 func (d *Dispatcher) OpenStream(_ context.Context, authorization Authorization, capability string, payload json.RawMessage, outcome operation.Outcome, replay bool) (OutputStream, bool, error) {
-	if capability != "terminal.v2" || outcome.ErrorCode != "" {
+	if capability != "terminal.v1" || outcome.ErrorCode != "" {
 		return nil, false, nil
 	}
 	var request terminalRequest

@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/bmatcuk/doublestar/v4"
 )
 
 var (
@@ -32,7 +30,24 @@ type Snapshot struct {
 	Skipped []PathSummary
 }
 
-func TakeSnapshot(root string, policy RuntimePolicy) (Snapshot, error) {
+func TakeManifestSnapshot(root string, policy RuntimePolicy, manifest Manifest) (Snapshot, error) {
+	if err := validateManifestRoots(root, manifest); err != nil {
+		return Snapshot{Files: make(map[string]FileState)}, err
+	}
+	return takeSelectedSnapshot(root, policy, func(path string, isDir bool) bool {
+		return !mandatoryExcluded(path, policy) && manifest.Manages(path, isDir)
+	}, func(path string) bool {
+		return !mandatoryExcluded(path, policy) && manifest.MayManageDescendant(path)
+	}, len(manifest.Roots) == 0)
+}
+
+func takeSelectedSnapshot(
+	root string,
+	policy RuntimePolicy,
+	manages func(string, bool) bool,
+	mayManageDescendant func(string) bool,
+	empty bool,
+) (Snapshot, error) {
 	result := Snapshot{Files: make(map[string]FileState)}
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return result, ErrSnapshotInvalid
@@ -44,6 +59,9 @@ func TakeSnapshot(root string, policy RuntimePolicy) (Snapshot, error) {
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil || resolvedRoot != root {
 		return result, errors.Join(ErrSnapshotInvalid, err)
+	}
+	if empty {
+		return result, nil
 	}
 	var batchBytes int64
 	err = filepath.WalkDir(root, func(full string, entry fs.DirEntry, walkErr error) error {
@@ -58,8 +76,8 @@ func TakeSnapshot(root string, policy RuntimePolicy) (Snapshot, error) {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		if !managedPath(rel, policy) {
-			if entry.IsDir() && !mayContainManagedPath(rel, policy) {
+		if !manages(rel, entry.IsDir()) {
+			if entry.IsDir() && !mayManageDescendant(rel) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -121,41 +139,31 @@ func TakeSnapshot(root string, policy RuntimePolicy) (Snapshot, error) {
 	return result, nil
 }
 
-func managedPath(path string, policy RuntimePolicy) bool {
-	path = filepath.ToSlash(filepath.Clean(path))
-	if path == "." || len(policy.Includes) == 0 || mandatoryExcluded(path, policy) || matchesAnyPolicyPattern(path, policy.Excludes) {
-		return false
+func validateManifestRoots(root string, manifest Manifest) error {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return ErrSnapshotInvalid
 	}
-	return matchesAnyPolicyPattern(path, policy.Includes)
-}
-
-func mayContainManagedPath(path string, policy RuntimePolicy) bool {
-	if len(policy.Includes) == 0 || mandatoryExcluded(path, policy) || matchesAnyPolicyPattern(path, policy.Excludes) {
-		return false
-	}
-	prefix := path + "/"
-	for _, pattern := range policy.Includes {
-		literal := pattern
-		if index := strings.IndexAny(pattern, "*?[{"); index >= 0 {
-			literal = pattern[:index]
-		}
-		if literal == "" {
-			return true
-		}
-		if strings.HasPrefix(literal, prefix) || strings.HasPrefix(prefix, strings.TrimSuffix(literal, "/")+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-func matchesAnyPolicyPattern(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matched, err := doublestar.Match(pattern, path); err == nil && matched {
-			return true
+	for _, selected := range manifest.Roots {
+		parts := strings.Split(selected.Path, "/")
+		current := root
+		for index, part := range parts {
+			current = filepath.Join(current, filepath.FromSlash(part))
+			info, err := os.Lstat(current)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return errors.Join(ErrSnapshotInvalid, err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 && (index < len(parts)-1 || selected.Directory) {
+				return fmt.Errorf("%w: %s", ErrManifestUnsafePath, selected.Path)
+			}
+			if index < len(parts)-1 && !info.IsDir() {
+				break
+			}
 		}
 	}
-	return false
+	return nil
 }
 
 func readStableFile(path string, before fs.FileInfo) (FileState, bool, error) {

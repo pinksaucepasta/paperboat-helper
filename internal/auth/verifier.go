@@ -42,27 +42,31 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Cause }
 
 type Claims struct {
-	Issuer              string              `json:"iss"`
-	Audience            string              `json:"aud"`
-	Subject             string              `json:"sub"`
-	JTI                 string              `json:"jti"`
-	IssuedAt            int64               `json:"iat"`
-	ExpiresAt           int64               `json:"exp"`
-	Scope               []string            `json:"scope"`
-	CredentialClass     string              `json:"credential_class"`
-	EnvironmentID       string              `json:"environment_id,omitempty"`
-	UserID              string              `json:"user_id,omitempty"`
-	CLIClientSessionID  string              `json:"cli_client_session_id,omitempty"`
-	HelperID            string              `json:"helper_id,omitempty"`
-	SessionID           string              `json:"session_id,omitempty"`
-	AssignmentID        string              `json:"assignment_id,omitempty"`
-	WarningRevision     string              `json:"warning_revision,omitempty"`
-	ConnectorGeneration uint64              `json:"connector_generation,omitempty"`
-	EdgePool            string              `json:"edge_pool,omitempty"`
-	EdgeNodeID          string              `json:"edge_node_id,omitempty"`
-	FileTransferPolicy  *FileTransferPolicy `json:"file_transfer_policy,omitempty"`
-	CounterEpoch        string              `json:"counter_epoch,omitempty"`
-	Confirmation        *struct {
+	Issuer                 string              `json:"iss"`
+	Audience               string              `json:"aud"`
+	Subject                string              `json:"sub"`
+	JTI                    string              `json:"jti"`
+	IssuedAt               int64               `json:"iat"`
+	ExpiresAt              int64               `json:"exp"`
+	Scope                  []string            `json:"scope"`
+	CredentialClass        string              `json:"credential_class"`
+	EnvironmentID          string              `json:"environment_id,omitempty"`
+	UserID                 string              `json:"user_id,omitempty"`
+	CLIClientSessionID     string              `json:"cli_client_session_id,omitempty"`
+	HelperID               string              `json:"helper_id,omitempty"`
+	MachineID              string              `json:"machine_id,omitempty"`
+	InstallationGeneration int64               `json:"installation_generation,omitempty"`
+	SourceMachineID        string              `json:"source_machine_id,omitempty"`
+	SessionID              string              `json:"session_id,omitempty"`
+	AssignmentID           string              `json:"assignment_id,omitempty"`
+	WarningRevision        string              `json:"warning_revision,omitempty"`
+	ConnectorID            string              `json:"connector_id,omitempty"`
+	ConnectorGeneration    uint64              `json:"connector_generation,omitempty"`
+	EdgePool               string              `json:"edge_pool,omitempty"`
+	EdgeNodeID             string              `json:"edge_node_id,omitempty"`
+	FileTransferPolicy     *FileTransferPolicy `json:"file_transfer_policy,omitempty"`
+	CounterEpoch           string              `json:"counter_epoch,omitempty"`
+	Confirmation           *struct {
 		JKT string `json:"jkt"`
 	} `json:"cnf,omitempty"`
 }
@@ -87,9 +91,12 @@ type Policy struct {
 	UserID              string
 	CLIClientSessionID  string
 	HelperID            string
+	MachineID           string
+	SourceMachineID     string
 	SessionID           string
 	AssignmentID        string
 	WarningRevision     string
+	ConnectorID         string
 	ConnectorGeneration uint64
 	EdgePool            string
 	EdgeNodeID          string
@@ -282,7 +289,7 @@ func rejectDuplicateKeys(data []byte) error {
 }
 
 func bindingsMatch(c Claims, p Policy) bool {
-	return match(p.EnvironmentID, c.EnvironmentID) && match(p.UserID, c.UserID) && match(p.CLIClientSessionID, c.CLIClientSessionID) && match(p.HelperID, c.HelperID) && match(p.SessionID, c.SessionID) && match(p.AssignmentID, c.AssignmentID) && match(p.WarningRevision, c.WarningRevision) && matchUint(p.ConnectorGeneration, c.ConnectorGeneration) && match(p.EdgePool, c.EdgePool) && match(p.EdgeNodeID, c.EdgeNodeID) && match(p.CounterEpoch, c.CounterEpoch)
+	return match(p.EnvironmentID, c.EnvironmentID) && match(p.MachineID, c.MachineID) && match(p.SourceMachineID, c.SourceMachineID) && match(p.UserID, c.UserID) && match(p.CLIClientSessionID, c.CLIClientSessionID) && match(p.HelperID, c.HelperID) && match(p.SessionID, c.SessionID) && match(p.AssignmentID, c.AssignmentID) && match(p.WarningRevision, c.WarningRevision) && match(p.ConnectorID, c.ConnectorID) && matchUint(p.ConnectorGeneration, c.ConnectorGeneration) && match(p.EdgePool, c.EdgePool) && match(p.EdgeNodeID, c.EdgeNodeID) && match(p.CounterEpoch, c.CounterEpoch)
 }
 func match(expected, actual string) bool     { return expected == "" || expected == actual }
 func matchUint(expected, actual uint64) bool { return expected == 0 || expected == actual }

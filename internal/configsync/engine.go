@@ -22,12 +22,17 @@ type StatusReporter interface {
 	ReportStatus(context.Context, Status, int) error
 }
 
+type ManifestSource interface {
+	CurrentManifest() Manifest
+}
+
 type EngineConfig struct {
 	HomeRoot    string
 	Descriptor  RuntimeDescriptor
 	Syncer      Syncer
 	Statuses    StatusReporter
 	Diagnostics DiagnosticsSource
+	Manifest    ManifestSource
 	StatusPath  string
 	Clock       func() time.Time
 }
@@ -38,6 +43,7 @@ type Engine struct {
 	syncer      Syncer
 	statuses    StatusReporter
 	diagnostics DiagnosticsSource
+	manifest    ManifestSource
 	statusPath  string
 	clock       func() time.Time
 
@@ -78,7 +84,6 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	}
 	now := config.Clock().UTC()
 	syncRevision := config.Descriptor.SyncRevisionFloor
-	acknowledgedKeyVersion := int64(0)
 	if config.StatusPath != "" {
 		if previous, readErr := ReadStatus(config.StatusPath, config.Descriptor.Policy.SummaryLimit); readErr == nil &&
 			previous.RepositoryID == config.Descriptor.RepositoryID &&
@@ -89,22 +94,19 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			if previous.SyncRevision > syncRevision {
 				syncRevision = previous.SyncRevision
 			}
-			if previous.KeyVersion > 0 && previous.KeyVersion <= int64(config.Descriptor.KeyVersion) {
-				acknowledgedKeyVersion = previous.KeyVersion
-			}
 		}
 	}
 	return &Engine{
 		homeRoot: config.HomeRoot, descriptor: config.Descriptor, syncer: config.Syncer,
 		statuses: config.Statuses, statusPath: config.StatusPath, clock: config.Clock,
-		diagnostics: config.Diagnostics, syncRevision: syncRevision,
+		diagnostics: config.Diagnostics, manifest: config.Manifest, syncRevision: syncRevision,
 		status: Status{
-			State: "restoring", RepositoryID: config.Descriptor.RepositoryID,
+			State: "restoring", Mode: config.Descriptor.Mode, RepositoryID: config.Descriptor.RepositoryID,
 			AssignmentID: config.Descriptor.AssignmentID, EnvironmentID: config.Descriptor.EnvironmentID,
 			HelperID: config.Descriptor.HelperID, WarningRevision: config.Descriptor.WarningRevision,
 			HelperGeneration: config.Descriptor.HelperGeneration,
-			PolicyRevision:   config.Descriptor.Policy.Revision, KeyVersion: acknowledgedKeyVersion,
-			SyncRevision: syncRevision, UpdatedAt: now,
+			PolicyRevision:   config.Descriptor.Policy.Revision,
+			SyncRevision:     syncRevision, UpdatedAt: now,
 		},
 	}, nil
 }
@@ -119,7 +121,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := addManagedWatches(watcher, e.homeRoot, e.descriptor.Policy); err != nil {
+	if err := resetManifestWatches(watcher, e.homeRoot, e.currentManifest()); err != nil {
 		_ = watcher.Close()
 		return err
 	}
@@ -173,7 +175,7 @@ func (e *Engine) run(ctx context.Context, done chan<- struct{}, watcher *fsnotif
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-					_ = addManagedWatches(watcher, event.Name, e.descriptor.Policy)
+					_ = resetManifestWatches(watcher, e.homeRoot, e.currentManifest())
 				}
 			}
 			if e.managedEvent(event.Name) {
@@ -225,7 +227,21 @@ func (e *Engine) managedEvent(full string) bool {
 	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return false
 	}
-	return managedPath(filepath.ToSlash(relative), e.descriptor.Policy)
+	info, err := os.Lstat(full)
+	isDir := err == nil && info.IsDir()
+	manifest := e.currentManifest()
+	relative = filepath.ToSlash(relative)
+	if mandatoryExcluded(relative, e.descriptor.Policy) {
+		return false
+	}
+	return manifest.Manages(relative, isDir) || isDir && manifest.MayManageDescendant(relative)
+}
+
+func (e *Engine) currentManifest() Manifest {
+	if e.manifest == nil {
+		return Manifest{}
+	}
+	return e.manifest.CurrentManifest()
 }
 
 func (e *Engine) syncNow(ctx context.Context) error {
@@ -243,6 +259,12 @@ func (e *Engine) syncNow(ctx context.Context) error {
 	e.report(ctx)
 
 	result, err := e.syncer.Sync(ctx, remoteRevision)
+	e.mu.Lock()
+	watcher := e.watcher
+	e.mu.Unlock()
+	if watcher != nil {
+		_ = resetManifestWatches(watcher, e.homeRoot, e.currentManifest())
+	}
 	diagnostics := ReconciliationDiagnostics{}
 	if e.diagnostics != nil {
 		diagnostics = e.diagnostics.Diagnostics()
@@ -250,32 +272,48 @@ func (e *Engine) syncNow(ctx context.Context) error {
 	e.mu.Lock()
 	now = e.clock().UTC()
 	e.status.UpdatedAt = now
-	e.status.ClassifierPending = diagnostics.ClassifierPending
 	e.status.Skipped = diagnostics.Skipped
 	e.status.Conflicts = diagnostics.Conflicts
-	e.status.PendingPathCount = len(diagnostics.ClassifierPending)
+	e.status.ManifestHealth = diagnostics.ManifestHealth
+	e.status.ManifestRevision = diagnostics.ManifestRevision
+	e.status.ManagedPathCount = diagnostics.ManagedPathCount
+	e.status.PendingCleanPathCount = diagnostics.PendingCleanPathCount
+	if diagnostics.LastAppliedRevision != "" {
+		e.status.LastAppliedRevision = diagnostics.LastAppliedRevision
+	}
+	if diagnostics.LastPublishedRevision != "" {
+		e.status.LastPublishedRevision = diagnostics.LastPublishedRevision
+	}
 	if result.RemoteRevision != "" {
 		e.remoteRevision = result.RemoteRevision
 		e.status.RemoteRevision = result.RemoteRevision
 	}
 	switch {
+	case err == nil && result.Landed && len(diagnostics.Conflicts) > 0:
+		e.remoteRevision = result.RemoteRevision
+		e.lastPush = now
+		e.dirtySince = time.Time{}
+		e.status.State = "conflict"
+		e.status.RemoteRevision = result.RemoteRevision
+		e.status.LastSuccessfulAt = &now
+		e.status.ErrorCode = "config_conflict"
+		e.status.RecoveryActions = []string{"keep_local", "keep_remote"}
 	case err == nil && result.Landed:
 		e.remoteRevision = result.RemoteRevision
 		e.lastPush = now
 		e.dirtySince = time.Time{}
 		e.status.State = "healthy"
-		if len(diagnostics.Skipped) > 0 || len(diagnostics.ClassifierPending) > 0 {
+		if len(diagnostics.Skipped) > 0 {
 			e.status.State = "warning"
 		}
 		e.status.RemoteRevision = result.RemoteRevision
 		e.status.LastSuccessfulAt = &now
-		e.status.KeyVersion = int64(e.descriptor.KeyVersion)
 		e.status.ErrorCode = ""
 		e.status.RecoveryActions = nil
 	case errors.Is(err, ErrConfigConflict):
 		e.status.State = "conflict"
 		e.status.ErrorCode = "config_conflict"
-		e.status.RecoveryActions = []string{"keep_local", "keep_remote", "externally_resolved"}
+		e.status.RecoveryActions = []string{"keep_local", "keep_remote"}
 	case errors.Is(err, ErrSyncUncertain):
 		e.status.State = "sync_uncertain"
 		e.status.ErrorCode = "sync_uncertain"
@@ -284,6 +322,14 @@ func (e *Engine) syncNow(ctx context.Context) error {
 		e.status.State = "warning"
 		e.status.ErrorCode = "writes_disabled"
 		e.status.RecoveryActions = []string{"wait_for_rollout"}
+	case errors.Is(err, ErrManifestMissing):
+		e.status.State = "error"
+		e.status.ErrorCode = "manifest_missing"
+		e.status.RecoveryActions = []string{"fix_manifest"}
+	case errors.Is(err, ErrManifestInvalid), errors.Is(err, ErrManifestUnsafePath):
+		e.status.State = "error"
+		e.status.ErrorCode = "manifest_invalid"
+		e.status.RecoveryActions = []string{"fix_manifest"}
 	case errors.Is(err, ErrAuthorization), errors.Is(err, ErrLeaseLost):
 		e.status.State = "revoked"
 		e.status.ErrorCode = "credential_expired"
@@ -308,29 +354,66 @@ func (e *Engine) report(ctx context.Context) {
 	}
 }
 
-func addManagedWatches(watcher *fsnotify.Watcher, root string, policy RuntimePolicy) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+func resetManifestWatches(watcher *fsnotify.Watcher, root string, manifest Manifest) error {
+	for _, watched := range watcher.WatchList() {
+		if err := watcher.Remove(watched); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-		if !entry.IsDir() {
-			return nil
+	}
+	if err := watcher.Add(root); err != nil {
+		return err
+	}
+	seen := map[string]struct{}{root: {}}
+	for _, selected := range manifest.Roots {
+		full := filepath.Join(root, filepath.FromSlash(selected.Path))
+		start := full
+		if !selected.Directory {
+			start = filepath.Dir(full)
 		}
-		info, err := os.Lstat(path)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
-			return errors.Join(ErrEngineInvalid, err)
+		for {
+			info, err := os.Lstat(start)
+			if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				break
+			}
+			parent := filepath.Dir(start)
+			if parent == start || !sameOrInsidePath(parent, root) {
+				start = root
+				break
+			}
+			start = parent
 		}
-		if path != root {
-			relative, err := filepath.Rel(root, path)
-			if err != nil {
+		if _, ok := seen[start]; !ok {
+			if err := watcher.Add(start); err != nil {
 				return err
 			}
-			if !mayContainManagedPath(filepath.ToSlash(relative), policy) {
-				return filepath.SkipDir
-			}
+			seen[start] = struct{}{}
 		}
-		return watcher.Add(path)
-	})
+		if !selected.Directory || start != full {
+			continue
+		}
+		if err := filepath.WalkDir(start, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() {
+				return nil
+			}
+			info, err := os.Lstat(path)
+			if err != nil || info.Mode()&os.ModeSymlink != 0 {
+				return errors.Join(ErrEngineInvalid, err)
+			}
+			if _, ok := seen[path]; !ok {
+				if err := watcher.Add(path); err != nil {
+					return err
+				}
+				seen[path] = struct{}{}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func resetTimer(timer *time.Timer, duration time.Duration) {

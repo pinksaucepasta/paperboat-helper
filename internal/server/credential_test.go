@@ -24,7 +24,7 @@ func TestCredentialAuthorizerReturnsStableBoundIdentity(t *testing.T) {
 	authorizer := CredentialAuthorizer{
 		Token: "signed-token",
 		Resolver: resolverFunc(func(frame protocol.Frame) (auth.Policy, error) {
-			if frame.Capability != "terminal.v2" {
+			if frame.Capability != "terminal.v1" {
 				return auth.Policy{}, ErrCredentialPolicy
 			}
 			return auth.Policy{Audience: "paperboat-helper"}, nil
@@ -36,12 +36,12 @@ func TestCredentialAuthorizerReturnsStableBoundIdentity(t *testing.T) {
 			return claims, nil
 		}),
 	}
-	first, err := authorizer.Authorize(context.Background(), protocol.Frame{Capability: "terminal.v2"})
+	first, err := authorizer.Authorize(context.Background(), protocol.Frame{Capability: "terminal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	claims.JTI, claims.IssuedAt, claims.ExpiresAt = "jti_2", 50, 150
-	second, err := authorizer.Authorize(context.Background(), protocol.Frame{Capability: "terminal.v2"})
+	second, err := authorizer.Authorize(context.Background(), protocol.Frame{Capability: "terminal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestCredentialAuthorizerReturnsStableBoundIdentity(t *testing.T) {
 		t.Fatalf("resource id=%q", first.ResourceID)
 	}
 	claims.SessionID = "ses_2"
-	third, err := authorizer.Authorize(context.Background(), protocol.Frame{Capability: "terminal.v2"})
+	third, err := authorizer.Authorize(context.Background(), protocol.Frame{Capability: "terminal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}

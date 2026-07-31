@@ -6,14 +6,14 @@ forwarding, and byte counters. Messages are authenticated with the exact credent
 declared by their schema and use a unique operation ID.
 
 Connector admission consumes a single-use `connector_admission` credential atomically with
-recording `(environment_id, helper_id, connector_generation, edge_pool)`. The generation
+recording `(environment_id, machine_id, connector_id, connector_generation, edge_pool)`. The generation
 must equal current desired state. A retry of the same operation and canonical request returns
 the recorded decision. Reuse with different data, a stale generation, wrong node/pool, or a
 revoked environment fails before a connector is accepted. Replacing a connector advances
 generation, drains the old connection, detaches its routes, and rejects late traffic from it.
 
 Admission responses include the assigned `edge_node_id`, an authenticated frps
-`edge_endpoint`, and at least one operation-bound local route/proxy descriptor. The helper
+`edge_endpoint`, and at least one operation-bound local route/proxy descriptor. The connector
 configures only those descriptors and never derives endpoint or public-host values. After
 login, readiness is reported only after every handed-off proxy is `running`. The edge owns
 the frp `run_id`; same-run reconnects resume the generation only while its admission remains

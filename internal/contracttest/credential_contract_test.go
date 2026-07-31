@@ -26,6 +26,7 @@ func TestCredentialSigningVector(t *testing.T) {
 			Audience        string   `json:"aud"`
 			CredentialClass string   `json:"credential_class"`
 			EnvironmentID   string   `json:"environment_id"`
+			MachineID       string   `json:"machine_id"`
 			Scopes          []string `json:"scope"`
 		} `json:"claims"`
 		Token string `json:"token"`
@@ -54,7 +55,7 @@ func TestCredentialSigningVector(t *testing.T) {
 	if vector.Header["alg"] != "EdDSA" || vector.Header["kid"] != vector.Key.Kid {
 		t.Fatalf("unexpected header: %#v", vector.Header)
 	}
-	if vector.Claims.Audience != "paperboat-helper" || vector.Claims.CredentialClass != "terminal_operation" || vector.Claims.EnvironmentID == "" || len(vector.Claims.Scopes) != 1 || vector.Claims.Scopes[0] != "terminal:operate" {
+	if vector.Claims.Audience != "paperboat-machine" || vector.Claims.CredentialClass != "terminal_operation" || vector.Claims.EnvironmentID == "" || vector.Claims.MachineID == "" || len(vector.Claims.Scopes) != 1 || vector.Claims.Scopes[0] != "terminal:operate" {
 		t.Fatalf("unexpected claims: %#v", vector.Claims)
 	}
 }

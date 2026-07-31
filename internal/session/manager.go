@@ -92,7 +92,7 @@ type managedSession struct {
 	persistErr    error
 }
 
-// liveProcess is immutable after publication. Terminal v2 input can therefore
+// liveProcess is immutable after publication. Terminal v1 input can therefore
 // resolve its generation and PTY without waiting for lifecycle or persistence.
 type liveProcess struct {
 	process    PTYProcess

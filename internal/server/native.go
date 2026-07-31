@@ -270,7 +270,7 @@ func (c *nativeConnection) WriteStructured(frame protocol.Frame) error {
 }
 
 func (c *nativeConnection) WriteBinary(frame protocol.BinaryFrame) error {
-	data, err := protocol.EncodeTerminalOutput(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: 1, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
+	data, err := protocol.EncodeTerminalOutputAdaptive(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: 1, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
 	if err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func (c *nativeConnection) WriteBinary(frame protocol.BinaryFrame) error {
 }
 
 func (c *nativeConnection) WriteTerminalOutput(streamID uint32, frame protocol.BinaryFrame) error {
-	data, err := protocol.EncodeTerminalOutput(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: streamID, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
+	data, err := protocol.EncodeTerminalOutputAdaptive(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: streamID, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
 	if err != nil {
 		return err
 	}

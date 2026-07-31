@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"filippo.io/age"
 )
 
 func TestApplyJournalRestoresOriginalsAndRemovesCreatedPaths(t *testing.T) {
@@ -25,15 +23,11 @@ func TestApplyJournalRestoresOriginalsAndRemovesCreatedPaths(t *testing.T) {
 	if err := os.WriteFile(original, []byte("before\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal := filepath.Join(state, "apply-journal.age")
+	journal := filepath.Join(state, "apply-journal.json")
 	paths := []string{".config/original", ".config/created"}
 	if err := beginApplyJournal(
 		journal, home, "repo", "assignment", "revision",
-		identity.Recipient().String(), paths, 1<<20,
+		paths, 1<<20,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +39,7 @@ func TestApplyJournalRestoresOriginalsAndRemovesCreatedPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := recoverApplyJournal(
-		journal, home, identity.String(), "repo", "assignment", 1<<20,
+		journal, home, "repo", "assignment", 1<<20,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -82,21 +76,17 @@ func TestApplyJournalRejectsWrongAssignmentWithoutMutation(t *testing.T) {
 	if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal := filepath.Join(state, "apply-journal.age")
+	journal := filepath.Join(state, "apply-journal.json")
 	if err := beginApplyJournal(
 		journal, home, "repo", "assignment", "revision",
-		identity.Recipient().String(), []string{"value"}, 1<<20,
+		[]string{"value"}, 1<<20,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("after"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := recoverApplyJournal(journal, home, identity.String(), "repo", "other", 1<<20); err == nil {
+	if err := recoverApplyJournal(journal, home, "repo", "other", 1<<20); err == nil {
 		t.Fatal("wrong assignment journal was accepted")
 	}
 	content, err := os.ReadFile(target)

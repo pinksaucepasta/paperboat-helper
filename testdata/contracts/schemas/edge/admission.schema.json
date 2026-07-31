@@ -3,11 +3,12 @@
   "$id": "paperboat://contracts/1.0.0/edge/admission",
   "type": "object",
   "additionalProperties": false,
-  "required": ["operation_id", "environment_id", "helper_id", "connector_generation", "edge_pool", "edge_node_id", "edge_endpoint", "routes", "protocol_version", "credential", "file_transfer_policy"],
+  "required": ["operation_id", "environment_id", "machine_id", "connector_id", "connector_generation", "edge_pool", "edge_node_id", "edge_endpoint", "routes", "protocol_version", "credential", "file_transfer_policy"],
   "properties": {
     "operation_id": {"type": "string", "minLength": 8, "maxLength": 128},
     "environment_id": {"type": "string", "minLength": 1, "maxLength": 128},
-    "helper_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "machine_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "connector_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "connector_generation": {"type": "integer", "minimum": 1},
     "edge_pool": {"type": "string", "minLength": 1, "maxLength": 64},
     "edge_node_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,127}$"},
@@ -33,7 +34,7 @@
         "properties": {
           "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,127}$"},
           "route_revision": {"type": "integer", "minimum": 1},
-          "kind": {"enum": ["helper_https_wss", "preview_public_https_wss"]},
+          "kind": {"enum": ["runtime_https_wss", "preview_public_https_wss"]},
           "public_host": {"type": "string", "format": "hostname", "maxLength": 253},
           "proxy_name": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,127}$"},
           "target": {

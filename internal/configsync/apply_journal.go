@@ -1,7 +1,6 @@
 package configsync
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,8 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"filippo.io/age"
 )
 
 var ErrApplyJournalInvalid = errors.New("invalid config apply journal")
@@ -31,7 +28,7 @@ type applyJournal struct {
 	Entries        []applyJournalEntry `json:"entries"`
 }
 
-func beginApplyJournal(path, homeRoot, repositoryID, assignmentID, remoteRevision, recipientValue string, paths []string, maxBytes int64) error {
+func beginApplyJournal(path, homeRoot, repositoryID, assignmentID, remoteRevision string, paths []string, maxBytes int64) error {
 	if !canonicalAbsolutePath(path) || !canonicalAbsolutePath(homeRoot) || repositoryID == "" ||
 		assignmentID == "" || remoteRevision == "" || maxBytes <= 0 {
 		return ErrApplyJournalInvalid
@@ -84,25 +81,10 @@ func beginApplyJournal(path, homeRoot, repositoryID, assignmentID, remoteRevisio
 	if err != nil {
 		return err
 	}
-	recipient, err := age.ParseX25519Recipient(strings.TrimSpace(recipientValue))
-	if err != nil {
-		return ErrApplyJournalInvalid
-	}
-	var encrypted bytes.Buffer
-	writer, err := age.Encrypt(&encrypted, recipient)
-	if err == nil {
-		_, err = writer.Write(append(plaintext, '\n'))
-	}
-	if err == nil {
-		err = writer.Close()
-	}
-	if err != nil {
-		return err
-	}
-	return writePrivateAtomic(path, encrypted.Bytes())
+	return writePrivateAtomic(path, append(plaintext, '\n'))
 }
 
-func recoverApplyJournal(path, homeRoot, identitiesValue, repositoryID, assignmentID string, maxBytes int64) error {
+func recoverApplyJournal(path, homeRoot, repositoryID, assignmentID string, maxBytes int64) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -111,21 +93,13 @@ func recoverApplyJournal(path, homeRoot, identitiesValue, repositoryID, assignme
 		info.Mode().Perm()&0o077 != 0 || info.Size() > maxBytes+(1<<20) {
 		return errors.Join(ErrApplyJournalInvalid, err)
 	}
-	identities, err := age.ParseIdentities(strings.NewReader(identitiesValue))
-	if err != nil || len(identities) < 1 || len(identities) > 2 {
-		return ErrApplyJournalInvalid
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	decrypted, err := age.Decrypt(file, identities...)
-	if err != nil {
-		return ErrApplyJournalInvalid
-	}
 	var journal applyJournal
-	decoder := json.NewDecoder(io.LimitReader(decrypted, maxBytes+(1<<20)))
+	decoder := json.NewDecoder(io.LimitReader(file, maxBytes+(1<<20)))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&journal) != nil || !errors.Is(decoder.Decode(&struct{}{}), io.EOF) ||
 		journal.Format != "paperboat-config-apply-journal-v1" ||

@@ -101,9 +101,10 @@ type RepositoryAccess struct {
 type RuntimePolicy struct {
 	Format                  string        `json:"format"`
 	Revision                string        `json:"revision"`
-	Includes                []string      `json:"includes"`
-	Excludes                []string      `json:"excludes"`
-	MandatoryExclusions     []string      `json:"mandatory_exclusions"`
+	ManifestContract        string        `json:"manifest_contract"`
+	ManifestMaxBytes        int           `json:"manifest_max_bytes"`
+	ManifestMaxLines        int           `json:"manifest_max_lines"`
+	ManifestMaxPatternBytes int           `json:"manifest_max_pattern_bytes"`
 	MaxFileBytes            int64         `json:"max_file_bytes"`
 	MaxBatchBytes           int64         `json:"max_batch_bytes"`
 	Debounce                time.Duration `json:"debounce"`
@@ -113,25 +114,24 @@ type RuntimePolicy struct {
 	RetryLimit              int           `json:"retry_limit"`
 	ShutdownFlushTimeout    time.Duration `json:"shutdown_flush_timeout"`
 	SummaryLimit            int           `json:"summary_limit"`
-	ClassifierEnabled       bool          `json:"classifier_enabled"`
-	ClassifierRevision      string        `json:"classifier_revision"`
-	ClassifierModelRevision string        `json:"classifier_model_revision"`
 	RuntimeExclusionRoots   []string      `json:"-"`
 }
 
+func (p RuntimePolicy) ManifestLimits() ManifestLimits {
+	return ManifestLimits{MaxBytes: p.ManifestMaxBytes, MaxLines: p.ManifestMaxLines, MaxPatternBytes: p.ManifestMaxPatternBytes}
+}
+
 type RuntimeDescriptor struct {
-	WriteMode         string        `json:"write_mode"`
-	RepositoryID      string        `json:"repository_id"`
-	AssignmentID      string        `json:"assignment_id"`
-	EnvironmentID     string        `json:"environment_id"`
-	HelperID          string        `json:"helper_id"`
-	HelperGeneration  int64         `json:"helper_generation"`
-	SyncRevisionFloor int64         `json:"sync_revision_floor"`
-	WarningRevision   string        `json:"warning_revision"`
-	Policy            RuntimePolicy `json:"policy"`
-	KeyVersion        int32         `json:"key_version"`
-	AgeRecipient      string        `json:"age_recipient"`
-	AgeIdentities     string        `json:"age_identities"`
+	WriteMode         string         `json:"write_mode"`
+	Mode              AssignmentMode `json:"mode"`
+	RepositoryID      string         `json:"repository_id"`
+	AssignmentID      string         `json:"assignment_id"`
+	EnvironmentID     string         `json:"environment_id"`
+	HelperID          string         `json:"helper_id"`
+	HelperGeneration  int64          `json:"helper_generation"`
+	SyncRevisionFloor int64          `json:"sync_revision_floor"`
+	WarningRevision   string         `json:"warning_revision"`
+	Policy            RuntimePolicy  `json:"policy"`
 }
 
 func NewControlClient(config ControlClientConfig) (*ControlClient, error) {
@@ -351,51 +351,6 @@ func (c *ControlClient) RuntimeDescriptor(ctx context.Context) (RuntimeDescripto
 	}
 	if decodeBoundedJSON(response.Body, &envelope) != nil || validateRuntimeDescriptor(envelope.Data, credential) != nil {
 		return RuntimeDescriptor{}, ErrControlClientInvalid
-	}
-	return envelope.Data, nil
-}
-
-func (c *ControlClient) Classify(ctx context.Context, candidates []ClassificationCandidate) (ClassificationResponse, error) {
-	if len(candidates) == 0 || len(candidates) > 256 {
-		return ClassificationResponse{}, ErrClassificationInvalid
-	}
-	body, err := json.Marshal(struct {
-		Candidates []ClassificationCandidate `json:"candidates"`
-	}{Candidates: candidates})
-	if err != nil {
-		return ClassificationResponse{}, err
-	}
-	operationID, err := c.operationID()
-	if err != nil {
-		return ClassificationResponse{}, err
-	}
-	credential, err := c.Credential(ctx)
-	if err != nil {
-		return ClassificationResponse{}, err
-	}
-	identity, err := c.identities.Token(ctx)
-	if err != nil {
-		return ClassificationResponse{}, errors.Join(ErrAuthorization, err)
-	}
-	path := "/v1/config/classify"
-	proof, err := c.proofs.Proof(ctx, operationID, http.MethodPost, path, body)
-	if err != nil {
-		return ClassificationResponse{}, errors.Join(ErrAuthorization, err)
-	}
-	request, err := c.request(ctx, path, body, identity, credential.Value, proof)
-	if err != nil {
-		return ClassificationResponse{}, err
-	}
-	response, err := c.client.Do(request)
-	if err != nil {
-		return ClassificationResponse{}, err
-	}
-	defer response.Body.Close()
-	var envelope struct {
-		Data ClassificationResponse `json:"data"`
-	}
-	if response.StatusCode != http.StatusOK || decodeBoundedJSON(response.Body, &envelope) != nil {
-		return ClassificationResponse{}, ErrClassificationInvalid
 	}
 	return envelope.Data, nil
 }

@@ -18,7 +18,7 @@ fails closed. Rotation publishes old and new public keys before the issuer switc
 the old key remains only through the maximum token lifetime plus skew. Private keys never
 leave their owning service. Algorithms other than EdDSA and Ed25519 keys are rejected.
 
-Revocation is keyed by token ID, parent session, user, environment, helper generation, and
+Revocation is keyed by token ID, parent session, user, environment, installation or connector generation, and
 signing key as applicable. Environment compromise revokes enrollment, helper identity,
 connector, operation, preview, config, and update descendants, replaces the
 helper key, and advances connector generation. Connector replacement invalidates the prior

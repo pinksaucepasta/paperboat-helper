@@ -19,7 +19,6 @@ import (
 
 const (
 	ArtifactSchemaV1        = "paperboat.helper-artifact/v1"
-	ArtifactSchemaV2        = "paperboat.helper-artifact/v2"
 	ArtifactKindWorker      = "worker"
 	ArtifactKindHostService = "host_service"
 )
@@ -48,15 +47,6 @@ type ArtifactManifest struct {
 type artifactSignaturePayload struct {
 	Architecture string `json:"architecture"`
 	ByteLength   int64  `json:"byte_length"`
-	Platform     string `json:"platform"`
-	Schema       string `json:"schema"`
-	SHA256       string `json:"sha256"`
-	URL          string `json:"url"`
-	Version      string `json:"version"`
-}
-type artifactSignaturePayloadV2 struct {
-	Architecture string `json:"architecture"`
-	ByteLength   int64  `json:"byte_length"`
 	Kind         string `json:"kind"`
 	Platform     string `json:"platform"`
 	Schema       string `json:"schema"`
@@ -66,21 +56,15 @@ type artifactSignaturePayloadV2 struct {
 }
 
 func (m ArtifactManifest) signaturePayload() ([]byte, error) {
-	if m.Schema == ArtifactSchemaV2 {
-		return json.Marshal(artifactSignaturePayloadV2{
-			Architecture: m.Architecture, ByteLength: m.ByteLength, Kind: m.Kind, Platform: m.Platform,
-			Schema: m.Schema, SHA256: m.SHA256, URL: m.URL, Version: m.Version,
-		})
-	}
 	return json.Marshal(artifactSignaturePayload{
-		Architecture: m.Architecture, ByteLength: m.ByteLength, Platform: m.Platform,
+		Architecture: m.Architecture, ByteLength: m.ByteLength, Kind: m.Kind, Platform: m.Platform,
 		Schema: m.Schema, SHA256: m.SHA256, URL: m.URL, Version: m.Version,
 	})
 }
 
 func VerifyArtifactManifest(manifest ArtifactManifest, encodedPublicKey string) error {
 	parsed, err := url.Parse(manifest.URL)
-	validSchema := manifest.Schema == ArtifactSchemaV1 && manifest.Kind == "" || manifest.Schema == ArtifactSchemaV2 && (manifest.Kind == ArtifactKindWorker || manifest.Kind == ArtifactKindHostService)
+	validSchema := manifest.Schema == ArtifactSchemaV1 && (manifest.Kind == ArtifactKindWorker || manifest.Kind == ArtifactKindHostService)
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" || !validSchema || manifest.Version == "" || manifest.Platform != runtime.GOOS || manifest.Architecture != runtime.GOARCH || manifest.ByteLength < 1 || manifest.ByteLength > 256<<20 || len(manifest.SHA256) != sha256.Size*2 {
 		return ErrArtifactManifest
 	}

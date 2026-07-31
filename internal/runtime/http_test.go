@@ -52,7 +52,7 @@ func (a runtimeAddr) Network() string { return "pipe" }
 func (a runtimeAddr) String() string  { return string(a) }
 
 func TestHTTPServiceRejectsNonLoopbackProductionAddress(t *testing.T) {
-	for _, address := range []string{"", ":8080", "0.0.0.0:8080", "192.0.2.1:8080", "localhost:8080"} {
+	for _, address := range []string{"", ":8080", "0.0.0.0:8080", "191.0.2.1:8080", "localhost:8080"} {
 		if _, err := NewHTTPService(HTTPConfig{Address: address, Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})}); !errors.Is(err, ErrHTTPInvalid) {
 			t.Fatalf("address=%q err=%v", address, err)
 		}
@@ -133,7 +133,7 @@ func TestRuntimeOrdersHTTPAdmissionBeforeConnectionServerShutdown(t *testing.T) 
 	connectionServer := &orderedService{name: "connection_server", order: &order}
 	httpAdmission := &orderedService{name: "http_admission", order: &order}
 	runtime, err := NewRuntime(Config{Version: "test", Clock: health.RealClock{}, Components: []Component{
-		{Capability: "terminal.v2", Required: true, Service: connectionServer},
+		{Capability: "terminal.v1", Required: true, Service: connectionServer},
 		{Capability: "health.v1", Required: true, Service: httpAdmission},
 	}})
 	if err != nil {

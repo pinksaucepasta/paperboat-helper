@@ -31,7 +31,7 @@ func newFakePeer() *fakePeer {
 	return &fakePeer{
 		version: "1.0",
 		capabilities: map[string]bool{
-			"terminal.v2": true, "preview.public.v1": true,
+			"terminal.v1": true, "preview.public.v1": true,
 			"config.apply.v1": true, "health.v1": true,
 		},
 		earliestSequence: 1024,
@@ -109,10 +109,10 @@ func (p *fakePeer) enqueue(bytes int) error {
 
 func TestFakePeerVerticalContract(t *testing.T) {
 	peer := newFakePeer()
-	if err := peer.negotiate([]string{"1.0"}, []string{"terminal.v2", "health.v1"}); err != nil {
+	if err := peer.negotiate([]string{"1.0"}, []string{"terminal.v1", "health.v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := peer.negotiate([]string{"2.0"}, nil); !errors.Is(err, errProtocol) {
+	if err := peer.negotiate([]string{"0.0"}, nil); !errors.Is(err, errProtocol) {
 		t.Fatalf("unsupported version: %v", err)
 	}
 	if err := peer.negotiate([]string{"1.0"}, []string{"future.required"}); !errors.Is(err, errCapability) {

@@ -21,7 +21,7 @@ func signedArtifact(t *testing.T, serverURL string, artifact []byte) (ArtifactMa
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(artifact)
-	manifest := ArtifactManifest{Schema: ArtifactSchemaV1, Version: "0.0.0-development", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: serverURL + "/paperboat-helper", ByteLength: int64(len(artifact)), SHA256: hex.EncodeToString(digest[:])}
+	manifest := ArtifactManifest{Schema: ArtifactSchemaV1, Kind: ArtifactKindWorker, Version: "0.0.0-development", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: serverURL + "/paperboat-helper", ByteLength: int64(len(artifact)), SHA256: hex.EncodeToString(digest[:])}
 	payload, err := manifest.signaturePayload()
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func signedArtifactPair(t *testing.T, serverURL string) (ArtifactManifest, Artif
 	}
 	sign := func(kind, name, body string) ArtifactManifest {
 		digest := sha256.Sum256([]byte(body))
-		manifest := ArtifactManifest{Schema: ArtifactSchemaV2, Kind: kind, Version: "0.0.0-development", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: serverURL + "/" + name, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
+		manifest := ArtifactManifest{Schema: ArtifactSchemaV1, Kind: kind, Version: "0.0.0-development", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: serverURL + "/" + name, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
 		payload, err := manifest.signaturePayload()
 		if err != nil {
 			t.Fatal(err)

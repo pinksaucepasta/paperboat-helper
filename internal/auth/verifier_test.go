@@ -96,7 +96,7 @@ func loadFixture(t *testing.T) (signingFixture, ed25519.PrivateKey, ed25519.Publ
 }
 
 func terminalPolicy(c Claims) Policy {
-	return Policy{Issuer: c.Issuer, Audience: "paperboat-helper", CredentialClass: "terminal_operation", Scopes: []string{"terminal:operate"}, EnvironmentID: c.EnvironmentID, UserID: c.UserID, CLIClientSessionID: c.CLIClientSessionID, SessionID: c.SessionID, MaxLifetime: 5 * time.Minute}
+	return Policy{Issuer: c.Issuer, Audience: "paperboat-machine", CredentialClass: "terminal_operation", Scopes: []string{"terminal:operate"}, EnvironmentID: c.EnvironmentID, MachineID: c.MachineID, UserID: c.UserID, CLIClientSessionID: c.CLIClientSessionID, SessionID: c.SessionID, MaxLifetime: 5 * time.Minute}
 }
 
 func TestVerifierAcceptsSignedContractVector(t *testing.T) {

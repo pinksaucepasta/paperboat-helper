@@ -159,7 +159,7 @@ func validRequest(t *testing.T) Request {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(body)
-	manifest := bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV2, Kind: bootstrap.ArtifactKindWorker, Version: "test", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: "https://example.test/pbh", ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
+	manifest := bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV1, Kind: bootstrap.ArtifactKindWorker, Version: "test", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: "https://example.test/pbh", ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

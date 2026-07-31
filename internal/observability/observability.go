@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
+	"github.com/pinksaucepasta/paperboat-helper/internal/protocol"
 )
 
 var (
@@ -183,6 +184,21 @@ func (r *Registry) Snapshot() []Series {
 			Series{Name: "paperboat_helper_terminal_stage_nanoseconds_total", Labels: map[string]string{"stage": stage}, Value: float64(r.terminalNanos[index].Load())},
 		)
 	}
+	compression := protocol.TerminalCompressionMetrics()
+	if compression.SmallFrames+compression.InsufficientFrames+compression.CompressedFrames+compression.EncodeFailures+compression.DecodeFailures > 0 {
+		result = append(result,
+			Series{Name: "paperboat_helper_terminal_compression_frames_total", Labels: map[string]string{"encoding": "raw", "decision": "small"}, Value: float64(compression.SmallFrames)},
+			Series{Name: "paperboat_helper_terminal_compression_frames_total", Labels: map[string]string{"encoding": "raw", "decision": "insufficient"}, Value: float64(compression.InsufficientFrames)},
+			Series{Name: "paperboat_helper_terminal_compression_frames_total", Labels: map[string]string{"encoding": "zstd", "decision": "compressed"}, Value: float64(compression.CompressedFrames)},
+			Series{Name: "paperboat_helper_terminal_compression_frames_total", Labels: map[string]string{"encoding": "raw", "decision": "failure"}, Value: float64(compression.EncodeFailures)},
+			Series{Name: "paperboat_helper_terminal_compression_bytes_total", Labels: map[string]string{"kind": "raw"}, Value: float64(compression.RawBytes)},
+			Series{Name: "paperboat_helper_terminal_compression_bytes_total", Labels: map[string]string{"kind": "encoded"}, Value: float64(compression.EncodedBytes)},
+			Series{Name: "paperboat_helper_terminal_compression_nanoseconds_total", Labels: map[string]string{"stage": "encode"}, Value: float64(compression.EncodeNanos)},
+			Series{Name: "paperboat_helper_terminal_compression_nanoseconds_total", Labels: map[string]string{"stage": "decode"}, Value: float64(compression.DecodeNanos)},
+			Series{Name: "paperboat_helper_terminal_compression_failures_total", Labels: map[string]string{"stage": "encode"}, Value: float64(compression.EncodeFailures)},
+			Series{Name: "paperboat_helper_terminal_compression_failures_total", Labels: map[string]string{"stage": "decode"}, Value: float64(compression.DecodeFailures)},
+		)
+	}
 	sort.Slice(result, func(i, j int) bool { return seriesKey(result[i]) < seriesKey(result[j]) })
 	return result
 }
@@ -220,6 +236,10 @@ func DefaultDescriptors() []Descriptor {
 		{Name: "paperboat_helper_terminal_frames_total", Kind: Counter, Labels: map[string]map[string]bool{"direction": set("input", "output")}},
 		{Name: "paperboat_helper_terminal_bytes_total", Kind: Counter, Labels: map[string]map[string]bool{"direction": set("input", "output")}},
 		{Name: "paperboat_helper_terminal_stage_nanoseconds_total", Kind: Counter, Labels: map[string]map[string]bool{"stage": set("socket_to_pty", "pty_to_socket")}},
+		{Name: "paperboat_helper_terminal_compression_frames_total", Kind: Counter, Labels: map[string]map[string]bool{"encoding": set("raw", "zstd"), "decision": set("small", "insufficient", "compressed", "failure")}},
+		{Name: "paperboat_helper_terminal_compression_bytes_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("raw", "encoded")}},
+		{Name: "paperboat_helper_terminal_compression_nanoseconds_total", Kind: Counter, Labels: map[string]map[string]bool{"stage": set("encode", "decode")}},
+		{Name: "paperboat_helper_terminal_compression_failures_total", Kind: Counter, Labels: map[string]map[string]bool{"stage": set("encode", "decode")}},
 		{Name: "paperboat_helper_delivery_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("runtime", "preview"), "result": set("delivered", "failed", "canceled")}},
 		{Name: "paperboat_helper_cleanup_total", Kind: Counter, Labels: map[string]map[string]bool{"kind": set("upload", "update", "session"), "result": set("removed", "preserved", "failed")}},
 	}

@@ -330,14 +330,14 @@ func TestTrustRotationPersistsAndRevokesKeysAndVersions(t *testing.T) {
 	if err := manager.ApplyTrustBundle(signedTrustEnvelope(t, "root-1", root1, first)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := manager.verify(signedEnvelopeWithKey(t, "root-2", root2, artifact, func(manifest *Manifest) { manifest.Version = "1.2.0" })); err != nil {
+	if _, _, err := manager.verify(signedEnvelopeWithKey(t, "root-2", root2, artifact, func(manifest *Manifest) { manifest.Version = "1.1.0" })); err != nil {
 		t.Fatalf("rotated key: %v", err)
 	}
-	second := TrustBundle{Generation: 2, IssuedAt: now, Keys: map[string]string{"root-2": base64.RawURLEncoding.EncodeToString(public2)}, RevokedKeyIDs: []string{"root-1"}, RevokedVersions: []string{"1.2.0"}}
+	second := TrustBundle{Generation: 2, IssuedAt: now, Keys: map[string]string{"root-2": base64.RawURLEncoding.EncodeToString(public2)}, RevokedKeyIDs: []string{"root-1"}, RevokedVersions: []string{"1.1.0"}}
 	if err := manager.ApplyTrustBundle(signedTrustEnvelope(t, "root-1", root1, second)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := manager.verify(signedEnvelopeWithKey(t, "root-2", root2, artifact, func(manifest *Manifest) { manifest.Version = "1.2.0" })); !errors.Is(err, ErrIncompatible) {
+	if _, _, err := manager.verify(signedEnvelopeWithKey(t, "root-2", root2, artifact, func(manifest *Manifest) { manifest.Version = "1.1.0" })); !errors.Is(err, ErrIncompatible) {
 		t.Fatalf("revoked version err=%v", err)
 	}
 	if _, _, err := manager.verify(signedEnvelopeWithKey(t, "root-1", root1, artifact, func(manifest *Manifest) { manifest.Version = "1.3.0" })); !errors.Is(err, ErrSignatureInvalid) {

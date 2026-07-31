@@ -72,9 +72,9 @@ func newProductionConfigSync(config productionConfigSyncConfig) (*configsync.Sup
 				return nil, err
 			}
 			repositoryRoot := filepath.Join(assignmentRoot, "repository")
-			reconciler, err := configsync.NewEncryptedWorkspaceReconciler(configsync.WorkspaceReconcilerConfig{
+			reconciler, err := configsync.NewPlaintextWorkspaceReconciler(configsync.WorkspaceReconcilerConfig{
 				HomeRoot: config.HomeRoot, StateRoot: assignmentRoot, Descriptor: descriptor,
-				Classification: client, Resolutions: client, ChezmoiBinary: chezmoiBinary,
+				Resolutions: client, ChezmoiBinary: chezmoiBinary,
 			})
 			if err != nil {
 				return nil, err
@@ -93,8 +93,8 @@ func newProductionConfigSync(config productionConfigSyncConfig) (*configsync.Sup
 			}
 			return configsync.NewEngine(configsync.EngineConfig{
 				HomeRoot: config.HomeRoot, Descriptor: descriptor, Syncer: publisher, Statuses: client,
-				Diagnostics: reconciler,
-				StatusPath:  filepath.Join(assignmentRoot, "status.json"),
+				Diagnostics: reconciler, Manifest: reconciler,
+				StatusPath: filepath.Join(assignmentRoot, "status.json"),
 			})
 		},
 	})

@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,7 +15,7 @@ import (
 )
 
 const (
-	DefaultWebSocketSubprotocol = "paperboat.terminal.v2"
+	DefaultWebSocketSubprotocol = "paperboat.terminal.v1"
 	DefaultMaxWebSocketMessage  = 1 << 20
 )
 
@@ -136,7 +135,7 @@ func newWebSocketConnection(parent context.Context, connection *websocket.Conn) 
 func (c *webSocketConnection) RevocationFlag() *atomic.Bool { return &c.revoked }
 
 func (c *webSocketConnection) Read(buffer []byte) (int, error) {
-	return 0, errors.New("stream reads are unavailable for terminal protocol 2.0")
+	return 0, errors.New("stream reads are unavailable for terminal protocol 1.0")
 }
 
 func (c *webSocketConnection) ReadApplication() (protocol.Frame, []byte, error) {
@@ -177,7 +176,7 @@ func (c *webSocketConnection) WriteStructured(frame protocol.Frame) error {
 }
 
 func (c *webSocketConnection) WriteBinary(frame protocol.BinaryFrame) error {
-	encoded, err := protocol.EncodeTerminalOutput(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: 1, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
+	encoded, err := protocol.EncodeTerminalOutputAdaptive(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: 1, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
 	if err != nil {
 		return err
 	}
@@ -185,21 +184,11 @@ func (c *webSocketConnection) WriteBinary(frame protocol.BinaryFrame) error {
 }
 
 func (c *webSocketConnection) WriteTerminalOutput(streamID uint32, frame protocol.BinaryFrame) error {
-	if streamID == 0 || len(frame.Data) == 0 || (frame.Channel != protocol.TerminalStdout && frame.Channel != protocol.TerminalStderr) {
-		return &protocol.Error{Code: protocol.InvalidFrame}
-	}
-	writer, err := c.connection.Writer(c.ctx, websocket.MessageBinary)
+	encoded, err := protocol.EncodeTerminalOutputAdaptive(protocol.TerminalOutputFrame{Channel: frame.Channel, StreamID: streamID, StartSequence: frame.StartSequence, Data: frame.Data}, nil)
 	if err != nil {
 		return err
 	}
-	var header [14]byte
-	header[0], header[1] = protocol.TerminalOutputOpcode, frame.Channel
-	binary.BigEndian.PutUint32(header[2:6], streamID)
-	binary.BigEndian.PutUint64(header[6:14], frame.StartSequence)
-	if _, err = writer.Write(header[:]); err == nil {
-		_, err = writer.Write(frame.Data)
-	}
-	return errors.Join(err, writer.Close())
+	return c.connection.Write(c.ctx, websocket.MessageBinary, encoded)
 }
 
 func (c *webSocketConnection) Close() error { return c.CloseProtocol(protocol.CloseNormal, "closed") }

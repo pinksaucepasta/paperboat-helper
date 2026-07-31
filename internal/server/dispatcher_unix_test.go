@@ -54,8 +54,8 @@ func verticalServerCommand(t *testing.T, shellArgs []string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readiness := health.New("test", []string{"terminal.v2", "health.v1", "preview.public.v1"}, nil)
-	readiness.Set("terminal.v2", health.Ready, "", 0)
+	readiness := health.New("test", []string{"terminal.v1", "health.v1", "preview.public.v1"}, nil)
+	readiness.Set("terminal.v1", health.Ready, "", 0)
 	readiness.Set("health.v1", health.Ready, "", 0)
 	dispatcher, err := NewDispatcher(DispatcherConfig{
 		Sessions: sessions, Previews: previews, Health: readiness,
@@ -67,7 +67,7 @@ func verticalServerCommand(t *testing.T, shellArgs []string) *Server {
 	}
 	journal, _ := operation.NewJournal(32)
 	server, err := New(Config{
-		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v2": true, "health.v1": true, "preview.public.v1": true}},
+		Negotiator: protocol.Negotiator{Profile: config.BYOD, Available: map[string]bool{"terminal.v1": true, "health.v1": true, "preview.public.v1": true}},
 		Journal:    journal,
 		Authorizer: authorizerFunc(func(context.Context, protocol.Frame) (Authorization, error) {
 			return Authorization{JournalBinding: "env:env_test_01:user:usr_1", EnvironmentID: "env_test_01", UserID: "usr_1", ClientID: "cli_1", ResourceID: "p-abcdefghijklmnopqrstuvwxyz"}, nil
@@ -104,8 +104,8 @@ func TestTerminalStreamEndFollowsOutputWithExactExit(t *testing.T) {
 			server := verticalServerCommand(t, []string{"-c", test.command})
 			client, peer := net.Pipe()
 			go server.Serve(peer)
-			hello := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
-			_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: hello})
+			hello := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
+			_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: hello})
 			created := sendRequest(t, client, request("req_create", "op_create_exit", json.RawMessage(`{"action":"create","name":"exit-test","columns":80,"rows":24}`)))
 			var createResponse struct {
 				Result struct {
@@ -124,7 +124,7 @@ func TestTerminalStreamEndFollowsOutputWithExactExit(t *testing.T) {
 				t.Fatalf("output=%q err=%v", output.Data, err)
 			}
 			end, err := protocol.ReadFrame(client)
-			if err != nil || end.Type != "event" || end.Capability != "terminal.v2" {
+			if err != nil || end.Type != "event" || end.Capability != "terminal.v1" {
 				t.Fatalf("end=%#v err=%v", end, err)
 			}
 			var payload struct {
@@ -152,8 +152,8 @@ func TestAttachStreamsReplayAndLiveOutputAsBinaryFrames(t *testing.T) {
 	server := verticalServer(t)
 	client, peer := net.Pipe()
 	go server.Serve(peer)
-	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
-	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload})
+	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload})
 	response := sendRequest(t, client, request("req_create", "op_create_0001", json.RawMessage(`{"action":"create","name":"stream","columns":80,"rows":24}`)))
 	var created struct {
 		Result struct {
@@ -184,7 +184,7 @@ func TestAttachStreamsReplayAndLiveOutputAsBinaryFrames(t *testing.T) {
 		t.Fatalf("binary=%#v", binary)
 	}
 	control, _ := json.Marshal(map[string]any{"session_id": created.Result.ID, "attachment_id": attached.Result.AttachmentID})
-	if response = sendRequest(t, client, protocol.Frame{Type: "detach", RequestID: "req_detach", Version: "2.0", Payload: control}); response.Type != "response" {
+	if response = sendRequest(t, client, protocol.Frame{Type: "detach", RequestID: "req_detach", Version: "1.0", Payload: control}); response.Type != "response" {
 		t.Fatalf("detach=%s", response.Payload)
 	}
 	// A health request proves explicit detach left the connection usable.
@@ -203,8 +203,8 @@ func TestAttachLargeReplayUsesBinaryStreamNotStructuredResponse(t *testing.T) {
 	server := verticalServerCommand(t, []string{"-c", "dd if=/dev/zero bs=65536 count=1 2>/dev/null; read line"})
 	client, peer := net.Pipe()
 	go server.Serve(peer)
-	hello := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
-	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: hello})
+	hello := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: hello})
 	response := sendRequest(t, client, request("req_create", "op_create_large", json.RawMessage(`{"action":"create","name":"large-replay","columns":80,"rows":24}`)))
 	var created struct {
 		Result struct {
@@ -248,8 +248,8 @@ func TestVerticalFramedTerminalPreviewAndReadiness(t *testing.T) {
 	client, peer := net.Pipe()
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(peer) }()
-	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1","preview.public.v1"]}`)
-	response := sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload})
+	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1","preview.public.v1"]}`)
+	response := sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload})
 	if response.Type != "welcome" {
 		t.Fatalf("welcome=%#v", response)
 	}
@@ -292,8 +292,8 @@ func TestDispatcherRejectsEscapedCWDAndOverriddenPreviewIdentity(t *testing.T) {
 	server := verticalServer(t)
 	client, peer := net.Pipe()
 	go server.Serve(peer)
-	payload := json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)
-	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: payload})
+	payload := json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)
+	_ = sendRequest(t, client, protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: payload})
 
 	previewFrame := request("req_preview", "op_preview_0001", json.RawMessage(`{"action":"register","identity":"p-attacker-controlled-identity","logical_name":"web","target_host":"127.0.0.1","target_port":3000,"public_acknowledgement":true}`))
 	previewFrame.Capability = "preview.public.v1"

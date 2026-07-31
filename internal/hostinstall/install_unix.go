@@ -609,8 +609,8 @@ func Validate(request Request, sudoUID int) error {
 	}
 	if err := bootstrap.VerifyArtifactManifest(request.Artifact, request.ArtifactPublicKey); err != nil ||
 		bootstrap.VerifyArtifactManifest(request.HostArtifact, request.ArtifactPublicKey) != nil || request.Artifact.Platform != request.Platform ||
-		request.Artifact.Schema != bootstrap.ArtifactSchemaV2 || request.Artifact.Kind != bootstrap.ArtifactKindWorker ||
-		request.HostArtifact.Schema != bootstrap.ArtifactSchemaV2 || request.HostArtifact.Kind != bootstrap.ArtifactKindHostService ||
+		request.Artifact.Schema != bootstrap.ArtifactSchemaV1 || request.Artifact.Kind != bootstrap.ArtifactKindWorker ||
+		request.HostArtifact.Schema != bootstrap.ArtifactSchemaV1 || request.HostArtifact.Kind != bootstrap.ArtifactKindHostService ||
 		request.Artifact.Version != request.HostArtifact.Version || request.Artifact.Architecture != request.HostArtifact.Architecture ||
 		verifyArtifact(request.Executable, request.Artifact, request.UID) != nil || verifyArtifact(request.HostExecutable, request.HostArtifact, request.UID) != nil ||
 		binarytarget.Validate(request.Executable, request.Platform, request.Artifact.Architecture) != nil ||

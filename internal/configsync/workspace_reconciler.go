@@ -2,17 +2,19 @@ package configsync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"filippo.io/age"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -21,13 +23,12 @@ import (
 var ErrWorkspaceReconcilerInvalid = errors.New("invalid config workspace reconciler")
 
 type WorkspaceReconcilerConfig struct {
-	HomeRoot       string
-	StateRoot      string
-	Descriptor     RuntimeDescriptor
-	Classification ClassificationAuthority
-	Resolutions    ConflictResolutionAuthority
-	ChezmoiBinary  string
-	Clock          func() time.Time
+	HomeRoot      string
+	StateRoot     string
+	Descriptor    RuntimeDescriptor
+	Resolutions   ConflictResolutionAuthority
+	ChezmoiBinary string
+	Clock         func() time.Time
 }
 
 type pendingBaseline struct {
@@ -37,34 +38,38 @@ type pendingBaseline struct {
 }
 
 type ReconciliationDiagnostics struct {
-	ClassifierPending []PathSummary
-	Skipped           []PathSummary
-	Conflicts         []PathSummary
+	Skipped               []PathSummary
+	Conflicts             []PathSummary
+	ManifestHealth        string
+	ManifestRevision      string
+	ManagedPathCount      int
+	PendingCleanPathCount int
+	LastAppliedRevision   string
+	LastPublishedRevision string
 }
 
 type DiagnosticsSource interface {
 	Diagnostics() ReconciliationDiagnostics
 }
 
-type EncryptedWorkspaceReconciler struct {
-	homeRoot       string
-	stateRoot      string
-	baselinePath   string
-	identityPath   string
-	descriptor     RuntimeDescriptor
-	classification ClassificationAuthority
-	resolutions    ConflictResolutionAuthority
-	chezmoiBinary  string
-	clock          func() time.Time
+type PlaintextWorkspaceReconciler struct {
+	homeRoot      string
+	stateRoot     string
+	baselinePath  string
+	descriptor    RuntimeDescriptor
+	resolutions   ConflictResolutionAuthority
+	chezmoiBinary string
+	clock         func() time.Time
 
 	mu          sync.Mutex
 	pending     *pendingBaseline
 	diagnostics ReconciliationDiagnostics
+	manifest    Manifest
 }
 
-func NewEncryptedWorkspaceReconciler(config WorkspaceReconcilerConfig) (*EncryptedWorkspaceReconciler, error) {
+func NewPlaintextWorkspaceReconciler(config WorkspaceReconcilerConfig) (*PlaintextWorkspaceReconciler, error) {
 	if !canonicalAbsolutePath(config.HomeRoot) || !canonicalAbsolutePath(config.StateRoot) ||
-		config.ChezmoiBinary == "" || config.Classification == nil || validateRuntimeDescriptor(config.Descriptor, Credential{
+		config.ChezmoiBinary == "" || validateRuntimeDescriptor(config.Descriptor, Credential{
 		EnvironmentID: config.Descriptor.EnvironmentID, HelperID: config.Descriptor.HelperID,
 		AssignmentID: config.Descriptor.AssignmentID, WarningRevision: config.Descriptor.WarningRevision,
 	}) != nil {
@@ -83,20 +88,15 @@ func NewEncryptedWorkspaceReconciler(config WorkspaceReconcilerConfig) (*Encrypt
 	if config.Clock == nil {
 		config.Clock = func() time.Time { return time.Now().UTC() }
 	}
-	reconciler := &EncryptedWorkspaceReconciler{
+	reconciler := &PlaintextWorkspaceReconciler{
 		homeRoot: config.HomeRoot, stateRoot: config.StateRoot,
-		baselinePath: filepath.Join(config.StateRoot, "baseline.age"),
-		identityPath: filepath.Join(config.StateRoot, "identity.age"),
-		descriptor:   config.Descriptor, classification: config.Classification,
-		resolutions:   config.Resolutions,
+		baselinePath: filepath.Join(config.StateRoot, "baseline.json"),
+		descriptor:   config.Descriptor, resolutions: config.Resolutions,
 		chezmoiBinary: config.ChezmoiBinary, clock: config.Clock,
 	}
-	if err := EnsureAgeIdentity(reconciler.identityPath, config.Descriptor.AgeIdentities); err != nil {
-		return nil, err
-	}
 	if err := recoverApplyJournal(
-		filepath.Join(config.StateRoot, "apply-journal.age"), config.HomeRoot,
-		config.Descriptor.AgeIdentities, config.Descriptor.RepositoryID,
+		filepath.Join(config.StateRoot, "apply-journal.json"), config.HomeRoot,
+		config.Descriptor.RepositoryID,
 		config.Descriptor.AssignmentID, config.Descriptor.Policy.MaxBatchBytes,
 	); err != nil {
 		return nil, err
@@ -104,7 +104,7 @@ func NewEncryptedWorkspaceReconciler(config WorkspaceReconcilerConfig) (*Encrypt
 	return reconciler, nil
 }
 
-func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repositoryRoot string, remote RemoteSnapshot) (PreparedPublication, error) {
+func (r *PlaintextWorkspaceReconciler) Reconcile(ctx context.Context, repositoryRoot string, remote RemoteSnapshot) (PreparedPublication, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.recoverResolutionCommit(ctx, remote.Revision); err != nil {
@@ -130,9 +130,23 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 	if err := worktree.Reset(&git.ResetOptions{Commit: remoteHash, Mode: git.HardReset}); err != nil {
 		return PreparedPublication{}, ErrRemoteRevisionChanged
 	}
-	format, err := ReadEncryptedRepositoryFormat(repositoryRoot)
-	if err != nil || format.KeyVersion > int64(r.descriptor.KeyVersion) {
-		return PreparedPublication{}, errors.Join(ErrEncryptedRepositoryInvalid, err)
+	if err := ValidateConfigRepository(repositoryRoot); err != nil {
+		return PreparedPublication{}, err
+	}
+	manifest, err := LoadManifest(repositoryRoot, r.descriptor.Policy.ManifestLimits())
+	if err != nil {
+		if errors.Is(err, ErrManifestMissing) {
+			r.diagnostics.ManifestHealth = "missing"
+		} else {
+			r.diagnostics.ManifestHealth = "invalid"
+		}
+		return PreparedPublication{}, err
+	}
+	r.manifest = manifest.Clone()
+	r.diagnostics.ManifestRevision = manifest.Revision
+	r.diagnostics.ManifestHealth = "healthy"
+	if len(manifest.Roots) == 0 {
+		r.diagnostics.ManifestHealth = "empty"
 	}
 
 	remoteHome, err := os.MkdirTemp(r.stateRoot, "remote-home-")
@@ -155,7 +169,7 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 	}
 	remoteSource, err := NewChezmoiSource(ChezmoiSourceConfig{
 		Binary: r.chezmoiBinary, RuntimeRoot: remoteRuntime, SourceRoot: repositoryRoot,
-		HomeRoot: remoteHome, IdentityPath: r.identityPath, Recipient: r.descriptor.AgeRecipient,
+		HomeRoot: remoteHome,
 	})
 	if err != nil {
 		return PreparedPublication{}, err
@@ -163,11 +177,11 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 	if err := remoteSource.Apply(ctx); err != nil {
 		return PreparedPublication{}, err
 	}
-	remoteFiles, err := TakeSnapshot(remoteHome, r.descriptor.Policy)
+	remoteFiles, err := TakeManifestSnapshot(remoteHome, r.descriptor.Policy, manifest)
 	if err != nil {
 		return PreparedPublication{}, err
 	}
-	localFiles, err := TakeSnapshot(r.homeRoot, r.descriptor.Policy)
+	localFiles, err := TakeManifestSnapshot(r.homeRoot, r.descriptor.Policy, manifest)
 	if err != nil {
 		return PreparedPublication{}, err
 	}
@@ -175,63 +189,85 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 		append(append([]PathSummary(nil), localFiles.Skipped...), remoteFiles.Skipped...),
 		r.descriptor.Policy.SummaryLimit,
 	)
+	managed := make(map[string]struct{}, len(localFiles.Files)+len(remoteFiles.Files))
+	for path := range localFiles.Files {
+		managed[path] = struct{}{}
+	}
+	for path := range remoteFiles.Files {
+		managed[path] = struct{}{}
+	}
+	r.diagnostics.ManagedPathCount = len(managed)
 	baselineFiles := map[string]FileState{}
+	baselineRevision := ""
+	baselineFrozen := map[string]FrozenPath{}
 	if _, statErr := os.Lstat(r.baselinePath); errors.Is(statErr, os.ErrNotExist) {
 		// A missing baseline is an explicit first reconciliation. The empty
 		// ancestor makes differing local and remote values conflict.
 	} else if statErr != nil {
 		return PreparedPublication{}, statErr
-	} else if baseline, baselineErr := ReadBaseline(r.baselinePath, r.descriptor.AgeIdentities); baselineErr == nil {
+	} else if baseline, baselineErr := ReadBaseline(r.baselinePath); baselineErr == nil {
 		if baseline.RepositoryID != r.descriptor.RepositoryID || baseline.AssignmentID != r.descriptor.AssignmentID ||
-			baseline.PolicyRevision != r.descriptor.Policy.Revision || baseline.KeyVersion > int64(r.descriptor.KeyVersion) {
+			baseline.PolicyRevision != r.descriptor.Policy.Revision {
 			return PreparedPublication{}, ErrBaselineInvalid
 		}
 		baselineFiles = baseline.Files
+		baselineRevision = baseline.RemoteRevision
+		baselineFrozen = baseline.FrozenPaths
 	} else {
 		return PreparedPublication{}, baselineErr
 	}
-	localChanged := ChangedPaths(baselineFiles, localFiles.Files)
-	candidates, _, err := ClassificationCandidates(localFiles, localChanged)
-	if err != nil {
-		return PreparedPublication{}, err
+	effectiveMode := r.descriptor.Mode
+	writesEnabled := r.descriptor.WriteMode == "leased_writes"
+	if !writesEnabled && effectiveMode == ModeBidirectional {
+		effectiveMode = ModePullOnly
 	}
-	if len(candidates) > 0 {
-		response, classifyErr := r.classification.Classify(ctx, candidates)
-		responseErr := ValidateClassificationResponse(response, candidates, r.descriptor.Policy)
-		for _, candidate := range candidates {
-			decision := "uncertain"
-			reason := "provider_unavailable"
-			if classifyErr == nil && responseErr == nil {
-				for _, result := range response.Results {
-					if result.Path == candidate.Path {
-						decision = result.Decision
-						reason = result.ReasonCode
-						break
-					}
-				}
-			}
-			if decision == "portable" {
-				continue
-			}
-			if decision == "uncertain" {
-				r.diagnostics.ClassifierPending = append(r.diagnostics.ClassifierPending, PathSummary{
-					Path: candidate.Path, Bytes: candidate.Size, Reason: reason,
-				})
-			}
-			if previous, exists := baselineFiles[candidate.Path]; exists {
-				localFiles.Files[candidate.Path] = previous
-			} else {
-				delete(localFiles.Files, candidate.Path)
+	plan := PlanReconciliationMode(baselineFiles, localFiles.Files, remoteFiles.Files, effectiveMode)
+	if !writesEnabled {
+		plan.PublishUpdates = nil
+		plan.PublishDeletes = nil
+	}
+	if writesEnabled && effectiveMode != ModePullOnly {
+		for name := range baselineFiles {
+			if !manifest.Manages(name, false) {
+				plan.PublishDeletes = append(plan.PublishDeletes, name)
 			}
 		}
+		sort.Strings(plan.PublishDeletes)
+		plan.PublishDeletes = uniqueSortedStrings(plan.PublishDeletes)
 	}
-	plan := PlanReconciliation(baselineFiles, localFiles.Files, remoteFiles.Files)
-	if len(plan.Conflicts) > 0 {
+	mergedContents := map[string]mergedContent{}
+	baseHome := ""
+	mergeCandidates, frozenConflicts := partitionFrozenConflicts(plan.Conflicts, baselineFrozen)
+	if len(mergeCandidates) > 0 && baselineRevision != "" {
+		var cleanup func()
+		var baseErr error
+		baseHome, cleanup, baseErr = r.materializeRevision(ctx, repositoryRoot, worktree, remoteHash, baselineRevision)
+		if baseErr != nil {
+			return PreparedPublication{}, baseErr
+		}
+		defer cleanup()
+	}
+	if writesEnabled && effectiveMode == ModeBidirectional && len(mergeCandidates) > 0 && baseHome != "" {
+		mergeCandidates, mergedContents, err = r.mergeConflicts(ctx, baseHome, remoteHome, baselineFiles, localFiles.Files, remoteFiles.Files, mergeCandidates)
+		if err != nil {
+			return PreparedPublication{}, err
+		}
+		for name := range mergedContents {
+			plan.PublishUpdates = append(plan.PublishUpdates, name)
+		}
+		sort.Strings(plan.PublishUpdates)
+		plan.PublishUpdates = uniqueSortedStrings(plan.PublishUpdates)
+	}
+	plan.Conflicts = append(frozenConflicts, mergeCandidates...)
+	sort.Slice(plan.Conflicts, func(i, j int) bool { return plan.Conflicts[i].Path < plan.Conflicts[j].Path })
+	if len(plan.Conflicts) > 0 || r.resolutions != nil {
 		plan.Conflicts = identifyConflicts(
 			r.descriptor.RepositoryID, r.descriptor.AssignmentID, remote.Revision,
 			baselineFiles, localFiles.Files, remoteFiles.Files, plan.Conflicts,
 		)
 		resolved := make([]ConflictResolution, 0)
+		forcedPaths := make(map[string]string)
+		forcedMode := AssignmentMode("")
 		if r.resolutions != nil {
 			resolutions, resolutionErr := r.resolutions.Pending(ctx)
 			if resolutionErr != nil {
@@ -241,22 +277,49 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 				if !resolution.Valid() || resolution.ExpectedRemoteRevision != remote.Revision {
 					continue
 				}
+				if resolution.Scope == "config" {
+					switch resolution.Action {
+					case "force_pull":
+						baselineFiles = cloneFileStates(localFiles.Files)
+						forcedMode = ModePullOnly
+					case "force_push":
+						baselineFiles = cloneFileStates(remoteFiles.Files)
+						forcedMode = ModePushOnly
+					}
+					resolved = append(resolved, resolution)
+					continue
+				}
 				for _, conflict := range plan.Conflicts {
 					if resolution.Path != conflict.Path || resolution.ConflictRevision != conflict.Revision {
 						continue
 					}
 					switch resolution.Action {
-					case "keep_local":
+					case "keep_local", "force_push":
 						setBaselineState(baselineFiles, resolution.Path, remoteFiles.Files)
-					case "keep_remote", "externally_resolved":
+					case "keep_remote", "force_pull":
 						setBaselineState(baselineFiles, resolution.Path, localFiles.Files)
 					}
+					if resolution.Action == "force_pull" || resolution.Action == "force_push" {
+						forcedPaths[resolution.Path] = resolution.Action
+					}
 					resolved = append(resolved, resolution)
+					delete(baselineFrozen, resolution.Path)
 					break
 				}
 			}
 			if len(resolved) > 0 {
-				plan = PlanReconciliation(baselineFiles, localFiles.Files, remoteFiles.Files)
+				planningMode := effectiveMode
+				if forcedMode.Valid() {
+					planningMode = forcedMode
+				}
+				plan = PlanReconciliationMode(baselineFiles, localFiles.Files, remoteFiles.Files, planningMode)
+				for path, action := range forcedPaths {
+					forcePlanPath(&plan, path, action, localFiles.Files, remoteFiles.Files)
+				}
+				if !writesEnabled {
+					plan.PublishUpdates = nil
+					plan.PublishDeletes = nil
+				}
 				plan.Conflicts = identifyConflicts(
 					r.descriptor.RepositoryID, r.descriptor.AssignmentID, remote.Revision,
 					baselineFiles, localFiles.Files, remoteFiles.Files, plan.Conflicts,
@@ -265,10 +328,18 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 		}
 		r.diagnostics.Conflicts = boundPathSummaries(plan.Conflicts, r.descriptor.Policy.SummaryLimit)
 		if len(plan.Conflicts) > 0 {
-			if err := r.preserveConflicts(localFiles.Files, remoteFiles.Files, plan.Conflicts, remoteHome, remote.Revision); err != nil {
+			newConflicts := make([]PathSummary, 0, len(plan.Conflicts))
+			for _, conflict := range plan.Conflicts {
+				if _, frozen := baselineFrozen[conflict.Path]; !frozen {
+					newConflicts = append(newConflicts, conflict)
+				}
+			}
+			if err := r.preserveConflicts(
+				baselineFiles, localFiles.Files, remoteFiles.Files, newConflicts,
+				baseHome, remoteHome, baselineRevision, remote.Revision,
+			); err != nil {
 				return PreparedPublication{}, err
 			}
-			return PreparedPublication{}, ErrConfigConflict
 		}
 		if len(resolved) > 0 {
 			defer func() {
@@ -278,6 +349,7 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 			}()
 		}
 	}
+	r.diagnostics.PendingCleanPathCount = len(plan.PublishUpdates) + len(plan.PublishDeletes) + len(plan.ApplyRemote) + len(plan.DeleteLocal)
 
 	localRuntime, err := os.MkdirTemp(r.stateRoot, "local-runtime-")
 	if err != nil {
@@ -290,17 +362,20 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 	}
 	localSource, err := NewChezmoiSource(ChezmoiSourceConfig{
 		Binary: r.chezmoiBinary, RuntimeRoot: localRuntime, SourceRoot: repositoryRoot,
-		HomeRoot: r.homeRoot, IdentityPath: r.identityPath, Recipient: r.descriptor.AgeRecipient,
+		HomeRoot: r.homeRoot,
 	})
 	if err != nil {
 		return PreparedPublication{}, err
 	}
 	applyPaths := append(append([]string(nil), plan.ApplyRemote...), plan.DeleteLocal...)
-	journalPath := filepath.Join(r.stateRoot, "apply-journal.age")
+	for name := range mergedContents {
+		applyPaths = append(applyPaths, name)
+	}
+	journalPath := filepath.Join(r.stateRoot, "apply-journal.json")
 	if len(applyPaths) > 0 {
 		if err := beginApplyJournal(
 			journalPath, r.homeRoot, r.descriptor.RepositoryID, r.descriptor.AssignmentID,
-			remote.Revision, r.descriptor.AgeRecipient, applyPaths, r.descriptor.Policy.MaxBatchBytes,
+			remote.Revision, applyPaths, r.descriptor.Policy.MaxBatchBytes,
 		); err != nil {
 			return PreparedPublication{}, err
 		}
@@ -309,8 +384,7 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 	defer func() {
 		if len(applyPaths) > 0 && !applySucceeded {
 			_ = recoverApplyJournal(
-				journalPath, r.homeRoot, r.descriptor.AgeIdentities,
-				r.descriptor.RepositoryID, r.descriptor.AssignmentID,
+				journalPath, r.homeRoot, r.descriptor.RepositoryID, r.descriptor.AssignmentID,
 				r.descriptor.Policy.MaxBatchBytes,
 			)
 		}
@@ -325,25 +399,21 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 			return PreparedPublication{}, err
 		}
 	}
+	for name, merged := range mergedContents {
+		if err := writeMergedTarget(r.homeRoot, name, merged); err != nil {
+			return PreparedPublication{}, err
+		}
+	}
 	if len(applyPaths) > 0 {
 		if err := os.Remove(journalPath); err != nil {
 			return PreparedPublication{}, err
 		}
 	}
 	applySucceeded = true
-	if format.KeyVersion < int64(r.descriptor.KeyVersion) {
-		plan.PublishUpdates = make([]string, 0, len(localFiles.Files))
-		for path := range localFiles.Files {
-			plan.PublishUpdates = append(plan.PublishUpdates, path)
-		}
-		sort.Strings(plan.PublishUpdates)
-		format.KeyVersion = int64(r.descriptor.KeyVersion)
-		format.Recipient = r.descriptor.AgeRecipient
-		if err := WriteEncryptedRepositoryFormat(repositoryRoot, format); err != nil {
-			return PreparedPublication{}, err
-		}
+	if len(applyPaths) > 0 {
+		r.diagnostics.LastAppliedRevision = remote.Revision
 	}
-	if err := localSource.AddEncrypted(ctx, plan.PublishUpdates); err != nil {
+	if err := localSource.Add(ctx, plan.PublishUpdates); err != nil {
 		return PreparedPublication{}, err
 	}
 	for _, path := range plan.PublishDeletes {
@@ -359,51 +429,314 @@ func (r *EncryptedWorkspaceReconciler) Reconcile(ctx context.Context, repository
 		return PreparedPublication{}, err
 	}
 	if status.IsClean() {
-		merged, snapshotErr := TakeSnapshot(r.homeRoot, r.descriptor.Policy)
+		merged, snapshotErr := TakeManifestSnapshot(r.homeRoot, r.descriptor.Policy, manifest)
 		if snapshotErr != nil {
 			return PreparedPublication{}, snapshotErr
 		}
+		accepted := AcceptedBaseline(baselineFiles, merged.Files, remoteFiles.Files, r.descriptor.Mode, writesEnabled)
+		freezeConflictBaseline(accepted, baselineFiles, plan.Conflicts)
+		frozen := nextFrozenPaths(baselineFrozen, plan.Conflicts, baselineRevision)
 		r.pending = &pendingBaseline{CommitID: remote.Revision, Value: Baseline{
 			Format: "paperboat-config-baseline-v1", RepositoryID: r.descriptor.RepositoryID,
 			AssignmentID: r.descriptor.AssignmentID, PolicyRevision: r.descriptor.Policy.Revision,
-			KeyVersion: int64(r.descriptor.KeyVersion), RemoteRevision: remote.Revision, Files: merged.Files,
+			ManifestRevision: manifest.Revision, SelectedRoots: append([]ManifestRoot(nil), manifest.Roots...),
+			FrozenPaths: frozen, RemoteRevision: remote.Revision, Files: accepted,
 		}}
+		r.diagnostics.PendingCleanPathCount = 0
 		return PreparedPublication{ExpectedRemoteRevision: remote.Revision, CommitID: remote.Revision, HasChanges: false}, nil
 	}
 	if err := validateRepositoryBatch(repositoryRoot, status, r.descriptor.Policy); err != nil {
 		return PreparedPublication{}, err
 	}
-	commit, err := worktree.Commit("Synchronize encrypted configuration", &git.CommitOptions{
+	commit, err := worktree.Commit("Synchronize configuration", &git.CommitOptions{
 		Author: &object.Signature{Name: "Paperboat", Email: "config@paperboat.invalid", When: r.clock()},
 	})
 	if err != nil {
 		return PreparedPublication{}, err
 	}
-	merged, err := TakeSnapshot(r.homeRoot, r.descriptor.Policy)
+	merged, err := TakeManifestSnapshot(r.homeRoot, r.descriptor.Policy, manifest)
 	if err != nil {
 		return PreparedPublication{}, err
 	}
+	accepted := AcceptedBaseline(baselineFiles, merged.Files, merged.Files, r.descriptor.Mode, writesEnabled)
+	freezeConflictBaseline(accepted, baselineFiles, plan.Conflicts)
+	frozen := nextFrozenPaths(baselineFrozen, plan.Conflicts, baselineRevision)
 	r.pending = &pendingBaseline{CommitID: commit.String(), Value: Baseline{
 		Format: "paperboat-config-baseline-v1", RepositoryID: r.descriptor.RepositoryID,
 		AssignmentID: r.descriptor.AssignmentID, PolicyRevision: r.descriptor.Policy.Revision,
-		KeyVersion: int64(r.descriptor.KeyVersion), RemoteRevision: commit.String(), Files: merged.Files,
+		ManifestRevision: manifest.Revision, SelectedRoots: append([]ManifestRoot(nil), manifest.Roots...),
+		FrozenPaths: frozen, RemoteRevision: commit.String(), Files: accepted,
 	}}
+	r.diagnostics.PendingCleanPathCount = 0
+	r.diagnostics.LastPublishedRevision = commit.String()
 	return PreparedPublication{
 		ExpectedRemoteRevision: remote.Revision, CommitID: commit.String(), HasChanges: true,
 	}, nil
 }
 
-func (r *EncryptedWorkspaceReconciler) Diagnostics() ReconciliationDiagnostics {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return ReconciliationDiagnostics{
-		ClassifierPending: append([]PathSummary(nil), r.diagnostics.ClassifierPending...),
-		Skipped:           append([]PathSummary(nil), r.diagnostics.Skipped...),
-		Conflicts:         append([]PathSummary(nil), r.diagnostics.Conflicts...),
+func partitionFrozenConflicts(conflicts []PathSummary, frozen map[string]FrozenPath) ([]PathSummary, []PathSummary) {
+	mergeCandidates := make([]PathSummary, 0, len(conflicts))
+	frozenConflicts := make([]PathSummary, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		if ancestry, ok := frozen[conflict.Path]; ok {
+			conflict.Revision = ancestry.ConflictRevision
+			frozenConflicts = append(frozenConflicts, conflict)
+		} else {
+			mergeCandidates = append(mergeCandidates, conflict)
+		}
+	}
+	return mergeCandidates, frozenConflicts
+}
+
+func nextFrozenPaths(previous map[string]FrozenPath, conflicts []PathSummary, baseRevision string) map[string]FrozenPath {
+	if baseRevision == "" {
+		baseRevision = "absent"
+	}
+	result := make(map[string]FrozenPath, len(conflicts))
+	for _, conflict := range conflicts {
+		if frozen, ok := previous[conflict.Path]; ok {
+			result[conflict.Path] = frozen
+		} else {
+			result[conflict.Path] = FrozenPath{BaseRevision: baseRevision, ConflictRevision: conflict.Revision}
+		}
+	}
+	return result
+}
+
+func forcePlanPath(plan *ReconcilePlan, path, action string, local, remote map[string]FileState) {
+	plan.PublishUpdates = removeString(plan.PublishUpdates, path)
+	plan.PublishDeletes = removeString(plan.PublishDeletes, path)
+	plan.ApplyRemote = removeString(plan.ApplyRemote, path)
+	plan.DeleteLocal = removeString(plan.DeleteLocal, path)
+	conflicts := plan.Conflicts[:0]
+	for _, conflict := range plan.Conflicts {
+		if conflict.Path != path {
+			conflicts = append(conflicts, conflict)
+		}
+	}
+	plan.Conflicts = conflicts
+	if action == "force_pull" {
+		if _, ok := remote[path]; ok {
+			plan.ApplyRemote = append(plan.ApplyRemote, path)
+		} else {
+			plan.DeleteLocal = append(plan.DeleteLocal, path)
+		}
+		return
+	}
+	if _, ok := local[path]; ok {
+		plan.PublishUpdates = append(plan.PublishUpdates, path)
+	} else {
+		plan.PublishDeletes = append(plan.PublishDeletes, path)
 	}
 }
 
-func (r *EncryptedWorkspaceReconciler) PublicationCommitted(ctx context.Context, prepared PreparedPublication, revision string) error {
+func removeString(values []string, target string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if value != target {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+type mergedContent struct {
+	Value []byte
+	Mode  os.FileMode
+}
+
+func (r *PlaintextWorkspaceReconciler) materializeRevision(
+	ctx context.Context,
+	repositoryRoot string,
+	worktree *git.Worktree,
+	remoteHash plumbing.Hash,
+	revision string,
+) (string, func(), error) {
+	baseHash := plumbing.NewHash(revision)
+	if baseHash.IsZero() {
+		return "", func() {}, ErrBaselineInvalid
+	}
+	if err := worktree.Reset(&git.ResetOptions{Commit: baseHash, Mode: git.HardReset}); err != nil {
+		return "", func() {}, ErrBaselineInvalid
+	}
+	restored := false
+	restore := func() error {
+		if restored {
+			return nil
+		}
+		restored = true
+		return worktree.Reset(&git.ResetOptions{Commit: remoteHash, Mode: git.HardReset})
+	}
+	baseHome, err := os.MkdirTemp(r.stateRoot, "base-home-")
+	if err != nil {
+		_ = restore()
+		return "", func() {}, err
+	}
+	baseRuntime, err := os.MkdirTemp(r.stateRoot, "base-runtime-")
+	if err != nil {
+		_ = os.RemoveAll(baseHome)
+		_ = restore()
+		return "", func() {}, err
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(baseRuntime)
+		_ = os.RemoveAll(baseHome)
+	}
+	baseSource, err := NewChezmoiSource(ChezmoiSourceConfig{
+		Binary: r.chezmoiBinary, RuntimeRoot: baseRuntime, SourceRoot: repositoryRoot,
+		HomeRoot: baseHome,
+	})
+	if err == nil {
+		err = baseSource.Apply(ctx)
+	}
+	restoreErr := restore()
+	if err != nil || restoreErr != nil {
+		cleanup()
+		return "", func() {}, errors.Join(err, restoreErr)
+	}
+	return baseHome, cleanup, nil
+}
+
+func (r *PlaintextWorkspaceReconciler) mergeConflicts(
+	ctx context.Context,
+	baseHome, remoteHome string,
+	baseline, local, remote map[string]FileState,
+	conflicts []PathSummary,
+) ([]PathSummary, map[string]mergedContent, error) {
+	remaining := make([]PathSummary, 0, len(conflicts))
+	merged := make(map[string]mergedContent)
+	gitBinary, err := exec.LookPath("git")
+	if err != nil {
+		return append([]PathSummary(nil), conflicts...), merged, nil
+	}
+	for _, conflict := range conflicts {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		baseState, baseOK := baseline[conflict.Path]
+		localState, localOK := local[conflict.Path]
+		remoteState, remoteOK := remote[conflict.Path]
+		if !baseOK || !localOK || !remoteOK {
+			conflict.Reason = "delete_modify"
+			remaining = append(remaining, conflict)
+			continue
+		}
+		if baseState.Mode&os.ModeSymlink != 0 || localState.Mode&os.ModeSymlink != 0 || remoteState.Mode&os.ModeSymlink != 0 {
+			conflict.Reason = "type_change"
+			remaining = append(remaining, conflict)
+			continue
+		}
+		if baseState.Mode.Perm() != localState.Mode.Perm() || localState.Mode.Perm() != remoteState.Mode.Perm() {
+			conflict.Reason = "mode_change"
+			remaining = append(remaining, conflict)
+			continue
+		}
+		baseValue, baseErr := readVerifiedState(baseHome, conflict.Path, baseState, r.descriptor.Policy.MaxFileBytes)
+		localValue, localErr := readVerifiedState(r.homeRoot, conflict.Path, localState, r.descriptor.Policy.MaxFileBytes)
+		remoteValue, remoteErr := readVerifiedState(remoteHome, conflict.Path, remoteState, r.descriptor.Policy.MaxFileBytes)
+		if baseErr != nil || localErr != nil || remoteErr != nil {
+			conflict.Reason = "source_changed"
+			remaining = append(remaining, conflict)
+			continue
+		}
+		value, mergeErr := mergeRegularText(ctx, gitBinary, baseValue, localValue, remoteValue, r.descriptor.Policy.MaxFileBytes)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if mergeErr != nil {
+			conflict.Reason = "merge_conflict"
+			remaining = append(remaining, conflict)
+			continue
+		}
+		merged[conflict.Path] = mergedContent{Value: value, Mode: localState.Mode.Perm()}
+	}
+	return remaining, merged, nil
+}
+
+func readVerifiedState(root, relative string, expected FileState, maxBytes int64) ([]byte, error) {
+	if !safeRelativeStatusPath(relative) || expected.Bytes < 0 || expected.Bytes > maxBytes {
+		return nil, ErrSourceChanged
+	}
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Size() != expected.Bytes || info.Mode().Perm() != expected.Mode.Perm() {
+		return nil, errors.Join(ErrSourceChanged, err)
+	}
+	value, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(value)
+	if hex.EncodeToString(hash[:]) != expected.Hash {
+		return nil, ErrSourceChanged
+	}
+	return value, nil
+}
+
+func writeMergedTarget(root, relative string, merged mergedContent) error {
+	if !safeRelativeStatusPath(relative) || merged.Mode&^os.ModePerm != 0 {
+		return ErrWorkspaceReconcilerInvalid
+	}
+	target := filepath.Join(root, filepath.FromSlash(relative))
+	if err := ensurePrivateParent(root, filepath.Dir(target)); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(target), ".paperboat-merge-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err = temporary.Chmod(merged.Mode.Perm()); err == nil {
+		_, err = temporary.Write(merged.Value)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	err = errors.Join(err, temporary.Close())
+	if err != nil {
+		return err
+	}
+	if info, statErr := os.Lstat(target); statErr == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		return ErrWorkspaceReconcilerInvalid
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	return os.Rename(temporaryPath, target)
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	result := values[:1]
+	for _, value := range values[1:] {
+		if value != result[len(result)-1] {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (r *PlaintextWorkspaceReconciler) Diagnostics() ReconciliationDiagnostics {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return ReconciliationDiagnostics{
+		Skipped: append([]PathSummary(nil), r.diagnostics.Skipped...), Conflicts: append([]PathSummary(nil), r.diagnostics.Conflicts...),
+		ManifestHealth: r.diagnostics.ManifestHealth, ManifestRevision: r.diagnostics.ManifestRevision,
+		ManagedPathCount: r.diagnostics.ManagedPathCount, PendingCleanPathCount: r.diagnostics.PendingCleanPathCount,
+		LastAppliedRevision: r.diagnostics.LastAppliedRevision, LastPublishedRevision: r.diagnostics.LastPublishedRevision,
+	}
+}
+
+func (r *PlaintextWorkspaceReconciler) CurrentManifest() Manifest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.manifest.Clone()
+}
+
+func (r *PlaintextWorkspaceReconciler) PublicationCommitted(ctx context.Context, prepared PreparedPublication, revision string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.pending == nil || prepared.CommitID == "" ||
@@ -412,7 +745,7 @@ func (r *EncryptedWorkspaceReconciler) PublicationCommitted(ctx context.Context,
 	}
 	if len(r.pending.Resolutions) > 0 {
 		if err := writeResolutionCommit(
-			resolutionCommitPath(r.stateRoot), r.descriptor.AgeRecipient,
+			resolutionCommitPath(r.stateRoot),
 			resolutionCommit{
 				Format: "paperboat-config-resolution-commit-v1", CommitID: revision,
 				Baseline: r.pending.Value, Resolutions: r.pending.Resolutions,
@@ -421,7 +754,7 @@ func (r *EncryptedWorkspaceReconciler) PublicationCommitted(ctx context.Context,
 			return err
 		}
 	}
-	err := WriteBaseline(r.baselinePath, r.pending.Value, r.descriptor.AgeRecipient)
+	err := WriteBaseline(r.baselinePath, r.pending.Value)
 	if err == nil {
 		for _, resolution := range r.pending.Resolutions {
 			if r.resolutions != nil {
@@ -441,7 +774,7 @@ func (r *EncryptedWorkspaceReconciler) PublicationCommitted(ctx context.Context,
 	return err
 }
 
-func (r *EncryptedWorkspaceReconciler) PublicationPrepared(_ context.Context, prepared PreparedPublication) error {
+func (r *PlaintextWorkspaceReconciler) PublicationPrepared(_ context.Context, prepared PreparedPublication) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.pending == nil || prepared.CommitID == "" || r.pending.CommitID != prepared.CommitID {
@@ -451,7 +784,7 @@ func (r *EncryptedWorkspaceReconciler) PublicationPrepared(_ context.Context, pr
 		return nil
 	}
 	return writeResolutionCommit(
-		resolutionCommitPath(r.stateRoot), r.descriptor.AgeRecipient,
+		resolutionCommitPath(r.stateRoot),
 		resolutionCommit{
 			Format: "paperboat-config-resolution-commit-v1", CommitID: prepared.CommitID,
 			Baseline: r.pending.Value, Resolutions: r.pending.Resolutions,
@@ -459,7 +792,7 @@ func (r *EncryptedWorkspaceReconciler) PublicationPrepared(_ context.Context, pr
 	)
 }
 
-func (r *EncryptedWorkspaceReconciler) PublicationAborted(_ context.Context, prepared PreparedPublication) error {
+func (r *PlaintextWorkspaceReconciler) PublicationAborted(_ context.Context, prepared PreparedPublication) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	path := resolutionCommitPath(r.stateRoot)
@@ -468,21 +801,21 @@ func (r *EncryptedWorkspaceReconciler) PublicationAborted(_ context.Context, pre
 	} else if err != nil {
 		return err
 	}
-	commit, err := readResolutionCommit(path, r.descriptor.AgeIdentities)
+	commit, err := readResolutionCommit(path)
 	if err != nil || commit.CommitID != prepared.CommitID {
 		return errors.Join(ErrBaselineInvalid, err)
 	}
 	return os.Remove(path)
 }
 
-func (r *EncryptedWorkspaceReconciler) recoverResolutionCommit(ctx context.Context, remoteRevision string) error {
+func (r *PlaintextWorkspaceReconciler) recoverResolutionCommit(ctx context.Context, remoteRevision string) error {
 	path := resolutionCommitPath(r.stateRoot)
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	commit, err := readResolutionCommit(path, r.descriptor.AgeIdentities)
+	commit, err := readResolutionCommit(path)
 	if err != nil || commit.Baseline.RepositoryID != r.descriptor.RepositoryID ||
 		commit.Baseline.AssignmentID != r.descriptor.AssignmentID ||
 		commit.Baseline.RemoteRevision != commit.CommitID {
@@ -491,7 +824,7 @@ func (r *EncryptedWorkspaceReconciler) recoverResolutionCommit(ctx context.Conte
 	if remoteRevision != commit.CommitID {
 		return ErrSyncUncertain
 	}
-	if err := WriteBaseline(r.baselinePath, commit.Baseline, r.descriptor.AgeRecipient); err != nil {
+	if err := WriteBaseline(r.baselinePath, commit.Baseline); err != nil {
 		return err
 	}
 	for _, resolution := range commit.Resolutions {
@@ -506,11 +839,11 @@ func (r *EncryptedWorkspaceReconciler) recoverResolutionCommit(ctx context.Conte
 	return os.Remove(path)
 }
 
-func (r *EncryptedWorkspaceReconciler) preserveConflicts(local, remote map[string]FileState, conflicts []PathSummary, remoteHome, remoteRevision string) error {
-	recipient, err := age.ParseX25519Recipient(r.descriptor.AgeRecipient)
-	if err != nil {
-		return ErrEncryptedRepositoryInvalid
-	}
+func (r *PlaintextWorkspaceReconciler) preserveConflicts(
+	baseline, local, remote map[string]FileState,
+	conflicts []PathSummary,
+	baseHome, remoteHome, baseRevision, remoteRevision string,
+) error {
 	for _, conflict := range conflicts {
 		conflictRoot := filepath.Join(r.stateRoot, "conflicts", conflict.Revision)
 		if err := os.MkdirAll(conflictRoot, 0o700); err != nil {
@@ -522,44 +855,56 @@ func (r *EncryptedWorkspaceReconciler) preserveConflicts(local, remote map[strin
 			state FileState
 			ok    bool
 		}{
+			{"base", baseHome, baseline[conflict.Path], hasState(baseline, conflict.Path)},
 			{"local", r.homeRoot, local[conflict.Path], hasState(local, conflict.Path)},
 			{"remote", remoteHome, remote[conflict.Path], hasState(remote, conflict.Path)},
 		} {
-			target := filepath.Join(conflictRoot, filepath.FromSlash(conflict.Path)+"."+side.name+".age")
+			target := filepath.Join(conflictRoot, filepath.FromSlash(conflict.Path)+"."+side.name)
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
 			if info, statErr := os.Lstat(target); statErr == nil {
 				if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-					return ErrEncryptedRepositoryInvalid
+					return ErrConfigRepositoryInvalid
 				}
 				continue
 			} else if !errors.Is(statErr, os.ErrNotExist) {
 				return statErr
 			}
 			if !side.ok {
-				if err := encryptConflictBytes(target, recipient, []byte(`{"deleted":true}`+"\n")); err != nil {
+				if err := writePrivateAtomic(target, []byte(`{"deleted":true}`+"\n")); err != nil {
 					return err
 				}
 				continue
 			}
+			if side.root == "" {
+				return ErrBaselineInvalid
+			}
 			if side.state.Mode&os.ModeSymlink != 0 {
-				if err := encryptConflictBytes(target, recipient, []byte(side.state.Target)); err != nil {
+				if err := writePrivateAtomic(target, []byte(side.state.Target)); err != nil {
 					return err
 				}
 				continue
 			}
 			source := filepath.Join(side.root, filepath.FromSlash(conflict.Path))
-			if err := encryptConflictFile(target, recipient, source, side.state); err != nil {
+			if err := writeConflictFile(target, source, side.state); err != nil {
 				return err
 			}
 		}
 		metadata, err := json.Marshal(struct {
 			RepositoryID   string      `json:"repository_id"`
 			AssignmentID   string      `json:"assignment_id"`
+			BaseRevision   string      `json:"base_revision,omitempty"`
 			RemoteRevision string      `json:"remote_revision"`
+			BaseDigest     string      `json:"base_digest"`
+			LocalDigest    string      `json:"local_digest"`
+			RemoteDigest   string      `json:"remote_digest"`
 			Conflict       PathSummary `json:"conflict"`
-		}{r.descriptor.RepositoryID, r.descriptor.AssignmentID, remoteRevision, conflict})
+		}{
+			r.descriptor.RepositoryID, r.descriptor.AssignmentID, baseRevision, remoteRevision,
+			stateIdentity(baseline, conflict.Path), stateIdentity(local, conflict.Path),
+			stateIdentity(remote, conflict.Path), conflict,
+		})
 		if err != nil {
 			return err
 		}
@@ -575,7 +920,7 @@ func hasState(states map[string]FileState, path string) bool {
 	return ok
 }
 
-func encryptConflictFile(target string, recipient age.Recipient, source string, expected FileState) error {
+func writeConflictFile(target, source string, expected FileState) error {
 	info, err := os.Lstat(source)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != expected.Bytes {
 		return errors.Join(ErrSourceChanged, err)
@@ -585,25 +930,15 @@ func encryptConflictFile(target string, recipient age.Recipient, source string, 
 		return err
 	}
 	defer input.Close()
-	return encryptConflictReader(target, recipient, input)
+	return writePrivateReader(target, input)
 }
 
-func encryptConflictBytes(target string, recipient age.Recipient, value []byte) error {
-	return encryptConflictReader(target, recipient, strings.NewReader(string(value)))
-}
-
-func encryptConflictReader(target string, recipient age.Recipient, input io.Reader) error {
+func writePrivateReader(target string, input io.Reader) error {
 	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	writer, err := age.Encrypt(file, recipient)
-	if err == nil {
-		_, err = io.Copy(writer, input)
-	}
-	if err == nil {
-		err = writer.Close()
-	}
+	_, err = io.Copy(file, input)
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if err != nil || syncErr != nil || closeErr != nil {
@@ -645,14 +980,14 @@ func validateRepositoryBatch(root string, status git.Status, policy RuntimePolic
 		path := filepath.Join(root, filepath.FromSlash(relative))
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.Join(ErrEncryptedRepositoryInvalid, err)
+			return errors.Join(ErrConfigRepositoryInvalid, err)
 		}
 		if info.Size() > policy.MaxFileBytes+(64<<10) {
-			return ErrEncryptedRepositoryInvalid
+			return ErrConfigRepositoryInvalid
 		}
 		total += info.Size()
 		if total > policy.MaxBatchBytes+(1<<20) {
-			return ErrEncryptedRepositoryInvalid
+			return ErrConfigRepositoryInvalid
 		}
 	}
 	return nil

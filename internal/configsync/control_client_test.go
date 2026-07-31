@@ -7,12 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"filippo.io/age"
 )
 
 type tokenSourceFunc func(context.Context) (string, error)
@@ -40,10 +37,6 @@ func (s *recordingProofSource) Proof(_ context.Context, operationID, method, pat
 
 func TestControlClientCredentialAndLeaseLifecycle(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	ageIdentity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	var credentialRequests int
 	var leaseID = "lease-1"
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -95,15 +88,15 @@ func TestControlClientCredentialAndLeaseLifecycle(t *testing.T) {
 		case "/v1/config/runtime":
 			assertLeaseAuthorization(t, r)
 			writeTestJSON(t, w, map[string]any{"data": RuntimeDescriptor{
-				WriteMode:    "leased_writes",
+				WriteMode: "leased_writes", Mode: ModeBidirectional,
 				RepositoryID: "repo-1", AssignmentID: "assignment-1", EnvironmentID: "env-1", HelperID: "helper-1",
 				HelperGeneration: 1,
-				WarningRevision:  "warning-1", KeyVersion: 1, AgeRecipient: ageIdentity.Recipient().String(), AgeIdentities: ageIdentity.String(),
+				WarningRevision:  "warning-1",
 				Policy: RuntimePolicy{
-					Format: "paperboat-chezmoi-age-v1", Revision: "policy-1",
-					Includes:            []string{".bashrc"},
-					MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
-					MaxFileBytes:        5 << 20, MaxBatchBytes: 25 << 20, Debounce: 10 * time.Second,
+					Format: "paperboat-config-plaintext-v1", Revision: "policy-1",
+					ManifestContract: ManifestContractVersion, ManifestMaxBytes: DefaultManifestMaxBytes,
+					ManifestMaxLines: DefaultManifestMaxLines, ManifestMaxPatternBytes: DefaultManifestMaxPatternBytes,
+					MaxFileBytes: 5 << 20, MaxBatchBytes: 25 << 20, Debounce: 10 * time.Second,
 					MinimumPushInterval: 5 * time.Minute, MaximumDirtyDelay: 5 * time.Minute,
 					RemotePollInterval: time.Minute, RetryLimit: 5, ShutdownFlushTimeout: 30 * time.Second, SummaryLimit: 50,
 				},
@@ -140,9 +133,9 @@ func TestControlClientCredentialAndLeaseLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := client.ReportStatus(context.Background(), Status{
-		State: "healthy", RepositoryID: "repo-1", AssignmentID: "assignment-1", EnvironmentID: "env-1",
+		State: "healthy", Mode: ModeBidirectional, RepositoryID: "repo-1", AssignmentID: "assignment-1", EnvironmentID: "env-1",
 		HelperID: "helper-1", HelperGeneration: 1, WarningRevision: "warning-1", PolicyRevision: "policy-1",
-		KeyVersion: 1, SyncRevision: 1, RemoteRevision: "head-1", UpdatedAt: now,
+		SyncRevision: 1, RemoteRevision: "head-1", UpdatedAt: now,
 	}, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +144,7 @@ func TestControlClientCredentialAndLeaseLifecycle(t *testing.T) {
 		t.Fatalf("repository access = %#v, %v", access, err)
 	}
 	descriptor, err := client.RuntimeDescriptor(context.Background())
-	if err != nil || descriptor.Policy.Format != "paperboat-chezmoi-age-v1" || descriptor.KeyVersion != 1 {
+	if err != nil || descriptor.Policy.Format != "paperboat-config-plaintext-v1" {
 		t.Fatalf("runtime descriptor = %#v, %v", descriptor, err)
 	}
 	if credentialRequests != 1 {
@@ -325,76 +318,6 @@ func TestControlClientRejectsChangedLeaseIdentityOnRenewal(t *testing.T) {
 	}
 	if _, err := client.RenewLease(context.Background(), lease, 30*time.Second); !errors.Is(err, ErrControlClientInvalid) {
 		t.Fatalf("changed renewal error = %v", err)
-	}
-}
-
-func TestControlClientClassificationSendsOnlyApprovedMetadata(t *testing.T) {
-	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/config/credentials":
-			writeTestJSON(t, w, map[string]any{"data": map[string]any{
-				"credential": "config-credential", "environment_id": "env", "helper_id": "helper",
-				"assignment_id": "assignment", "warning_revision": "warning", "expires_at": now.Add(5 * time.Minute),
-			}})
-		case "/v1/config/classify":
-			var body map[string]any
-			decodeTestJSON(t, r, &body)
-			if len(body) != 1 {
-				t.Fatalf("classification root fields = %#v", body)
-			}
-			items, ok := body["candidates"].([]any)
-			if !ok || len(items) != 1 {
-				t.Fatalf("classification candidates = %#v", body["candidates"])
-			}
-			item, ok := items[0].(map[string]any)
-			if !ok {
-				t.Fatalf("classification candidate = %#v", items[0])
-			}
-			allowed := map[string]bool{
-				"path": true, "file_type": true, "size": true,
-				"change_frequency": true, "location_class": true, "siblings": true,
-			}
-			for key := range item {
-				if !allowed[key] {
-					t.Fatalf("unapproved classification field %q", key)
-				}
-			}
-			encoded, _ := json.Marshal(body)
-			for _, secret := range []string{"/Users/alice", "file contents", "credential", "repository-id"} {
-				if strings.Contains(string(encoded), secret) {
-					t.Fatalf("classification body leaked %q: %s", secret, encoded)
-				}
-			}
-			writeTestJSON(t, w, map[string]any{"data": ClassificationResponse{
-				Results: []ClassificationResult{{
-					Path: ".config/tool/config.json", Decision: "portable", Confidence: 1,
-					ReasonCode: "known_portable", Source: "deterministic", Pending: false,
-				}},
-				PolicyRevision: "policy", ModelRevision: "model",
-				ClassifierRevision: "classifier", Health: "healthy",
-			}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	client, err := NewControlClient(ControlClientConfig{
-		BaseURL: server.URL, AllowedHosts: []string{"127.0.0.1"},
-		Identities: tokenSourceFunc(func(context.Context) (string, error) { return "identity", nil }),
-		Proofs:     &recordingProofSource{}, OperationID: func() (string, error) { return "operation", nil },
-		Transport: server.Client().Transport, Clock: func() time.Time { return now },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := client.Classify(context.Background(), []ClassificationCandidate{{
-		Path: ".config/tool/config.json", FileType: "file", Size: 12,
-		ChangeFrequency: "changed", LocationClass: "xdg_config",
-		Siblings: []ClassificationSibling{{Name: "settings.json", FileType: "file"}},
-	}})
-	if err != nil || len(response.Results) != 1 || response.Results[0].Decision != "portable" {
-		t.Fatalf("classification = %#v, %v", response, err)
 	}
 }
 

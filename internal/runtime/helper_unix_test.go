@@ -163,11 +163,11 @@ func TestHelperCompositionNegotiatesAuthenticatedHealthAndClosesDurableState(t *
 		}
 		return frame
 	}
-	writeFrame(protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "2.0", Payload: json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1","preview.public.v1","config.apply.v1"]}`)})
+	writeFrame(protocol.Frame{Type: "hello", RequestID: "req_hello", Version: "1.0", Payload: json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1","preview.public.v1","config.apply.v1"]}`)})
 	if welcome := readFrame(); welcome.Type != "welcome" || !bytes.Contains(welcome.Payload, []byte(`"preview.public.v1"`)) || !bytes.Contains(welcome.Payload, []byte(`"config.apply.v1"`)) {
 		t.Fatalf("welcome=%#v", welcome)
 	}
-	writeFrame(protocol.Frame{Type: "request", RequestID: "req_health", Version: "2.0", OperationID: "op_health_0001", Capability: "health.v1", DeadlineMS: 5_000, Payload: json.RawMessage(`{}`)})
+	writeFrame(protocol.Frame{Type: "request", RequestID: "req_health", Version: "1.0", OperationID: "op_health_0001", Capability: "health.v1", DeadlineMS: 5_000, Payload: json.RawMessage(`{}`)})
 	responseFrame := readFrame()
 	if responseFrame.Type != "response" || !bytes.Contains(responseFrame.Payload, []byte(`"live":true`)) {
 		t.Fatalf("response=%#v", responseFrame)

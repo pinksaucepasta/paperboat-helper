@@ -25,6 +25,36 @@ func nativeTestConnection(t *testing.T) (*nativeConnection, net.Conn) {
 	return connection, client
 }
 
+func TestNativeTerminalOutputUsesSharedCompressionEnvelope(t *testing.T) {
+	connection, controlClient := nativeTestConnection(t)
+	defer controlClient.Close()
+	inputServer, inputClient := net.Pipe()
+	defer inputClient.Close()
+	outputServer, outputClient := net.Pipe()
+	defer outputClient.Close()
+	connection.markAuthenticated()
+	if !connection.attach(nativeproto.RoleInput, inputServer) || !connection.attach(nativeproto.RoleOutput, outputServer) {
+		t.Fatal("attach failed")
+	}
+	data := bytes.Repeat([]byte("agent output\r\n"), 200)
+	done := make(chan error, 1)
+	go func() {
+		done <- connection.WriteTerminalOutput(7, protocol.BinaryFrame{Channel: protocol.Stdout, StartSequence: 21, Data: data})
+	}()
+	kind, wire, err := nativeproto.ReadRecord(outputClient, false)
+	if err != nil || kind != nativeproto.RecordBinary || wire[2] != protocol.TerminalOutputZstd {
+		t.Fatalf("kind=%d encoding=%d err=%v", kind, wire[2], err)
+	}
+	frame, err := protocol.DecodeTerminalOutput(wire)
+	if err != nil || frame.StreamID != 7 || frame.StartSequence != 21 || !bytes.Equal(frame.Data, data) {
+		t.Fatalf("frame=%#v err=%v", frame, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+}
+
 func TestNativeThreeStreamAssociationAuthenticatesOnce(t *testing.T) {
 	protocolServer := testServer(t, func(context.Context, protocol.Frame) (Authorization, error) {
 		return Authorization{JournalBinding: "principal"}, nil
@@ -49,7 +79,7 @@ func TestNativeThreeStreamAssociationAuthenticatesOnce(t *testing.T) {
 	if err := nativeproto.WritePreface(controlClient, nativeproto.Preface{Role: nativeproto.RoleControl, ConnectionID: id, Token: "signed-token"}); err != nil {
 		t.Fatal(err)
 	}
-	hello := protocol.Frame{Type: "hello", RequestID: "req_hello", Version: protocol.ProtocolVersion, Payload: json.RawMessage(`{"min_version":"2.0","max_version":"2.0","capabilities":["terminal.v2","health.v1"]}`)}
+	hello := protocol.Frame{Type: "hello", RequestID: "req_hello", Version: protocol.ProtocolVersion, Payload: json.RawMessage(`{"min_version":"1.0","max_version":"1.0","capabilities":["terminal.v1","health.v1"]}`)}
 	encoded, _ := json.Marshal(hello)
 	if err := nativeproto.WriteRecord(controlClient, nativeproto.RecordStructured, encoded, true); err != nil {
 		t.Fatal(err)

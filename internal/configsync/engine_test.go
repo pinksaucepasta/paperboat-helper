@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"filippo.io/age"
 )
 
 type recordingSyncer struct {
@@ -43,21 +41,16 @@ func TestEngineRunsInitialSyncAndBoundedShutdownFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	descriptor := RuntimeDescriptor{
-		WriteMode:    "leased_writes",
+		WriteMode: "leased_writes", Mode: ModeBidirectional,
 		RepositoryID: "repository", AssignmentID: "assignment", EnvironmentID: "environment",
-		HelperID: "helper", WarningRevision: "warning", KeyVersion: 1,
+		HelperID: "helper", WarningRevision: "warning",
 		HelperGeneration: 1,
-		AgeRecipient:     identity.Recipient().String(), AgeIdentities: identity.String(),
 		Policy: RuntimePolicy{
-			Format: "paperboat-chezmoi-age-v1", Revision: "policy",
-			Includes:            []string{".bashrc"},
-			MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
-			MaxFileBytes:        1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
+			Format: "paperboat-config-plaintext-v1", Revision: "policy",
+			ManifestContract: ManifestContractVersion, ManifestMaxBytes: DefaultManifestMaxBytes,
+			ManifestMaxLines: DefaultManifestMaxLines, ManifestMaxPatternBytes: DefaultManifestMaxPatternBytes,
+			MaxFileBytes: 1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
 			MinimumPushInterval: time.Minute, MaximumDirtyDelay: time.Minute,
 			RemotePollInterval: time.Hour, RetryLimit: 1, ShutdownFlushTimeout: time.Second, SummaryLimit: 10,
 		},
@@ -92,7 +85,7 @@ func TestEngineRunsInitialSyncAndBoundedShutdownFlush(t *testing.T) {
 	}
 }
 
-func TestEngineAcknowledgesRotatedKeyOnlyAfterSuccessfulSync(t *testing.T) {
+func TestEngineRestoresAndAdvancesSyncRevision(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -101,31 +94,26 @@ func TestEngineAcknowledgesRotatedKeyOnlyAfterSuccessfulSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	descriptor := RuntimeDescriptor{
-		WriteMode: "leased_writes", RepositoryID: "repository", AssignmentID: "assignment",
+		WriteMode: "leased_writes", Mode: ModeBidirectional, RepositoryID: "repository", AssignmentID: "assignment",
 		EnvironmentID: "environment", HelperID: "helper", WarningRevision: "warning",
-		KeyVersion: 2, HelperGeneration: 1, AgeRecipient: identity.Recipient().String(),
-		AgeIdentities: identity.String(),
+		HelperGeneration: 1,
 		Policy: RuntimePolicy{
-			Format: "paperboat-chezmoi-age-v1", Revision: "policy",
-			Includes:            []string{".bashrc"},
-			MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
-			MaxFileBytes:        1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
+			Format: "paperboat-config-plaintext-v1", Revision: "policy",
+			ManifestContract: ManifestContractVersion, ManifestMaxBytes: DefaultManifestMaxBytes,
+			ManifestMaxLines: DefaultManifestMaxLines, ManifestMaxPatternBytes: DefaultManifestMaxPatternBytes,
+			MaxFileBytes: 1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
 			MinimumPushInterval: time.Minute, MaximumDirtyDelay: time.Minute,
 			RemotePollInterval: time.Hour, RetryLimit: 1, ShutdownFlushTimeout: time.Second, SummaryLimit: 10,
 		},
 	}
 	statusPath := filepath.Join(state, "status.json")
 	if err := WriteStatus(statusPath, Status{
-		State: "healthy", RepositoryID: descriptor.RepositoryID, AssignmentID: descriptor.AssignmentID,
+		State: "healthy", Mode: descriptor.Mode, RepositoryID: descriptor.RepositoryID, AssignmentID: descriptor.AssignmentID,
 		EnvironmentID: descriptor.EnvironmentID, HelperID: descriptor.HelperID,
 		HelperGeneration: descriptor.HelperGeneration, WarningRevision: descriptor.WarningRevision,
-		PolicyRevision: descriptor.Policy.Revision, KeyVersion: 1, SyncRevision: 7, UpdatedAt: now,
+		PolicyRevision: descriptor.Policy.Revision, SyncRevision: 7, UpdatedAt: now,
 	}, descriptor.Policy.SummaryLimit); err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +125,8 @@ func TestEngineAcknowledgesRotatedKeyOnlyAfterSuccessfulSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if engine.status.KeyVersion != 1 || engine.status.SyncRevision != 7 {
-		t.Fatalf("restored status = %#v, want last proven key version and revision", engine.status)
+	if engine.status.SyncRevision != 7 {
+		t.Fatalf("restored status = %#v, want last proven revision", engine.status)
 	}
 	if err := engine.Apply(context.Background()); err != nil {
 		t.Fatal(err)
@@ -147,30 +135,25 @@ func TestEngineAcknowledgesRotatedKeyOnlyAfterSuccessfulSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.KeyVersion != 2 || status.State != "healthy" || status.SyncRevision != 8 {
+	if status.State != "healthy" || status.SyncRevision != 8 {
 		t.Fatalf("acknowledged status = %#v", status)
 	}
 }
 
-func TestEngineDoesNotAcknowledgeRotatedKeyAfterFailedSync(t *testing.T) {
+func TestEngineRecordsFailedSyncRevisionWithoutSuccess(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
 	descriptor := RuntimeDescriptor{
-		WriteMode: "leased_writes", RepositoryID: "repository", AssignmentID: "assignment",
+		WriteMode: "leased_writes", Mode: ModeBidirectional, RepositoryID: "repository", AssignmentID: "assignment",
 		EnvironmentID: "environment", HelperID: "helper", WarningRevision: "warning",
-		KeyVersion: 2, HelperGeneration: 1, AgeRecipient: identity.Recipient().String(),
-		AgeIdentities: identity.String(),
+		HelperGeneration: 1,
 		Policy: RuntimePolicy{
-			Format: "paperboat-chezmoi-age-v1", Revision: "policy",
-			Includes:            []string{".bashrc"},
-			MandatoryExclusions: append([]string(nil), requiredMandatoryExclusions...),
-			MaxFileBytes:        1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
+			Format: "paperboat-config-plaintext-v1", Revision: "policy",
+			ManifestContract: ManifestContractVersion, ManifestMaxBytes: DefaultManifestMaxBytes,
+			ManifestMaxLines: DefaultManifestMaxLines, ManifestMaxPatternBytes: DefaultManifestMaxPatternBytes,
+			MaxFileBytes: 1 << 20, MaxBatchBytes: 2 << 20, Debounce: time.Second,
 			MinimumPushInterval: time.Minute, MaximumDirtyDelay: time.Minute,
 			RemotePollInterval: time.Hour, RetryLimit: 1, ShutdownFlushTimeout: time.Second, SummaryLimit: 10,
 		},
@@ -184,7 +167,7 @@ func TestEngineDoesNotAcknowledgeRotatedKeyAfterFailedSync(t *testing.T) {
 	if err := engine.Apply(context.Background()); !errors.Is(err, ErrRemoteRevisionChanged) {
 		t.Fatalf("error = %v", err)
 	}
-	if engine.status.KeyVersion != 0 {
-		t.Fatalf("failed sync acknowledged key version %d", engine.status.KeyVersion)
+	if engine.status.SyncRevision != 1 || engine.status.State != "error" || engine.status.LastSuccessfulAt != nil {
+		t.Fatalf("failed sync status = %#v", engine.status)
 	}
 }

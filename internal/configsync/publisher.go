@@ -102,8 +102,9 @@ func NewPublisher(config PublisherConfig) (*Publisher, error) {
 }
 
 // Sync performs exactly one publication attempt. It never retries a push. A
-// changed head is reconciled under a newly acquired lease, conflicts stop
-// publication, and an ambiguous push is resolved only by remote observation.
+// changed head is reconciled under a newly acquired lease, conflicted paths are
+// omitted by the reconciler, and an ambiguous push is resolved only by remote
+// observation.
 func (p *Publisher) Sync(ctx context.Context, _ string) (result PublishResult, resultErr error) {
 	remote, err := p.repository.Fetch(ctx)
 	if err != nil {

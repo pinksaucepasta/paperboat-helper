@@ -276,7 +276,7 @@ func signedBootstrapArtifacts(t *testing.T, artifactURL string, body []byte) (bo
 	}
 	sign := func(kind string) bootstrap.ArtifactManifest {
 		digest := sha256.Sum256(body)
-		manifest := bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV2, Kind: kind, Version: "test", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: artifactURL, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
+		manifest := bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV1, Kind: kind, Version: "test", Platform: runtime.GOOS, Architecture: runtime.GOARCH, URL: artifactURL, ByteLength: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}
 		payload, err := json.Marshal(struct {
 			Architecture string `json:"architecture"`
 			ByteLength   int64  `json:"byte_length"`

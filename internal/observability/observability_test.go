@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pinksaucepasta/paperboat-helper/internal/health"
+	"github.com/pinksaucepasta/paperboat-helper/internal/protocol"
 )
 
 func TestMetricsHandlerRendersDeterministicPrometheusText(t *testing.T) {
@@ -109,9 +110,34 @@ func TestDefaultMetricVocabularyHasFixedCardinality(t *testing.T) {
 	}
 }
 
+func TestTerminalCompressionMetricsUseOnlyBoundedLabels(t *testing.T) {
+	_, _ = protocol.EncodeTerminalOutputAdaptive(protocol.TerminalOutputFrame{Channel: protocol.TerminalStdout, StreamID: 1, Data: []byte("ok")}, nil)
+	_, _ = protocol.EncodeTerminalOutputAdaptive(protocol.TerminalOutputFrame{Channel: protocol.TerminalStdout, StreamID: 1, Data: bytes.Repeat([]byte("agent output\r\n"), 200)}, nil)
+	registry, err := NewRegistry(DefaultDescriptors())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRaw, foundZstd, foundBytes := false, false, false
+	for _, series := range registry.Snapshot() {
+		switch series.Name {
+		case "paperboat_helper_terminal_compression_frames_total":
+			if len(series.Labels) != 2 {
+				t.Fatalf("labels=%v", series.Labels)
+			}
+			foundRaw = foundRaw || series.Labels["encoding"] == "raw" && series.Labels["decision"] == "small" && series.Value > 0
+			foundZstd = foundZstd || series.Labels["encoding"] == "zstd" && series.Labels["decision"] == "compressed" && series.Value > 0
+		case "paperboat_helper_terminal_compression_bytes_total":
+			foundBytes = foundBytes || series.Labels["kind"] == "encoded" && series.Value > 0
+		}
+	}
+	if !foundRaw || !foundZstd || !foundBytes {
+		t.Fatalf("raw=%v zstd=%v bytes=%v", foundRaw, foundZstd, foundBytes)
+	}
+}
+
 func TestDiagnosticsAreBoundedAndRejectPrivateFields(t *testing.T) {
 	checked := time.Now().UTC()
-	snapshot := health.Snapshot{Live: true, Version: "1.0.0", CheckedAt: checked, Capabilities: map[string]health.Capability{"terminal.v2": {State: health.Ready}}}
+	snapshot := health.Snapshot{Live: true, Version: "1.0.0", CheckedAt: checked, Capabilities: map[string]health.Capability{"terminal.v1": {State: health.Ready}}}
 	encoded, err := BuildDiagnostics("1.0.0", "byod", snapshot, map[string]uint64{"attachment_bytes": 2}, []string{"req_1"}, 4096)
 	if err != nil {
 		t.Fatal(err)

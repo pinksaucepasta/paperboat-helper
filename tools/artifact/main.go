@@ -20,7 +20,7 @@ import (
 	"github.com/pinksaucepasta/paperboat-helper/internal/binarytarget"
 )
 
-const schema = "paperboat.helper-artifact/v2"
+const schema = "paperboat.helper-artifact/v1"
 
 type manifest struct {
 	Schema       string `json:"schema"`

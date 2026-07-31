@@ -122,8 +122,8 @@ func TestProtocolAllowsOnlyPairedSignedUpdateManifests(t *testing.T) {
 	activator := &fakeUpdateActivator{}
 	server := testServer(t, os.Getuid(), &fakeApplier{})
 	server.config.Updates = activator
-	worker := &bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV2, Kind: bootstrap.ArtifactKindWorker, Version: "2026.07.26"}
-	host := &bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV2, Kind: bootstrap.ArtifactKindHostService, Version: worker.Version}
+	worker := &bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV1, Kind: bootstrap.ArtifactKindWorker, Version: "2026.07.26"}
+	host := &bootstrap.ArtifactManifest{Schema: bootstrap.ArtifactSchemaV1, Kind: bootstrap.ArtifactKindHostService, Version: worker.Version}
 	response := requestServer(t, server, Request{Schema: ProtocolV1, Operation: "activate_update", WorkerArtifact: worker, HostServiceArtifact: host})
 	if response.ErrorCode != "" || response.UpdateVersion != worker.Version || activator.worker.Kind != bootstrap.ArtifactKindWorker || activator.host.Kind != bootstrap.ArtifactKindHostService {
 		t.Fatalf("response=%+v activator=%+v", response, activator)
